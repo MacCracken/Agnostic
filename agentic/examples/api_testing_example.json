@@ -1,0 +1,112 @@
+# API Testing Example
+
+{
+  "title": "REST API Testing Suite",
+  "description": "Comprehensive testing of REST API endpoints including authentication, data validation, error handling, and performance",
+  "business_goals": "Ensure API reliability, security, and performance with 99.99% uptime and sub-200ms response times",
+  "application_context": {
+    "application_type": "api_service",
+    "features": [
+      "user_authentication",
+      "resource_crud",
+      "data_validation",
+      "error_handling",
+      "rate_limiting",
+      "pagination",
+      "filtering",
+      "sorting"
+    ],
+    "endpoints": [
+      "/api/auth/login",
+      "/api/auth/logout", 
+      "/api/users",
+      "/api/users/{id}",
+      "/api/products",
+      "/api/products/{id}",
+      "/api/orders",
+      "/api/orders/{id}"
+    ],
+    "user_roles": ["anonymous", "user", "admin", "service_account"],
+    "integrations": [
+      "authentication_service",
+      "database",
+      "cache_layer",
+      "logging_service"
+    ],
+    "risk_areas": [
+      "authentication",
+      "data_integrity", 
+      "performance",
+      "security",
+      "rate_limiting"
+    ]
+  },
+  "test_requirements": {
+    "functional_testing": {
+      "authentication": [
+        "Valid credentials login",
+        "Invalid credentials rejection",
+        "Token refresh flow",
+        "Session timeout",
+        "Permission validation"
+      ],
+      "crud_operations": [
+        "Create resource validation",
+        "Read resource access",
+        "Update resource permissions",
+        "Delete resource restrictions"
+      ],
+      "data_validation": [
+        "Required field validation",
+        "Data type validation",
+        "Format validation (email, phone)",
+        "Business rule validation"
+      ]
+    },
+    "non_functional_testing": {
+      "performance": [
+        "Response time benchmarks",
+        "Throughput testing",
+        "Concurrent request handling",
+        "Load testing"
+      ],
+      "security": [
+        "SQL injection prevention",
+        "XSS protection",
+        "Authentication bypass testing",
+        "Rate limiting effectiveness",
+        "Data encryption verification"
+      ]
+    }
+  },
+  "acceptance_criteria": [
+    "All endpoints respond within 200ms",
+    "Authentication success rate > 99.9%",
+    "Zero security vulnerabilities",
+    "Rate limiting prevents abuse",
+    "Error responses are properly formatted"
+  ],
+  "priority_scenarios": [
+    {
+      "id": "api_auth_001",
+      "name": "Authentication Endpoint Security",
+      "priority": "critical",
+      "type": "security",
+      "assigned_to": "senior"
+    },
+    {
+      "id": "api_perf_001", 
+      "name": "API Performance Under Load",
+      "priority": "high",
+      "type": "performance",
+      "assigned_to": "senior"
+    },
+    {
+      "id": "api_crud_001",
+      "name": "CRUD Operations Validation",
+      "priority": "high",
+      "type": "functional",
+      "assigned_to": "junior"
+    }
+  ]
+}

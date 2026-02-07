@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - qa-network
+    volumes:
+      - redis_data:/data
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - qa-network
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  qa-manager:
+    build:
+      context: .
+      dockerfile: agents/manager/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - AGENT_ROLE=manager
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - qa-network
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./logs:/app/logs
+
+  senior-qa:
+    build:
+      context: .
+      dockerfile: agents/senior/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - AGENT_ROLE=senior
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - qa-network
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./advanced_testing:/app/advanced_testing
+      - ./logs:/app/logs
+
+  junior-qa:
+    build:
+      context: .
+      dockerfile: agents/junior/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - AGENT_ROLE=junior
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - rabbitmq
+    networks:
+      - qa-network
+    volumes:
+      - ./agents:/app/agents
+      - ./config:/app/config
+      - ./examples:/app/examples
+      - ./logs:/app/logs
+
+  webgui:
+    build:
+      context: .
+      dockerfile: webgui/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - WEBGUI_HOST=0.0.0.0
+      - WEBGUI_PORT=8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - redis
+      - qa-manager
+      - senior-qa
+      - junior-qa
+    networks:
+      - qa-network
+    volumes:
+      - ./webgui:/app/webgui
+      - ./agents:/app/agents
+      - ./logs:/app/logs
+
+networks:
+  qa-network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  rabbitmq_data:

@@ -1,0 +1,170 @@
+{
+  "title": "E-commerce Checkout Flow Testing",
+  "description": "Comprehensive testing of the e-commerce checkout process including payment integration, user authentication, and order management",
+  "business_goals": "Ensure 99.9% conversion rate with zero payment failures and seamless user experience",
+  "application_context": {
+    "application_type": "e-commerce",
+    "features": [
+      "user_authentication",
+      "product_catalog",
+      "shopping_cart",
+      "checkout_process",
+      "payment_integration",
+      "order_management",
+      "user_profile",
+      "inventory_management"
+    ],
+    "user_journeys": [
+      "authentication_flow",
+      "browse_products",
+      "add_to_cart",
+      "checkout_journey",
+      "payment_processing",
+      "order_confirmation"
+    ],
+    "user_roles": ["guest", "customer", "premium_customer", "admin"],
+    "integrations": [
+      "payment_gateway",
+      "email_service",
+      "inventory_system",
+      "shipping_calculator"
+    ],
+    "risk_areas": [
+      "authentication",
+      "payment_processing",
+      "data_integrity",
+      "performance",
+      "security"
+    ]
+  },
+  "test_requirements": {
+    "functional_testing": {
+      "user_authentication": [
+        "Valid login scenarios",
+        "Invalid password handling",
+        "Session management",
+        "Password reset flow",
+        "Account registration"
+      ],
+      "shopping_cart": [
+        "Add items to cart",
+        "Update quantities",
+        "Remove items",
+        "Cart persistence",
+        "Apply discount codes"
+      ],
+      "checkout_process": [
+        "Shipping address validation",
+        "Billing information",
+        "Payment method selection",
+        "Order summary accuracy",
+        "Terms acceptance"
+      ],
+      "payment_integration": [
+        "Credit card processing",
+        "PayPal integration",
+        "Apple Pay support",
+        "Payment failure handling",
+        "Refund processing"
+      ]
+    },
+    "non_functional_testing": {
+      "performance": [
+        "Page load times",
+        "Checkout completion time",
+        "Concurrent user handling",
+        "Database query optimization"
+      ],
+      "security": [
+        "SQL injection prevention",
+        "XSS protection",
+        "CSRF token validation",
+        "Payment data encryption",
+        "Session security"
+      ],
+      "usability": [
+        "Mobile responsiveness",
+        "Accessibility compliance",
+        "User experience flow",
+        "Error message clarity"
+      ]
+    }
+  },
+  "acceptance_criteria": [
+    "Users can complete checkout in under 3 minutes",
+    "Payment processing success rate > 99.5%",
+    "All pages load within 2 seconds",
+    "Mobile checkout conversion rate > 80%",
+    "Zero security vulnerabilities in payment flow",
+    "Cart abandonment rate < 30%"
+  ],
+  "priority_scenarios": [
+    {
+      "id": "checkout_001",
+      "name": "Complete Checkout Flow",
+      "priority": "critical",
+      "type": "functional",
+      "assigned_to": "senior",
+      "description": "End-to-end checkout process from cart to order confirmation"
+    },
+    {
+      "id": "payment_001", 
+      "name": "Payment Processing",
+      "priority": "critical",
+      "type": "integration",
+      "assigned_to": "senior",
+      "description": "Payment gateway integration with multiple payment methods"
+    },
+    {
+      "id": "auth_001",
+      "name": "User Authentication",
+      "priority": "high", 
+      "type": "security",
+      "assigned_to": "senior",
+      "description": "Secure user login and session management"
+    },
+    {
+      "id": "cart_001",
+      "name": "Shopping Cart Management",
+      "priority": "high",
+      "type": "functional", 
+      "assigned_to": "junior",
+      "description": "Cart operations and persistence"
+    },
+    {
+      "id": "mobile_001",
+      "name": "Mobile Checkout",
+      "priority": "medium",
+      "type": "usability",
+      "assigned_to": "junior", 
+      "description": "Mobile-responsive checkout experience"
+    }
+  ],
+  "test_data_requirements": {
+    "user_data": {
+      "type": "user",
+      "count": 50,
+      "include_custom_fields": true,
+      "required_fields": ["email", "password", "first_name", "last_name"]
+    },
+    "product_data": {
+      "type": "product", 
+      "count": 100,
+      "categories": ["electronics", "clothing", "books", "home"],
+      "price_range": {"min": 10.99, "max": 999.99}
+    },
+    "payment_data": {
+      "type": "transaction",
+      "count": 200,
+      "payment_methods": ["credit_card", "paypal", "apple_pay"],
+      "amount_range": {"min": 1.00, "max": 5000.00}
+    }
+  },
+  "success_metrics": {
+    "test_coverage": "> 95%",
+    "automation_rate": "> 90%", 
+    "pass_rate": "> 98%",
+    "execution_time": "< 30 minutes",
+    "defect_detection_rate": "> 95%"
+  }
+}

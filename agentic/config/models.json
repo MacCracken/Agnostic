@@ -1,0 +1,82 @@
+{
+  "providers": {
+    "openai": {
+      "type": "openai",
+      "name": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "${OPENAI_API_KEY}",
+      "model": "${OPENAI_MODEL:-gpt-4}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "enabled": true
+    },
+    "anthropic": {
+      "type": "anthropic",
+      "name": "Anthropic Claude",
+      "base_url": "https://api.anthropic.com/v1",
+      "api_key": "${ANTHROPIC_API_KEY}",
+      "model": "${ANTHROPIC_MODEL:-claude-3-sonnet-20240229}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "enabled": false
+    },
+    "google": {
+      "type": "google",
+      "name": "Google Gemini",
+      "base_url": "https://generativelanguage.googleapis.com/v1",
+      "api_key": "${GOOGLE_API_KEY}",
+      "model": "${GOOGLE_MODEL:-gemini-pro}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "enabled": false
+    },
+    "ollama": {
+      "type": "local",
+      "provider_type": "ollama",
+      "name": "Ollama Local",
+      "base_url": "${OLLAMA_BASE_URL:-http://localhost:11434}",
+      "model": "${OLLAMA_MODEL:-llama2}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "stream": false,
+      "enabled": false
+    },
+    "lm_studio": {
+      "type": "local",
+      "provider_type": "lm_studio",
+      "name": "LM Studio",
+      "base_url": "${LM_STUDIO_BASE_URL:-http://localhost:1234}",
+      "model": "${LM_STUDIO_MODEL:-local-model}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "stream": false,
+      "enabled": false
+    },
+    "custom_local": {
+      "type": "local",
+      "provider_type": "custom",
+      "name": "Custom Local LLM",
+      "base_url": "${CUSTOM_LLM_BASE_URL:-http://localhost:8080}",
+      "model": "${CUSTOM_LLM_MODEL:-custom-model}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer ${CUSTOM_LLM_API_KEY}"
+      },
+      "enabled": false
+    }
+  },
+  "primary_provider": "openai",
+  "fallback_providers": ["ollama"],
+  "routing": {
+    "strategy": "primary_first",
+    "retry_attempts": 2,
+    "timeout_seconds": 30
+  },
+  "usage_tracking": {
+    "enabled": true,
+    "log_requests": false,
+    "track_tokens": true
+  }
+}
