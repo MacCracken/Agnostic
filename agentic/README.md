@@ -54,7 +54,7 @@ A containerized, multi-agent QA system powered by CrewAI that orchestrates intel
 
 ```bash
 git clone <repository-url>
-cd agentic-qa-system
+cd agentic
 ```
 
 ### 2. Configure Environment
