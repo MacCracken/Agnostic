@@ -165,7 +165,7 @@ class QAManagerAgent:
             "session_id": session_id,
             "test_plan": test_plan,
             "status": "delegated",
-            "next_steps": ["Waiting for Senior QA analysis", "Junior QA execution pending"]
+            "next_steps": ["Waiting for Senior QA analysis", "Junior QA execution pending", "QA Analyst reliability/security/performance assessment pending"]
         }
     
     def _parse_decomposition_result(self, result: Any) -> Dict[str, Any]:
@@ -176,7 +176,18 @@ class QAManagerAgent:
                 {"id": "data_002", "name": "Data Validation", "priority": "high", "assigned_to": "junior"},
                 {"id": "perf_003", "name": "Performance Testing", "priority": "medium", "assigned_to": "senior"},
                 {"id": "sec_004", "name": "Security Assessment", "priority": "critical", "assigned_to": "senior"},
-                {"id": "ui_005", "name": "UI Compatibility", "priority": "low", "assigned_to": "junior"}
+                {"id": "ui_005", "name": "UI Compatibility", "priority": "low", "assigned_to": "junior"},
+                {"id": "rel_006", "name": "Site Reliability Assessment", "priority": "high", "assigned_to": "sre"},
+                {"id": "sec_007", "name": "Security Posture Analysis", "priority": "critical", "assigned_to": "analyst"},
+                {"id": "perf_008", "name": "Performance Profiling", "priority": "high", "assigned_to": "analyst"},
+                {"id": "db_009", "name": "Database Reliability Testing", "priority": "high", "assigned_to": "sre"},
+                {"id": "infra_010", "name": "Infrastructure Health Check", "priority": "medium", "assigned_to": "sre"},
+                {"id": "a11y_011", "name": "Accessibility Audit", "priority": "high", "assigned_to": "accessibility"},
+                {"id": "api_012", "name": "API Integration Testing", "priority": "high", "assigned_to": "api"},
+                {"id": "mob_013", "name": "Mobile/Device Testing", "priority": "medium", "assigned_to": "mobile"},
+                {"id": "comp_014", "name": "Compliance & Regulatory Audit", "priority": "critical", "assigned_to": "compliance"},
+                {"id": "chaos_015", "name": "Chaos & Resilience Testing", "priority": "high", "assigned_to": "chaos"},
+                {"id": "visual_016", "name": "Visual Regression Testing", "priority": "medium", "assigned_to": "junior"}
             ],
             "acceptance_criteria": [
                 "Response time < 2 seconds",
@@ -211,6 +222,48 @@ class QAManagerAgent:
                     'junior_qa.execute_regression_test',
                     args=[task_data],
                     queue='junior_qa'
+                )
+            elif scenario.get("assigned_to") == "analyst":
+                self.celery_app.send_task(
+                    'qa_analyst.analyze_and_report',
+                    args=[task_data],
+                    queue='qa_analyst'
+                )
+            elif scenario.get("assigned_to") == "sre":
+                self.celery_app.send_task(
+                    'sre_agent.assess_reliability',
+                    args=[task_data],
+                    queue='sre_agent'
+                )
+            elif scenario.get("assigned_to") == "accessibility":
+                self.celery_app.send_task(
+                    'accessibility_agent.run_accessibility_audit',
+                    args=[task_data],
+                    queue='accessibility_agent'
+                )
+            elif scenario.get("assigned_to") == "api":
+                self.celery_app.send_task(
+                    'api_agent.run_api_tests',
+                    args=[task_data],
+                    queue='api_agent'
+                )
+            elif scenario.get("assigned_to") == "mobile":
+                self.celery_app.send_task(
+                    'mobile_agent.run_mobile_tests',
+                    args=[task_data],
+                    queue='mobile_agent'
+                )
+            elif scenario.get("assigned_to") == "compliance":
+                self.celery_app.send_task(
+                    'compliance_agent.run_compliance_audit',
+                    args=[task_data],
+                    queue='compliance_agent'
+                )
+            elif scenario.get("assigned_to") == "chaos":
+                self.celery_app.send_task(
+                    'chaos_agent.run_chaos_tests',
+                    args=[task_data],
+                    queue='chaos_agent'
                 )
     
     async def perform_fuzzy_verification(self, session_id: str, test_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -267,6 +320,24 @@ class QAManagerAgent:
             "final_status": "approved_with_recommendations"
         }
     
+    async def request_analyst_report(self, session_id: str) -> None:
+        """Trigger QA Analyst comprehensive report after other agents complete"""
+        logger.info(f"Requesting analyst comprehensive report for session: {session_id}")
+        task_data = {
+            "session_id": session_id,
+            "scenario": {
+                "id": "comprehensive_report",
+                "name": "Comprehensive QA Report",
+                "priority": "high"
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        self.celery_app.send_task(
+            'qa_analyst.analyze_and_report',
+            args=[task_data],
+            queue='qa_analyst'
+        )
+
     def get_session_status(self, session_id: str) -> Dict[str, Any]:
         """Get current status of a testing session"""
         requirements = self.redis_client.get(f"session:{session_id}:requirements")

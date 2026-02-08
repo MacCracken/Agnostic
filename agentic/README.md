@@ -4,10 +4,17 @@ A containerized, multi-agent QA system powered by CrewAI that orchestrates intel
 
 ## 🌟 Key Features
 
-### 🏗️ Multi-Agent Architecture
+### 🏗️ Multi-Agent Architecture (10 Agents)
 - **QA Manager (Orchestrator)**: Decomposes requirements, delegates tasks, performs fuzzy verification
 - **Senior QA Engineer**: Self-healing scripts, complex edge-case analysis, model-based testing (MBT)
-- **Junior QA Worker**: Regression testing, automated root cause detection, synthetic data generation
+- **Junior QA Worker**: Regression testing, automated root cause detection, synthetic data generation, visual regression
+- **QA Analyst**: Data organization & reporting, security assessment, performance profiling
+- **Site Reliability Engineer**: Reliability monitoring, database testing, infrastructure health, incident response
+- **Accessibility Tester**: WCAG 2.1 compliance, screen reader compatibility, keyboard navigation, color contrast
+- **API Integration Engineer**: Schema validation, contract testing, versioning, load testing
+- **Mobile/Device QA**: Responsive design, device compatibility, network conditions, mobile UX
+- **Compliance Tester**: GDPR, PCI DSS, audit trails, policy enforcement
+- **Chaos Engineer**: Service failure injection, network partitions, resource exhaustion, recovery validation
 
 ### 🚀 Advanced Testing Capabilities
 - **Agentic Self-Healing**: Computer vision + semantic analysis for failed UI selectors
@@ -23,22 +30,32 @@ A containerized, multi-agent QA system powered by CrewAI that orchestrates intel
 ## 📋 System Architecture
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   QA Manager    │    │  Senior QA Eng  │    │  Junior QA Wrk  │
-│   (Orchestrator)│    │   (Expert)      │    │   (Executor)   │
-└─────────┬───────┘    └─────────┬───────┘    └─────────┬───────┘
-          │                      │                      │
-          └──────────────────────┼──────────────────────┘
-                                 │
-                    ┌─────────────┴─────────────┐
-                    │   Redis + RabbitMQ Bus    │
-                    │   (State & Communication) │
-                    └─────────────┬─────────────┘
-                                 │
-                    ┌─────────────┴─────────────┐
-                    │      Chainlit WebGUI     │
-                    │   (Human-in-the-Loop)     │
-                    └───────────────────────────┘
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│  QA Manager  │ │ Senior QA Eng│ │ Junior QA Wrk│ │  QA Analyst  │
+│ (Orchestrator│ │   (Expert)   │ │  (Executor)  │ │  (Analyst)   │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │                │
+┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐
+│     SRE      │ │ Accessibility│ │ API Engineer │ │ Mobile QA    │
+│  (Reliab.)   │ │  (A11y)      │ │  (API)       │ │ (Device)     │
+└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+       │                │                │                │
+┌──────┴───────┐ ┌──────┴───────┐       │                │
+│  Compliance  │ │ Chaos Eng.   │       │                │
+│  (Regulatory)│ │ (Resilience) │       │                │
+└──────┬───────┘ └──────┬───────┘       │                │
+       │                │                │                │
+       └────────────────┼────────────────┼────────────────┘
+                        │                │
+                    ┌───┴────────────────┴───┐
+                    │   Redis + RabbitMQ Bus │
+                    │  (State & Communication)│
+                    └───────────┬────────────┘
+                                │
+                    ┌───────────┴────────────┐
+                    │    Chainlit WebGUI     │
+                    │   (Human-in-the-Loop)  │
+                    └────────────────────────┘
 ```
 
 ## 🛠️ Prerequisites
@@ -115,6 +132,17 @@ The Chainlit-based WebGUI provides:
 - **Describe testing requirements**: Start a new test plan (e.g., "Test the e-commerce checkout flow")
 - **'status'**: Check current session progress
 - **'trace'**: View detailed reasoning trace and agent collaboration
+- **'report'**: View comprehensive QA analyst report
+- **'security'**: View security assessment results
+- **'performance'**: View performance profiling results
+- **'reliability'**: View site reliability assessment
+- **'database'**: View database reliability assessment
+- **'infrastructure'**: View infrastructure health report
+- **'accessibility'**: View accessibility audit
+- **'api'**: View API integration tests
+- **'mobile'**: View mobile/device tests
+- **'compliance'**: View compliance audit (GDPR/PCI)
+- **'chaos'**: View chaos/resilience tests
 - **'help'**: Show available commands
 
 ### Agent Workflows
@@ -136,6 +164,48 @@ The Chainlit-based WebGUI provides:
 2. **Root Cause Detection**: Automatically analyzes test failures
 3. **Synthetic Data Generation**: Creates realistic test datasets
 4. **Test Optimization**: Prioritizes execution order based on risk
+
+#### QA Analyst (Analyst)
+1. **Data Organization & Reporting**: Aggregates results from all agents into structured reports
+2. **Security Assessment**: Header inspection, TLS analysis, OWASP Top 10 indicators
+3. **Performance Profiling**: Response time measurement, bottleneck detection, regression tracking
+4. **Comprehensive Reporting**: Cross-cutting analysis and release readiness assessment
+
+#### Site Reliability Engineer (SRE)
+1. **Reliability Monitoring**: Uptime, latency percentiles, SLA compliance, TLS checks
+2. **Database Testing**: Connection pools, transaction consistency, migration validation, query profiling
+3. **Infrastructure Health**: DNS resolution, service discovery, container health, resource monitoring
+4. **Incident Response**: Detection, runbook execution, escalation, post-mortem data collection
+
+#### Accessibility Tester (A11y)
+1. **WCAG Compliance**: Heading hierarchy, landmarks, form labels, alt text (AA/AAA)
+2. **Screen Reader**: ARIA validation, live regions, focus management, reading order
+3. **Keyboard Navigation**: Tab order, focus traps, shortcut conflicts, skip links
+4. **Color Contrast**: Ratio calculation, color blindness simulation (protanopia, deuteranopia, tritanopia)
+
+#### API Integration Engineer (API)
+1. **Schema Validation**: OpenAPI/Swagger spec validation, request/response schema checking
+2. **Contract Testing**: Consumer/provider verification, backward compatibility, breaking change detection
+3. **Versioning**: Version compatibility matrix, deprecation checks, sunset dates
+4. **Load Testing**: Endpoint-specific load testing, rate limit verification, timeout behavior
+
+#### Mobile/Device QA (Mobile)
+1. **Responsive Testing**: Breakpoint verification, viewport testing, touch target sizes (44x44px min)
+2. **Device Compatibility**: Device matrix testing, OS version compatibility
+3. **Network Conditions**: Throttling simulation (2G/3G/4G/WiFi), offline mode testing
+4. **Mobile UX**: Gesture testing, orientation changes, app lifecycle events
+
+#### Compliance Tester (Compliance)
+1. **GDPR**: Consent management, data handling, right to erasure, data portability
+2. **PCI DSS**: Payment flow security, cardholder data protection, encryption
+3. **Audit Trail**: Logging completeness, tamper detection, retention policies
+4. **Policy Enforcement**: Configurable compliance rules, violation detection, remediation tracking
+
+#### Chaos Engineer (Resilience)
+1. **Service Failure**: Dependency failure injection, circuit breaker testing, fallback validation
+2. **Network Partition**: Latency injection, packet loss simulation, DNS failure testing
+3. **Resource Exhaustion**: Memory pressure, CPU saturation, disk exhaustion
+4. **Recovery Validation**: MTTR measurement, data integrity after failure, auto-recovery verification
 
 ## 🔧 Advanced Configuration
 
@@ -309,15 +379,22 @@ docker-compose -f docker-compose.dev.yml up
 ```
 agentic-qa-system/
 ├── agents/                 # Agent implementations
-│   ├── manager/           # QA Manager agent
+│   ├── manager/           # QA Manager (Orchestrator)
 │   ├── senior/            # Senior QA Engineer
-│   └── junior/            # Junior QA Worker
+│   ├── junior/            # Junior QA Worker
+│   ├── analyst/           # QA Analyst
+│   ├── sre/               # Site Reliability Engineer
+│   ├── accessibility/     # Accessibility Tester
+│   ├── api/               # API Integration Engineer
+│   ├── mobile/            # Mobile/Device QA
+│   ├── compliance/        # Compliance & Regulatory Tester
+│   └── chaos/             # Chaos & Resilience Engineer
 ├── advanced_testing/     # Advanced testing modules
 ├── webgui/               # Chainlit web interface
 ├── config/               # Configuration files
 ├── examples/             # Example test scenarios
 ├── docs/                 # Documentation
-├── docker-compose.yml    # Container orchestration
+├── docker-compose.yml    # Container orchestration (13 services)
 └── requirements.txt      # Python dependencies
 ```
 

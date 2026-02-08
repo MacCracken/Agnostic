@@ -111,7 +111,14 @@ async def on_chat_start():
         "I'm your interface to a team of AI-powered QA agents:\n"
         "• **QA Manager**: Orchestrates test planning and verification\n"
         "• **Senior QA Engineer**: Handles complex testing and self-healing\n"
-        "• **Junior QA Worker**: Executes regression tests and data generation\n\n"
+        "• **Junior QA Worker**: Executes regression tests and data generation\n"
+        "• **QA Analyst**: Data reporting, security & performance analysis\n"
+        "• **Site Reliability Engineer**: Reliability monitoring, database testing, infrastructure health & incident response\n"
+        "• **Accessibility Tester**: WCAG compliance, screen reader compatibility, keyboard navigation & color contrast\n"
+        "• **API Integration Engineer**: Schema validation, contract testing, versioning & load testing\n"
+        "• **Mobile/Device QA**: Responsive design, device compatibility, network conditions & mobile UX\n"
+        "• **Compliance Tester**: GDPR, PCI DSS, audit trails & policy enforcement\n"
+        "• **Chaos Engineer**: Service failure injection, network partitions, resource exhaustion & recovery validation\n\n"
         "To get started, please:\n"
         "1. Upload a PR/feature document, or\n"
         "2. Describe your testing requirements\n\n"
@@ -231,6 +238,328 @@ async def on_message(message: cl.Message):
             
             await cl.Message(content=response).send()
     
+    elif user_input.lower() in ("report", "qa report"):
+        # Get analyst comprehensive report
+        report_data = gui_instance.redis_client.get(f"analyst:{session_id}:comprehensive_report")
+        if not report_data:
+            report_data = gui_instance.redis_client.get(f"analyst:{session_id}:report")
+
+        if report_data:
+            try:
+                report = json.loads(report_data)
+                response = "📊 **QA Analyst Report**\n\n"
+
+                if report.get("executive_summary"):
+                    response += f"**Executive Summary:** {report['executive_summary']}\n\n"
+                elif report.get("test_report", {}).get("executive_summary"):
+                    response += f"**Executive Summary:** {report['test_report']['executive_summary']}\n\n"
+
+                metrics = report.get("metrics") or report.get("test_report", {}).get("metrics")
+                if metrics:
+                    response += "**Metrics:**\n"
+                    response += f"• Pass Rate: {metrics.get('pass_rate', 'N/A')}%\n"
+                    response += f"• Failure Rate: {metrics.get('failure_rate', 'N/A')}%\n"
+                    response += f"• Coverage: {metrics.get('coverage', 'N/A')}%\n\n"
+
+                readiness = report.get("release_readiness")
+                if readiness:
+                    verdict_emoji = {"GO": "✅", "GO_WITH_WARNINGS": "⚠️", "NO_GO": "🚫"}.get(readiness.get("verdict"), "❓")
+                    response += f"**Release Readiness:** {verdict_emoji} {readiness.get('verdict', 'Unknown')}\n"
+                    for b in readiness.get("blockers", []):
+                        response += f"  🔴 {b}\n"
+                    for w in readiness.get("warnings", []):
+                        response += f"  🟡 {w}\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse report data.").send()
+        else:
+            await cl.Message(content="📝 No analyst report available yet.").send()
+
+    elif user_input.lower() in ("security", "security report"):
+        security_data = gui_instance.redis_client.get(f"analyst:{session_id}:security")
+        if security_data:
+            try:
+                sec = json.loads(security_data)
+                response = "🔒 **Security Assessment**\n\n"
+                response += f"**Score:** {sec.get('security_score', 'N/A')} | **Risk Level:** {sec.get('risk_level', 'N/A')}\n\n"
+
+                vulns = sec.get("vulnerabilities", [])
+                if vulns:
+                    response += f"**Vulnerabilities ({len(vulns)}):**\n"
+                    for v in vulns[:10]:
+                        sev_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(v.get("severity"), "⚪")
+                        response += f"  {sev_emoji} {v.get('description', 'Unknown')}\n"
+
+                recs = sec.get("recommendations", [])
+                if recs:
+                    response += "\n**Recommendations:**\n"
+                    for r in recs[:5]:
+                        response += f"  • {r}\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse security data.").send()
+        else:
+            await cl.Message(content="📝 No security assessment available yet.").send()
+
+    elif user_input.lower() in ("performance", "perf", "performance report"):
+        perf_data = gui_instance.redis_client.get(f"analyst:{session_id}:performance")
+        if perf_data:
+            try:
+                perf = json.loads(perf_data)
+                response = "⚡ **Performance Profile**\n\n"
+                response += f"**Grade:** {perf.get('performance_grade', 'N/A')}\n\n"
+
+                rt = perf.get("response_times", {})
+                response += "**Response Times:**\n"
+                response += f"  • Avg: {rt.get('avg_ms', 'N/A')}ms | P50: {rt.get('p50_ms', 'N/A')}ms\n"
+                response += f"  • P95: {rt.get('p95_ms', 'N/A')}ms | P99: {rt.get('p99_ms', 'N/A')}ms\n\n"
+
+                tp = perf.get("throughput", {})
+                response += f"**Throughput:** {tp.get('rps', 'N/A')} req/s\n\n"
+
+                bottlenecks = perf.get("bottlenecks", [])
+                if bottlenecks:
+                    response += "**Bottlenecks:**\n"
+                    for b in bottlenecks:
+                        response += f"  🔴 {b.get('component', 'Unknown')} — {b.get('evidence', '')}\n"
+
+                if perf.get("regression_detected"):
+                    response += "\n⚠️ **Performance regression detected**\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse performance data.").send()
+        else:
+            await cl.Message(content="📝 No performance profile available yet.").send()
+
+    elif user_input.lower() in ("reliability", "sre", "reliability report"):
+        rel_data = gui_instance.redis_client.get(f"sre:{session_id}:reliability")
+        if rel_data:
+            try:
+                rel = json.loads(rel_data)
+                health_emoji = {"healthy": "✅", "degraded": "⚠️", "unhealthy": "🚫"}.get(rel.get("health_status"), "❓")
+                response = "🏗️ **Site Reliability Assessment**\n\n"
+                response += f"**Health:** {health_emoji} {rel.get('health_status', 'Unknown')}\n"
+                response += f"**Uptime:** {rel.get('uptime_percentage', 'N/A')}%\n\n"
+
+                lat = rel.get("latency", {})
+                response += "**Latency:**\n"
+                response += f"  • P50: {lat.get('p50_ms', 'N/A')}ms | P95: {lat.get('p95_ms', 'N/A')}ms | P99: {lat.get('p99_ms', 'N/A')}ms\n\n"
+
+                sla = rel.get("sla_compliance", {})
+                sla_emoji = "✅" if sla.get("met") else "🚫"
+                response += f"**SLA Compliance:** {sla_emoji} {'Met' if sla.get('met') else 'Not Met'}\n"
+                for v in sla.get("violations", []):
+                    response += f"  🔴 {v}\n"
+
+                risks = rel.get("reliability_risks", [])
+                if risks:
+                    response += "\n**Risks:**\n"
+                    for r in risks:
+                        response += f"  ⚠️ {r.get('risk', str(r))}\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse reliability data.").send()
+        else:
+            await cl.Message(content="📝 No reliability assessment available yet.").send()
+
+    elif user_input.lower() in ("accessibility", "a11y", "accessibility report"):
+        a11y_data = gui_instance.redis_client.get(f"accessibility:{session_id}:audit")
+        if a11y_data:
+            try:
+                a11y = json.loads(a11y_data)
+                response = "♿ **Accessibility Audit**\n\n"
+                response += f"**Overall Score:** {a11y.get('overall_score', 'N/A')}%\n\n"
+
+                wcag = a11y.get("wcag_compliance", {})
+                response += f"**WCAG Compliance:** {wcag.get('achieved_level', 'N/A')} (score: {wcag.get('score', 'N/A')}%)\n"
+                response += f"  Violations: {wcag.get('violations_count', 0)}\n\n"
+
+                sr = a11y.get("screen_reader", {})
+                response += f"**Screen Reader:** {sr.get('compatibility_score', 'N/A')}% compatible\n"
+
+                kb = a11y.get("keyboard_navigation", {})
+                response += f"**Keyboard Navigation:** {kb.get('keyboard_score', 'N/A')}%\n"
+
+                color = a11y.get("color_contrast", {})
+                response += f"**Color Contrast:** {color.get('contrast_score', 'N/A')}%\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse accessibility data.").send()
+        else:
+            await cl.Message(content="📝 No accessibility audit available yet.").send()
+
+    elif user_input.lower() in ("api", "api report", "api testing"):
+        api_data = gui_instance.redis_client.get(f"api:{session_id}:tests")
+        if api_data:
+            try:
+                api = json.loads(api_data)
+                response = "🔌 **API Integration Tests**\n\n"
+
+                schema = api.get("schema_validation", {})
+                response += f"**Schema Validation:** {schema.get('score', 'N/A')}% ({schema.get('violations_count', 0)} violations)\n"
+
+                contract = api.get("contract_testing", {})
+                verification = contract.get("verification", {})
+                response += f"**Contract Testing:** {verification.get('passed', 0)}/{verification.get('total', 0)} passed\n"
+
+                versioning = api.get("versioning", {})
+                response += f"**Versioning:** {versioning.get('current_version', 'N/A')}\n"
+
+                load = api.get("load_testing", {})
+                response += f"**Load Testing:** {load.get('endpoints_tested', 0)} endpoints tested\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse API data.").send()
+        else:
+            await cl.Message(content="📝 No API integration tests available yet.").send()
+
+    elif user_input.lower() in ("mobile", "mobile report", "device"):
+        mobile_data = gui_instance.redis_client.get(f"mobile:{session_id}:tests")
+        if mobile_data:
+            try:
+                mob = json.loads(mobile_data)
+                response = "📱 **Mobile/Device Tests**\n\n"
+
+                resp_test = mob.get("responsive_testing", {})
+                response += f"**Responsive:** {resp_test.get('responsive_score', 'N/A')}% ({resp_test.get('breakpoints_tested', 0)} breakpoints)\n"
+
+                device = mob.get("device_compatibility", {})
+                response += f"**Device Compatibility:** {device.get('compatibility_rate', 'N/A')}%\n"
+
+                network = mob.get("network_conditions", {})
+                response += f"**Network Conditions:** {network.get('network_score', 'N/A')}%\n"
+
+                ux = mob.get("mobile_ux", {})
+                response += f"**Mobile UX:** {ux.get('ux_score', 'N/A')}%\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse mobile data.").send()
+        else:
+            await cl.Message(content="📝 No mobile/device tests available yet.").send()
+
+    elif user_input.lower() in ("compliance", "gdpr", "pci", "compliance report"):
+        comp_data = gui_instance.redis_client.get(f"compliance:{session_id}:audit")
+        if comp_data:
+            try:
+                comp = json.loads(comp_data)
+                response = "📋 **Compliance Audit**\n\n"
+
+                gdpr = comp.get("gdpr_compliance", {})
+                response += f"**GDPR:** {gdpr.get('gdpr_score', 'N/A')}% ({gdpr.get('violations_count', 0)} violations)\n"
+
+                pci = comp.get("pci_dss_compliance", {})
+                response += f"**PCI DSS:** {pci.get('pci_score', 'N/A')}% ({pci.get('violations_count', 0)} violations)\n"
+
+                audit = comp.get("audit_trail", {})
+                response += f"**Audit Trail:** {audit.get('audit_score', 'N/A')}%\n"
+
+                policy = comp.get("policy_enforcement", {})
+                response += f"**Policy Enforcement:** {policy.get('compliance_score', 'N/A')}%\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse compliance data.").send()
+        else:
+            await cl.Message(content="📝 No compliance audit available yet.").send()
+
+    elif user_input.lower() in ("chaos", "resilience", "chaos report"):
+        chaos_data = gui_instance.redis_client.get(f"chaos:{session_id}:tests")
+        if chaos_data:
+            try:
+                chaos = json.loads(chaos_data)
+                response = "💥 **Chaos & Resilience Tests**\n\n"
+
+                svc = chaos.get("service_failure", {})
+                response += f"**Service Failure:** {svc.get('resilience_score', 'N/A')}% resilient\n"
+
+                net = chaos.get("network_partition", {})
+                response += f"**Network Partition:** {net.get('network_resilience_score', 'N/A')}%\n"
+
+                res = chaos.get("resource_exhaustion", {})
+                response += f"**Resource Exhaustion:** {res.get('resource_resilience_score', 'N/A')}%\n"
+
+                rec = chaos.get("recovery_validation", {})
+                response += f"**Recovery:** {rec.get('recovery_score', 'N/A')}%\n"
+
+                mttr = rec.get("mttr", {})
+                if mttr:
+                    response += f"  MTTR: {mttr.get('measured_mttr_seconds', 'N/A')}s (target: {mttr.get('target_mttr_seconds', 'N/A')}s)\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse chaos data.").send()
+        else:
+            await cl.Message(content="📝 No chaos/resilience tests available yet.").send()
+
+    elif user_input.lower() in ("database", "db", "database report"):
+        db_data = gui_instance.redis_client.get(f"sre:{session_id}:database")
+        if db_data:
+            try:
+                db = json.loads(db_data)
+                health_emoji = {"healthy": "✅", "degraded": "⚠️", "unhealthy": "🚫"}.get(db.get("overall_health"), "❓")
+                response = "🗄️ **Database Reliability Assessment**\n\n"
+                response += f"**Type:** {db.get('db_type', 'N/A')} | **Health:** {health_emoji} {db.get('overall_health', 'Unknown')}\n\n"
+
+                pool = db.get("connection_pool", {})
+                response += "**Connection Pool:**\n"
+                response += f"  • Attempts: {pool.get('total_attempts', 'N/A')} | Successes: {pool.get('successes', 'N/A')} | Failures: {pool.get('failures', 'N/A')}\n"
+                response += f"  • Avg Connect: {pool.get('avg_connect_ms', 'N/A')}ms | P95: {pool.get('p95_connect_ms', 'N/A')}ms\n\n"
+
+                txn = db.get("transaction_consistency", {})
+                response += f"**Transaction Consistency:** {txn.get('scenarios_passed', 'N/A')}/{txn.get('scenarios_tested', 'N/A')} passed\n\n"
+
+                recs = db.get("recommendations", [])
+                if recs:
+                    response += "**Recommendations:**\n"
+                    for r in recs:
+                        response += f"  • {r}\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse database data.").send()
+        else:
+            await cl.Message(content="📝 No database assessment available yet.").send()
+
+    elif user_input.lower() in ("infrastructure", "infra", "infrastructure report"):
+        infra_data = gui_instance.redis_client.get(f"sre:{session_id}:infrastructure")
+        if infra_data:
+            try:
+                infra = json.loads(infra_data)
+                health_emoji = {"healthy": "✅", "degraded": "⚠️", "unhealthy": "🚫"}.get(infra.get("overall_health"), "❓")
+                response = "🏗️ **Infrastructure Health Report**\n\n"
+                response += f"**Overall Health:** {health_emoji} {infra.get('overall_health', 'Unknown')}\n\n"
+
+                dns = infra.get("dns_resolution", {})
+                response += f"**DNS Resolution:** {len(dns.get('resolved', []))} resolved, {len(dns.get('failures', []))} failed\n"
+
+                svc = infra.get("service_discovery", {})
+                response += f"**Services:** {len(svc.get('healthy', []))} healthy, {len(svc.get('unhealthy', []))} unhealthy\n\n"
+
+                issues = infra.get("issues", [])
+                if issues:
+                    response += "**Issues:**\n"
+                    for issue in issues:
+                        response += f"  ⚠️ {issue.get('type', 'unknown')}: {issue.get('detail', '')}\n"
+
+                recs = infra.get("recommendations", [])
+                if recs:
+                    response += "\n**Recommendations:**\n"
+                    for r in recs:
+                        response += f"  • {r}\n"
+
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse infrastructure data.").send()
+        else:
+            await cl.Message(content="📝 No infrastructure assessment available yet.").send()
+
     else:
         # General help message
         await cl.Message(
@@ -238,6 +567,17 @@ async def on_message(message: cl.Message):
             "• **Describe your testing requirements** - Start a new test plan\n"
             "• **'status'** - Check current session status\n"
             "• **'trace'** - View reasoning trace and agent collaboration\n"
+            "• **'report'** - View comprehensive QA analyst report\n"
+            "• **'security'** - View security assessment\n"
+            "• **'performance'** - View performance profile\n"
+            "• **'reliability'** - View site reliability assessment\n"
+            "• **'accessibility'** - View accessibility audit\n"
+            "• **'api'** - View API integration tests\n"
+            "• **'mobile'** - View mobile/device tests\n"
+            "• **'compliance'** - View compliance audit (GDPR/PCI)\n"
+            "• **'chaos'** - View chaos/resilience tests\n"
+            "• **'database'** - View database reliability assessment\n"
+            "• **'infrastructure'** - View infrastructure health report\n"
             "• **'help'** - Show this help message\n\n"
             "You can also upload a PR or feature document to get started!"
         ).send()
