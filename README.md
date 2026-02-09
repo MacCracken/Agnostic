@@ -1,4 +1,4 @@
-# OPENTEST: A AGENTIC QA SYSTEM
+# OPENTEST: AN AGENTIC QA SYSTEM
 
 A containerized, multi-agent QA system powered by CrewAI that orchestrates intelligent testing workflows with advanced self-healing, fuzzy verification, and risk-based prioritization capabilities.
 
