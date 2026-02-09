@@ -33,20 +33,20 @@ A containerized, multi-agent diagnostic system powered by CrewAI that orchestrat
 
 ```
                     ┌─────────────────────────┐
-                    │      QA Manager          │
-                    │     (Orchestrator)       │
+                    │      QA Manager         │
+                    │     (Orchestrator)      │
                     └───────────┬─────────────┘
                                 │
                     ┌───────────┴─────────────┐
-                    │       Sr QA Lead         │
-                    │   (Training & Oversight) │
+                    │       Sr QA Lead        │
+                    │  (Training & Oversight) │
                     └───────────┬─────────────┘
                                 │
         ┌───────────────────────┼───────────────────────┐
         │                       │                       │
 ┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
-│ Jr QA Lead 1  │     │    Jr QA Lead 2    │     │ Senior QA Eng │
-│ (Training)    │     │   (Task Fulfill.)  │     │   (Expert)    │
+│ Jr QA Lead 1  │     │    Jr QA Lead 2   │     │ Senior QA Eng │
+│ (Training)    │     │   (Task Fulfill.) │     │   (Expert)    │
 └───────┬───────┘     └─────────┬─────────┘     └───────┬───────┘
         │                       │                       │
 ┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
@@ -55,19 +55,19 @@ A containerized, multi-agent diagnostic system powered by CrewAI that orchestrat
 └───────┬───────┘     └─────────┬─────────┘     └───────┬───────┘
         │                       │                       │
 ┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
-│ Accessibility │     │   API Engineer     │     │  Mobile QA    │
-│   (A11y)      │     │     (API)          │     │   (Device)    │
+│ Accessibility │     │   API Engineer    │     │  Mobile QA    │
+│   (A11y)      │     │     (API)         │     │   (Device)    │
 └───────┬───────┘     └─────────┬─────────┘     └───────┬───────┘
         │                       │                       │
 ┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
-│  Compliance   │     │   Chaos Engineer    │     │               │
-│ (Regulatory)  │     │  (Resilience)       │     │               │
+│  Compliance   │     │   Chaos Engineer  │     │               │
+│ (Regulatory)  │     │  (Resilience)     │     │               │
 └───────┬───────┘     └─────────┬─────────┘     │               │
         │                       │               │               │
         └───────────────────────┼───────────────┼───────────────┘
                                 │               │
-                            ┌───┴───────────────┴───┐
-                            │  Redis + RabbitMQ Bus │
+                            ┌───┴───────────────┴──-─┐
+                            │  Redis + RabbitMQ Bus  │
                             │ (State & Communication)│
                             └───────────┬────────────┘
                                         │
