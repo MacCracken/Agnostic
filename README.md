@@ -4,11 +4,13 @@ A containerized, multi-agent diagnostic system powered by CrewAI that orchestrat
 
 ## 🌟 Key Features
 
-### 🏗️ Multi-Agent Architecture (10 Agents)
-- **QA Manager (Orchestrator)**: Decomposes requirements, delegates tasks, performs fuzzy verification
-- **Senior QA Engineer**: Self-healing scripts, complex edge-case analysis, model-based testing (MBT)
-- **Junior QA Worker**: Regression testing, automated root cause detection, synthetic data generation, visual regression
-- **QA Analyst**: Data organization & reporting, security assessment, performance profiling
+### 🏗️ Multi-Agent Architecture (12 Agents)
+- **QA Manager (Orchestrator)**: Decomposes requirements, delegates tasks, performs fuzzy verification, oversees entire QA hierarchy
+- **Sr QA Lead**: Task fulfillment for any lower role, training and mentoring of all subordinates, quality assurance oversight
+- **Jr QA Lead (2 positions)**: Support Sr Lead, train Jr team members, task fulfillment for specialized areas, escalation point for Jr issues
+- **Senior QA Engineer**: Self-healing scripts, complex edge-case analysis, model-based testing (MBT), mentorship to Jr staff
+- **Junior QA Worker**: Regression testing, automated root cause detection, synthetic data generation, visual regression, learning from leads
+- **QA Analyst**: Data organization & reporting, security assessment, performance profiling, cross-team insights
 - **Site Reliability Engineer**: Reliability monitoring, database testing, infrastructure health, incident response
 - **Accessibility Tester**: WCAG 2.1 compliance, screen reader compatibility, keyboard navigation, color contrast
 - **API Integration Engineer**: Schema validation, contract testing, versioning, load testing
@@ -30,32 +32,49 @@ A containerized, multi-agent diagnostic system powered by CrewAI that orchestrat
 ## 📋 System Architecture
 
 ```
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│  QA Manager  │ │ Senior QA Eng│ │ Junior QA Wrk│ │  QA Analyst  │
-│ (Orchestrator│ │   (Expert)   │ │  (Executor)  │ │  (Analyst)   │
-└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-       │                │                │                │
-┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐ ┌──────┴───────┐
-│     SRE      │ │ Accessibility│ │ API Engineer │ │ Mobile QA    │
-│  (Reliab.)   │ │  (A11y)      │ │  (API)       │ │ (Device)     │
-└──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-       │                │                │                │
-┌──────┴───────┐ ┌──────┴───────┐       │                │
-│  Compliance  │ │ Chaos Eng.   │       │                │
-│  (Regulatory)│ │ (Resilience) │       │                │
-└──────┬───────┘ └──────┬───────┘       │                │
-       │                │                │                │
-       └────────────────┼────────────────┼────────────────┘
-                        │                │
-                    ┌───┴────────────────┴───┐
-                    │   Redis + RabbitMQ Bus │
-                    │  (State & Communication)│
-                    └───────────┬────────────┘
+                    ┌─────────────────────────┐
+                    │      QA Manager          │
+                    │     (Orchestrator)       │
+                    └───────────┬─────────────┘
                                 │
-                    ┌───────────┴────────────┐
-                    │    Chainlit WebGUI     │
-                    │   (Human-in-the-Loop)  │
-                    └────────────────────────┘
+                    ┌───────────┴─────────────┐
+                    │       Sr QA Lead         │
+                    │   (Training & Oversight) │
+                    └───────────┬─────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
+│ Jr QA Lead 1  │     │    Jr QA Lead 2    │     │ Senior QA Eng │
+│ (Training)    │     │   (Task Fulfill.)  │     │   (Expert)    │
+└───────┬───────┘     └─────────┬─────────┘     └───────┬───────┘
+        │                       │                       │
+┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
+│ Junior QA Wrk │     │    QA Analyst     │     │     SRE       │
+│  (Executor)   │     │    (Analyst)      │     │  (Reliab.)    │
+└───────┬───────┘     └─────────┬─────────┘     └───────┬───────┘
+        │                       │                       │
+┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
+│ Accessibility │     │   API Engineer     │     │  Mobile QA    │
+│   (A11y)      │     │     (API)          │     │   (Device)    │
+└───────┬───────┘     └─────────┬─────────┘     └───────┬───────┘
+        │                       │                       │
+┌───────┴───────┐     ┌─────────┴─────────┐     ┌───────┴───────┐
+│  Compliance   │     │   Chaos Engineer    │     │               │
+│ (Regulatory)  │     │  (Resilience)       │     │               │
+└───────┬───────┘     └─────────┬─────────┘     │               │
+        │                       │               │               │
+        └───────────────────────┼───────────────┼───────────────┘
+                                │               │
+                            ┌───┴───────────────┴───┐
+                            │  Redis + RabbitMQ Bus │
+                            │ (State & Communication)│
+                            └───────────┬────────────┘
+                                        │
+                            ┌───────────┴────────────┐
+                            │    Chainlit WebGUI     │
+                            │   (Human-in-the-Loop)  │
+                            └────────────────────────┘
 ```
 
 ## 🛠️ Prerequisites
@@ -149,9 +168,29 @@ The Chainlit-based WebGUI provides:
 
 #### QA Manager (Orchestrator)
 1. **Requirement Analysis**: Decomposes user requirements into test plans
-2. **Task Delegation**: Assigns scenarios to Senior/Junior agents based on complexity
+2. **Task Delegation**: Assigns scenarios to leads and specialists based on complexity and hierarchy
 3. **Fuzzy Verification**: Performs final quality assessment with business alignment
 4. **Result Synthesis**: Compiles comprehensive test reports
+5. **Leadership Oversight**: Monitors team performance and provides strategic direction
+
+#### Sr QA Lead
+1. **Team Coordination**: Manages Jr Leads and ensures task distribution aligns with team capabilities
+2. **Task Fulfillment**: Steps in to perform any lower-level role tasks when needed
+3. **Training & Mentoring**: Provides guidance and training to all subordinate team members
+4. **Quality Assurance**: Reviews work quality and ensures standards are met across the team
+5. **Escalation Point**: Handles complex issues escalated from Jr Leads
+
+#### Jr QA Lead (Training Focus)
+1. **Junior Team Development**: Trains and mentors Junior QA Workers on best practices
+2. **Task Fulfillment**: Supports Sr Lead and performs specialized testing tasks
+3. **Progress Monitoring**: Tracks junior team member performance and provides feedback
+4. **Issue Resolution**: Handles day-to-day problems escalated from junior staff
+
+#### Jr QA Lead (Task Fulfillment Focus)
+1. **Specialized Testing**: Performs complex testing scenarios requiring junior-level expertise
+2. **Sr Lead Support**: Assists Sr QA Lead in coordinating team activities
+3. **Cross-functional Coverage**: Steps into various testing roles as needed
+4. **Knowledge Transfer**: Shares expertise with junior team members
 
 #### Senior QA Engineer (Expert)
 1. **Self-Healing Analysis**: Identifies and repairs failed UI selectors
@@ -380,6 +419,9 @@ docker-compose -f docker-compose.dev.yml up
 Agnostic-diagnostic-system/
 ├── agents/                 # Agent implementations
 │   ├── manager/           # QA Manager (Orchestrator)
+│   ├── sr-lead/           # Sr QA Lead (Training & Oversight)
+│   ├── jr-lead-training/  # Jr QA Lead (Training Focus)
+│   ├── jr-lead-taskful/   # Jr QA Lead (Task Fulfillment Focus)
 │   ├── senior/            # Senior QA Engineer
 │   ├── junior/            # Junior QA Worker
 │   ├── analyst/           # QA Analyst
@@ -394,7 +436,7 @@ Agnostic-diagnostic-system/
 ├── config/               # Configuration files
 ├── examples/             # Example test scenarios
 ├── docs/                 # Documentation
-├── docker-compose.yml    # Container orchestration (13 services)
+├── docker-compose.yml    # Container orchestration (15 services)
 └── requirements.txt      # Python dependencies
 ```
 
