@@ -1,6 +1,6 @@
-# OPENTEST: AN AGENTIC QA SYSTEM
+# AGNOSTIC: AN AGENTIC DIAGNOSTIC SYSTEM
 
-A containerized, multi-agent QA system powered by CrewAI that orchestrates intelligent testing workflows with advanced self-healing, fuzzy verification, and risk-based prioritization capabilities.
+A containerized, multi-agent diagnostic system powered by CrewAI that orchestrates intelligent testing workflows with advanced self-healing, fuzzy verification, and risk-based prioritization capabilities.
 
 ## 🌟 Key Features
 
@@ -71,7 +71,7 @@ A containerized, multi-agent QA system powered by CrewAI that orchestrates intel
 
 ```bash
 git clone <repository-url>
-cd agentic
+cd Agnostic
 ```
 
 ### 2. Configure Environment
@@ -377,7 +377,7 @@ docker-compose -f docker-compose.dev.yml up
 ### Code Structure
 
 ```
-agentic-qa-system/
+Agnostic-diagnostic-system/
 ├── agents/                 # Agent implementations
 │   ├── manager/           # QA Manager (Orchestrator)
 │   ├── senior/            # Senior QA Engineer
