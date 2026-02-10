@@ -84,6 +84,22 @@ A containerized, multi-agent diagnostic system powered by CrewAI that orchestrat
 - OpenAI API key (for LLM capabilities)
 - Git (for code change analysis)
 
+### Security Notes
+
+⚠️ **Development Environment**: The default configuration includes basic security measures. For production:
+
+1. **Never use default credentials** - Replace all default passwords and API keys
+2. **Enable authentication** - The WebGUI currently has no authentication (implement OAuth2/JWT)
+3. **Network isolation** - Use Docker networks and avoid exposing ports publicly
+4. **TLS encryption** - Enable HTTPS for all external communications
+5. **Regular updates** - Keep dependencies updated and scan for vulnerabilities
+
+For development with enhanced security, use `docker-compose.dev.yml` which includes:
+- Non-root container execution
+- Resource limits
+- Read-only filesystems where possible
+- Security hardening options
+
 ## 🚀 Quick Start
 
 ### 1. Clone and Setup
@@ -114,11 +130,14 @@ RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
 ### 3. Launch the System
 
 ```bash
-# Build and start all containers
+# Build and start all containers (production)
 docker-compose up --build
 
 # Or run in detached mode
 docker-compose up -d --build
+
+# For development with security hardening
+docker-compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 ```
 
 ### 4. Access the WebGUI
