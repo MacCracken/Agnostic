@@ -9,6 +9,10 @@ import chainlit as cl
 from fastapi import FastAPI
 import uvicorn
 import logging
+
+# Add config path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.environment import config
 from chainlit.types import ThreadDict
 
 # Configure logging
@@ -19,8 +23,8 @@ logger = logging.getLogger(__name__)
 sys.path.append('/app')
 
 class AgenticQAGUI:
-    def __init__(self):
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
+    def __init__(self) -> None:
+        self.redis_client = config.get_redis_client()
         self.active_sessions = {}
         
     async def start_new_session(self) -> str:
@@ -104,7 +108,7 @@ class AgenticQAGUI:
 gui = AgenticQAGUI()
 
 @cl.on_chat_start
-async def on_chat_start():
+async def on_chat_start() -> Dict[str, Any]:
     """Initialize chat session"""
     await cl.Message(
         content="🤖 Welcome to the Agentic QA Team System!\n\n"
@@ -131,7 +135,7 @@ async def on_chat_start():
     cl.user_session.set("gui", gui)
 
 @cl.on_message
-async def on_message(message: cl.Message):
+async def on_message(message: cl.Message) -> Dict[str, Any]:
     """Handle incoming messages"""
     session_id = cl.user_session.get("session_id")
     gui_instance = cl.user_session.get("gui")
@@ -583,7 +587,7 @@ async def on_message(message: cl.Message):
         ).send()
 
 @cl.on_file_upload
-async def on_file_upload(files: List[cl.File]):
+async def on_file_upload(files: List[cl.File]) -> Dict[str, Any]:
     """Handle file uploads"""
     session_id = cl.user_session.get("session_id")
     gui_instance = cl.user_session.get("gui")
@@ -645,7 +649,7 @@ async def on_file_upload(files: List[cl.File]):
             ).send()
 
 @cl.on_chat_end
-async def on_chat_end():
+async def on_chat_end() -> Dict[str, Any]:
     """Clean up when chat ends"""
     session_id = cl.user_session.get("session_id")
     if session_id:
@@ -655,7 +659,7 @@ async def on_chat_end():
 app = FastAPI()
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> Dict[str, Any]:
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 if __name__ == "__main__":

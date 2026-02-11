@@ -2,9 +2,7 @@ import os
 import sys
 import json
 import asyncio
-import cv2
-import numpy as np
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import BaseTool
@@ -12,6 +10,10 @@ from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
 import logging
+
+# Add config path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from config.environment import config
 import requests
 from playwright.async_api import async_playwright
 import pandas as pd
@@ -341,8 +343,20 @@ class EdgeCaseAnalysisTool(BaseTool):
 
 class SeniorQAAgent:
     def __init__(self):
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
-        self.celery_app = Celery('senior_qa', broker='amqp://guest:guest@rabbitmq:5672/')
+        # Validate environment variables
+        validation = config.validate_required_env_vars()
+        if not all(validation.values()):
+            missing_vars = [k for k, v in validation.items() if not v]
+            logger.warning(f"Missing environment variables: {missing_vars}")
+        
+        # Initialize Redis and Celery with environment configuration
+        self.redis_client = config.get_redis_client()
+        self.celery_app = config.get_celery_app('senior_qa')
+        
+        # Log connection info (without passwords)
+        connection_info = config.get_connection_info()
+        logger.info(f"Redis connection: {connection_info['redis']['url']}")
+        logger.info(f"RabbitMQ connection: {connection_info['rabbitmq']['url']}")
         self.llm = ChatOpenAI(model=os.getenv('OPENAI_MODEL', 'gpt-4o'), temperature=0.1)
         
         # Initialize CrewAI agent

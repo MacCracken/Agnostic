@@ -11,6 +11,11 @@ import redis
 from celery import Celery
 import logging
 
+# Add config path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from config.environment import config
+from config.llm_integration import llm_service
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,32 +33,51 @@ class TestPlanDecompositionTool(BaseTool):
             "priority_matrix": self._create_priority_matrix(requirements)
         }
     
-    def _extract_scenarios(self, requirements: str) -> List[str]:
-        # LLM-based scenario extraction
-        scenarios = [
-            "User authentication flow",
-            "Data validation and error handling",
-            "Performance under load",
-            "Security vulnerability assessment",
-            "Cross-browser compatibility"
-        ]
-        return scenarios
+    async def _extract_scenarios(self, requirements: str) -> List[str]:
+        """Extract test scenarios using LLM."""
+        try:
+            scenarios = await llm_service.generate_test_scenarios(requirements)
+            logger.info(f"Generated {len(scenarios)} test scenarios using LLM")
+            return scenarios
+        except Exception as e:
+            logger.error(f"Failed to generate scenarios with LLM: {e}")
+            return [
+                "User authentication flow",
+                "Data validation and error handling",
+                "Performance under load",
+                "Security vulnerability assessment",
+                "Cross-browser compatibility"
+            ]
     
-    def _extract_criteria(self, requirements: str) -> List[str]:
-        return [
-            "System responds within 2 seconds",
-            "All input fields properly validated",
-            "Session management secure",
-            "Error messages user-friendly"
-        ]
+    async def _extract_criteria(self, requirements: str) -> List[str]:
+        """Extract acceptance criteria using LLM."""
+        try:
+            criteria = await llm_service.extract_acceptance_criteria(requirements)
+            logger.info(f"Generated {len(criteria)} acceptance criteria using LLM")
+            return criteria
+        except Exception as e:
+            logger.error(f"Failed to extract criteria with LLM: {e}")
+            return [
+                "System responds within 2 seconds",
+                "All input fields properly validated",
+                "Session management secure",
+                "Error messages user-friendly"
+            ]
     
-    def _identify_risks(self, requirements: str) -> List[str]:
-        return [
-            "Authentication bypass",
-            "Data corruption",
-            "Performance degradation",
-            "UI inconsistency"
-        ]
+    async def _identify_risks(self, requirements: str) -> List[str]:
+        """Identify test risks using LLM."""
+        try:
+            risks = await llm_service.identify_test_risks(requirements)
+            logger.info(f"Identified {len(risks)} test risks using LLM")
+            return risks
+        except Exception as e:
+            logger.error(f"Failed to identify risks with LLM: {e}")
+            return [
+                "Authentication bypass",
+                "Data corruption",
+                "Performance degradation",
+                "UI inconsistency"
+            ]
     
     def _create_priority_matrix(self, requirements: str) -> Dict[str, str]:
         return {
@@ -67,16 +91,21 @@ class FuzzyVerificationTool(BaseTool):
     name: str = "Fuzzy Verification"
     description: str = "Performs LLM-based fuzzy verification of test results"
     
-    def _run(self, test_results: Dict[str, Any], business_goals: str) -> Dict[str, Any]:
+    async def _run(self, test_results: Dict[str, Any], business_goals: str) -> Dict[str, Any]:
         """Perform fuzzy verification beyond binary pass/fail"""
-        verification_score = self._calculate_verification_score(test_results, business_goals)
-        
-        return {
-            "overall_score": verification_score,
-            "confidence_level": self._assess_confidence(test_results),
-            "business_alignment": self._check_business_alignment(test_results, business_goals),
-            "recommendations": self._generate_recommendations(test_results, verification_score)
-        }
+        try:
+            verification = await llm_service.perform_fuzzy_verification(test_results, business_goals)
+            logger.info(f"Performed LLM-based fuzzy verification with score: {verification.get('overall_score', 0)}")
+            return verification
+        except Exception as e:
+            logger.error(f"Failed to perform LLM fuzzy verification: {e}")
+            verification_score = self._calculate_verification_score(test_results, business_goals)
+            return {
+                "overall_score": verification_score,
+                "confidence_level": self._assess_confidence(test_results),
+                "business_alignment": self._check_business_alignment(test_results, business_goals),
+                "recommendations": self._generate_recommendations(test_results, verification_score)
+            }
     
     def _calculate_verification_score(self, results: Dict, goals: str) -> float:
         # Simulated LLM-based scoring
@@ -101,8 +130,20 @@ class FuzzyVerificationTool(BaseTool):
 
 class QAManagerAgent:
     def __init__(self):
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
-        self.celery_app = Celery('qa_manager', broker='amqp://guest:guest@rabbitmq:5672/')
+        # Validate environment variables
+        validation = config.validate_required_env_vars()
+        if not all(validation.values()):
+            missing = [k for k, v in validation.items() if not v]
+            logger.warning(f"Missing environment variables: {missing}")
+        
+        # Initialize Redis and Celery with environment configuration
+        self.redis_client = config.get_redis_client()
+        self.celery_app = config.get_celery_app('qa_manager')
+        
+        # Log connection info (without passwords)
+        connection_info = config.get_connection_info()
+        logger.info(f"Redis connection: {connection_info['redis']['url']}")
+        logger.info(f"RabbitMQ connection: {connection_info['rabbitmq']['url']}")
         self.llm = ChatOpenAI(model=os.getenv('OPENAI_MODEL', 'gpt-4o'), temperature=0.1)
         
         # Initialize CrewAI agent

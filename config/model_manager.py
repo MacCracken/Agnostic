@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+# Add config path for imports
+from config.environment import config
 from typing import Dict, Any, Optional, List
 from abc import ABC, abstractmethod
 import requests
@@ -12,7 +14,7 @@ logger = logging.getLogger(__name__)
 class BaseModelProvider(ABC):
     """Abstract base class for model providers"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.name = config.get("name", "unknown")
         self.base_url = config.get("base_url", "")
@@ -34,7 +36,7 @@ class BaseModelProvider(ABC):
 class OpenAIProvider(BaseModelProvider):
     """OpenAI API provider"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = config.get("base_url", "https://api.openai.com/v1")
         self.headers = {
@@ -93,7 +95,7 @@ class OpenAIProvider(BaseModelProvider):
 class AnthropicProvider(BaseModelProvider):
     """Anthropic Claude API provider"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = config.get("base_url", "https://api.anthropic.com/v1")
         self.headers = {
@@ -169,7 +171,7 @@ class AnthropicProvider(BaseModelProvider):
 class LocalLLMProvider(BaseModelProvider):
     """Local LLM provider (Ollama, LM Studio, etc.)"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.provider_type = config.get("provider_type", "ollama")  # ollama, lm_studio, custom
         self.stream = config.get("stream", False)
@@ -374,7 +376,7 @@ class LocalLLMProvider(BaseModelProvider):
 class GoogleProvider(BaseModelProvider):
     """Google Gemini API provider"""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = config.get("base_url", "https://generativelanguage.googleapis.com/v1")
         self.api_key = config.get("api_key", "")
@@ -450,14 +452,14 @@ class GoogleProvider(BaseModelProvider):
 class ModelManager:
     """Manages multiple model providers and routing"""
     
-    def __init__(self, config_file: str = "config/models.json"):
+    def __init__(self, config_file: str = "config/models.json") -> None:
         self.config_file = config_file
         self.providers: Dict[str, BaseModelProvider] = {}
         self.primary_provider: Optional[str] = None
         self.fallback_providers: List[str] = []
         self.load_config()
     
-    def load_config(self):
+    def load_config(self) -> Dict[str, Any]:
         """Load model configuration from file"""
         try:
             config_path = os.path.join(os.getcwd(), self.config_file)
@@ -507,7 +509,7 @@ class ModelManager:
             logger.error(f"Error creating provider {config.get('name', 'unknown')}: {e}")
             return None
     
-    def _create_default_config(self):
+    def _create_default_config(self) -> Dict[str, Any]:
         """Create default configuration for OpenAI"""
         default_config = {
             "providers": {

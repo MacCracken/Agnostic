@@ -18,6 +18,11 @@ import requests
 import numpy as np
 import pandas as pd
 
+# Add config path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from config.environment import config
+from config.llm_integration import llm_service
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +34,7 @@ class DataOrganizationReportingTool(BaseTool):
 
     def _run(self, session_id: str, raw_results: Dict[str, Any]) -> Dict[str, Any]:
         """Aggregate results and generate a structured QA report"""
-        redis_client = redis.Redis(host='redis', port=6379, db=0)
+        redis_client = config.get_redis_client()
 
         # Gather results from Senior and Junior agents
         senior_results = self._collect_agent_results(redis_client, f"senior:{session_id}")
@@ -211,25 +216,49 @@ class SecurityAssessmentTool(BaseTool):
         "X-XSS-Protection",
     ]
 
-    def _run(self, target: Dict[str, Any], scan_profile: str = "standard") -> Dict[str, Any]:
-        """Run security assessment against target"""
+    async def _run(self, target: Dict[str, Any], scan_profile: str = "standard") -> Dict[str, Any]:
+        """Run security assessment using LLM intelligence"""
+        try:
+            # Perform basic security checks
+            url = target.get("url", "")
+            headers_result = self._analyze_headers(url)
+            tls_result = self._assess_tls(url)
+            cors_result = self._check_cors(url)
+            disclosure_result = self._check_info_disclosure(url)
+            owasp_result = self._evaluate_owasp_indicators(target)
+            
+            # Prepare scan results for LLM analysis
+            scan_results = {
+                "target_url": url,
+                "scan_profile": scan_profile,
+                "security_headers": headers_result,
+                "tls_configuration": tls_result,
+                "cors_status": cors_result,
+                "information_disclosure": disclosure_result,
+                "owasp_indicators": owasp_result
+            }
+            
+            # Use LLM for intelligent analysis
+            analysis = await llm_service.analyze_security_findings(scan_results)
+            logger.info(f"Performed LLM-based security analysis for {url}")
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Failed to perform LLM security analysis: {e}")
+            # Fallback to basic analysis
+            return self._fallback_security_analysis(target)
+
+    def _fallback_security_analysis(self, target: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback security analysis without LLM"""
         url = target.get("url", "")
         headers_result = self._analyze_headers(url)
         tls_result = self._assess_tls(url)
         cors_result = self._check_cors(url)
         disclosure_result = self._check_info_disclosure(url)
         owasp_result = self._evaluate_owasp_indicators(target)
-
-        # Aggregate vulnerabilities
+        
         vulnerabilities = []
-        for h in headers_result.get("missing", []):
-            vulnerabilities.append({
-                "type": "missing_header",
-                "severity": "medium" if h != "Strict-Transport-Security" else "high",
-                "description": f"Missing security header: {h}",
-                "remediation": f"Add {h} header to server responses"
-            })
-
+        
         for issue in tls_result.get("issues", []):
             vulnerabilities.append({
                 "type": "tls_configuration",
@@ -438,19 +467,71 @@ class PerformanceProfilingTool(BaseTool):
         "stress": {"concurrent": 10, "requests_per_endpoint": 50},
     }
 
-    def _run(self, target_config: Dict[str, Any], load_profile: str = "baseline") -> Dict[str, Any]:
-        """Profile performance for given endpoints"""
+    async def _run(self, target_config: Dict[str, Any], load_profile: str = "baseline") -> Dict[str, Any]:
+        """Profile performance using LLM analysis"""
+        try:
+            endpoints = target_config.get("endpoints", [])
+            base_url = target_config.get("base_url", "")
+            if not endpoints and base_url:
+                endpoints = [base_url]
+            
+            # Collect performance data
+            profile = self.LOAD_PROFILES.get(load_profile, self.LOAD_PROFILES["baseline"])
+            num_requests = profile["requests_per_endpoint"]
+            
+            performance_data = {
+                "endpoints": endpoints,
+                "load_profile": load_profile,
+                "requests_per_endpoint": num_requests,
+                "test_results": {}
+            }
+            
+            # Basic performance testing
+            for endpoint in endpoints:
+                latencies = []
+                errors = 0
+                for _ in range(num_requests):
+                    try:
+                        start = time.time()
+                        resp = requests.get(endpoint, timeout=30)
+                        elapsed = (time.time() - start) * 1000
+                        latencies.append(elapsed)
+                        if resp.status_code >= 400:
+                            errors += 1
+                    except requests.RequestException:
+                        errors += 1
+                        latencies.append(30000)
+                
+                performance_data["test_results"][endpoint] = {
+                    "latencies": latencies,
+                    "errors": errors,
+                    "avg_latency": sum(latencies) / len(latencies) if latencies else 0,
+                    "error_rate": errors / num_requests if num_requests > 0 else 0
+                }
+            
+            # Use LLM for intelligent analysis
+            analysis = await llm_service.generate_performance_profile(performance_data)
+            logger.info(f"Performed LLM-based performance profiling for {len(endpoints)} endpoints")
+            return analysis
+            
+        except Exception as e:
+            logger.error(f"Failed to perform LLM performance profiling: {e}")
+            # Fallback to basic analysis
+            return self._fallback_performance_analysis(target_config, load_profile)
+
+    def _fallback_performance_analysis(self, target_config: Dict[str, Any], load_profile: str) -> Dict[str, Any]:
+        """Fallback performance analysis without LLM"""
         endpoints = target_config.get("endpoints", [])
         base_url = target_config.get("base_url", "")
         if not endpoints and base_url:
             endpoints = [base_url]
-
+        
         profile = self.LOAD_PROFILES.get(load_profile, self.LOAD_PROFILES["baseline"])
         num_requests = profile["requests_per_endpoint"]
-
+        
         all_latencies = []
         endpoint_results = {}
-
+        
         for endpoint in endpoints:
             latencies = []
             errors = 0
@@ -607,8 +688,20 @@ class PerformanceProfilingTool(BaseTool):
 
 class QAAnalystAgent:
     def __init__(self):
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
-        self.celery_app = Celery('qa_analyst', broker='amqp://guest:guest@rabbitmq:5672/')
+        # Validate environment variables
+        validation = config.validate_required_env_vars()
+        if not all(validation.values()):
+            missing = [k for k, v in validation.items() if not v]
+            logger.warning(f"Missing environment variables: {missing}")
+        
+        # Initialize Redis and Celery with environment configuration
+        self.redis_client = config.get_redis_client()
+        self.celery_app = config.get_celery_app('qa_analyst')
+        
+        # Log connection info (without passwords)
+        connection_info = config.get_connection_info()
+        logger.info(f"Redis connection: {connection_info['redis']['url']}")
+        logger.info(f"RabbitMQ connection: {connection_info['rabbitmq']['url']}")
         self.llm = ChatOpenAI(model=os.getenv('OPENAI_MODEL', 'gpt-4o'), temperature=0.1)
 
         self.agent = Agent(
@@ -633,14 +726,15 @@ class QAAnalystAgent:
         session_id = task_data.get("session_id")
         logger.info(f"QA Analyst generating report for session: {session_id}")
 
-        self.redis_client.set(f"analyst:{session_id}:{scenario.get('id', 'report')}", json.dumps({
+        session_id_str = str(session_id) if session_id else "unknown"
+        self.redis_client.set(f"analyst:{session_id_str}:{scenario.get('id', 'report')}", json.dumps({
             "status": "in_progress",
             "started_at": datetime.now().isoformat(),
             "scenario": scenario
         }))
 
         report_task = Task(
-            description=f"""Aggregate and analyze test results for session {session_id}:
+            description=f"""Aggregate and analyze test results for session {session_id_str}:
 
             Scenario: {scenario.get('name', 'Full Report')}
 
@@ -659,11 +753,11 @@ class QAAnalystAgent:
         crew.kickoff()
 
         tool = DataOrganizationReportingTool()
-        report = tool._run(session_id, task_data.get("raw_results", {}))
+        report = tool._run(session_id_str, task_data.get("raw_results", {}))
 
-        self.redis_client.set(f"analyst:{session_id}:report", json.dumps(report))
+        self.redis_client.set(f"analyst:{session_id_str}:report", json.dumps(report))
 
-        await self._notify_manager(session_id, scenario.get("id", "report"), report)
+        await self._notify_manager(session_id_str, scenario.get("id", "report"), report)
 
         return {
             "scenario_id": scenario.get("id", "report"),
@@ -677,16 +771,17 @@ class QAAnalystAgent:
         """Run security assessment"""
         scenario = task_data.get("scenario", {})
         session_id = task_data.get("session_id")
+        session_id_str = str(session_id) if session_id else "unknown"
         logger.info(f"QA Analyst running security assessment for session: {session_id}")
 
-        self.redis_client.set(f"analyst:{session_id}:{scenario.get('id', 'security')}", json.dumps({
+        self.redis_client.set(f"analyst:{session_id_str}:{scenario.get('id', 'security')}", json.dumps({
             "status": "in_progress",
             "started_at": datetime.now().isoformat(),
             "scenario": scenario
         }))
 
         security_task = Task(
-            description=f"""Perform security assessment for session {session_id}:
+            description=f"""Perform security assessment for session {session_id_str}:
 
             Target: {scenario.get('target_url', 'configured endpoints')}
 
@@ -708,11 +803,11 @@ class QAAnalystAgent:
         tool = SecurityAssessmentTool()
         target = {"url": scenario.get("target_url", "")}
         scan_profile = scenario.get("scan_profile", "standard")
-        result = tool._run(target, scan_profile)
+        result = await tool._run(target, scan_profile)
 
-        self.redis_client.set(f"analyst:{session_id}:security", json.dumps(result))
+        self.redis_client.set(f"analyst:{session_id_str}:security", json.dumps(result))
 
-        await self._notify_manager(session_id, scenario.get("id", "security"), result)
+        await self._notify_manager(session_id_str, scenario.get("id", "security"), result)
 
         return {
             "scenario_id": scenario.get("id", "security"),
@@ -726,16 +821,17 @@ class QAAnalystAgent:
         """Run performance profiling"""
         scenario = task_data.get("scenario", {})
         session_id = task_data.get("session_id")
+        session_id_str = str(session_id) if session_id else "unknown"
         logger.info(f"QA Analyst profiling performance for session: {session_id}")
 
-        self.redis_client.set(f"analyst:{session_id}:{scenario.get('id', 'performance')}", json.dumps({
+        self.redis_client.set(f"analyst:{session_id_str}:{scenario.get('id', 'performance')}", json.dumps({
             "status": "in_progress",
             "started_at": datetime.now().isoformat(),
             "scenario": scenario
         }))
 
         perf_task = Task(
-            description=f"""Profile application performance for session {session_id}:
+            description=f"""Profile application performance for session {session_id_str}:
 
             Target: {scenario.get('target_url', 'configured endpoints')}
             Load Profile: {scenario.get('load_profile', 'baseline')}
@@ -761,11 +857,11 @@ class QAAnalystAgent:
             "baseline": scenario.get("baseline")
         }
         load_profile = scenario.get("load_profile", "baseline")
-        result = tool._run(target_config, load_profile)
+        result = await tool._run(target_config, load_profile)
 
-        self.redis_client.set(f"analyst:{session_id}:performance", json.dumps(result))
+        self.redis_client.set(f"analyst:{session_id_str}:performance", json.dumps(result))
 
-        await self._notify_manager(session_id, scenario.get("id", "performance"), result)
+        await self._notify_manager(session_id_str, scenario.get("id", "performance"), result)
 
         return {
             "scenario_id": scenario.get("id", "performance"),
@@ -906,7 +1002,7 @@ async def main():
         "timestamp": datetime.now().isoformat()
     }
 
-    result = await analyst.assess_reliability(sample_task)
+    result = await analyst.analyze_and_report(sample_task)
     print(f"QA Analyst Result: {result}")
 
 

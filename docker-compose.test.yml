@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # Redis for testing (isolated database)
+  redis-test:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"  # Different port to avoid conflicts
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-test-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RabbitMQ for testing (isolated)
+  rabbitmq-test:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5673:5672"   # Different AMQP port
+      - "15673:15672" # Different management port
+    environment:
+      RABBITMQ_DEFAULT_USER: test
+      RABBITMQ_DEFAULT_PASS: test
+      RABBITMQ_DEFAULT_VHOST: test
+    volumes:
+      - rabbitmq-test-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Test database (if needed for integration tests)
+  postgres-test:
+    image: postgres:15-alpine
+    ports:
+      - "5433:5432"  # Different port
+    environment:
+      POSTGRES_DB: qa_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis-test-data:
+  rabbitmq-test-data:
+  postgres-test-data:
+
+networks:
+  default:
+    name: qa-test-network

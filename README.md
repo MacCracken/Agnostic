@@ -1,31 +1,23 @@
 # QA Agent Consolidation Project
 
 ## 🎯 Project Overview
-Successfully consolidated 10 specialized QA agents into an optimized 6-agent architecture, achieving 40% reduction in complexity while enhancing capabilities.
 
-### 📊 Results Summary
-- **Agents Reduced**: 10 → 6 (40% reduction)
-- **Performance Gain**: 50% faster execution via parallel processing
-- **Data Generation**: 80% speedup with centralized caching
-- **Documentation**: Streamlined and redundancy-free
-- **Architecture**: Cross-domain correlation and intelligent orchestration
+Agentic QA Team System — a containerized, multi-agent QA platform powered by CrewAI. Ten specialized AI agents (QA Manager, Senior QA Engineer, Junior QA Worker, QA Analyst, Site Reliability Engineer, Accessibility Tester, API Integration Engineer, Mobile/Device QA, Compliance Tester, Chaos Engineer) collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance/accessibility/compliance analysis. A Chainlit-based WebGUI provides human-in-the-loop interaction.
 
-## 🏗️ Final Architecture
+## 🏗️ Architecture
 
-### 6-Agent System
+### Agent System
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                  Optimized QA Manager                 │
-├─────────────────────────────────────────────────────────────┤
-│  Performance Agent  │  Security & Compliance Agent     │
-│  (Load + Network)  │  (OWASP + GDPR + PCI DSS)       │
-├─────────────────────┼─────────────────────────────────────┤
-│  Resilience Agent  │  User Experience Agent             │
-│  (SRE + Chaos)     │  (Mobile + Accessibility)          │
-├─────────────────────┼─────────────────────────────────────┤
-│        Senior QA Agent    │    Junior QA Agent             │
-│      (Complex UI)         │   (Regression + Data)          │
-└─────────────────────────────────────────────────────────────┘
+QA Manager (Orchestrator)          ──┐
+Senior QA Engineer (Expert)         ─┤
+Junior QA Worker (Executor)         ─┤
+QA Analyst (Analyst)                ─┤
+Site Reliability Engineer (SRE)     ─┤
+Accessibility Tester (A11y)         ─┼── Redis + RabbitMQ Bus ── Chainlit WebGUI (:8000)
+API Integration Engineer (API)      ─┤
+Mobile/Device QA (Mobile)           ─┤
+Compliance Tester (Compliance)      ─┤
+Chaos Engineer (Chaos)              ─┘
 ```
 
 ### Key Improvements
@@ -55,25 +47,35 @@ Each agent includes:
 
 ### 1. Environment Setup
 ```bash
-# Core services
-docker-compose up -d redis rabbitmq
-
-# 6-Agent system
-docker-compose up -d performance security-compliance resilience user-experience senior junior
-
-# Optimized Manager
-docker-compose up -d qa-manager
-```
-
-### 2. Configuration
-```bash
 # Copy environment template
 cp .env.example .env
 
 # Set required variables
 OPENAI_API_KEY=your_key_here
-REDIS_URL=redis://redis:6379/0
-RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+```
+
+### 2. Launch All Services
+```bash
+# Production setup
+docker-compose up --build
+
+# Development setup
+docker-compose -f docker-compose.dev.yml up --build
+
+# Detached mode
+docker-compose up -d --build
+```
+
+### 3. Verify Deployment
+```bash
+# Check all services are running
+docker-compose ps
+
+# Access WebGUI
+http://localhost:8000
+
+# RabbitMQ Management
+http://localhost:15672 (guest/guest)
 ```
 
 ### 3. Usage Example

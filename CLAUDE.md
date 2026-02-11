@@ -6,14 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Agentic QA Team System — a containerized, multi-agent QA platform powered by CrewAI. Ten specialized AI agents (QA Manager, Senior QA Engineer, Junior QA Worker, QA Analyst, Site Reliability Engineer, Accessibility Tester, API Integration Engineer, Mobile/Device QA, Compliance Tester, Chaos Engineer) collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance/accessibility/compliance analysis. A Chainlit-based WebGUI provides human-in-the-loop interaction.
 
-All application code lives under the `agentic/` directory.
+All application code lives under the project root directory.
 
 ## Build & Run Commands
 
 ```bash
 # Setup
-cd agentic
 cp .env.example .env   # then set OPENAI_API_KEY
+
+# Install dependencies
+pip install -e .[dev,test,web,ml,browser]  # Install with optional dependencies
 
 # Launch all containers
 docker-compose up --build
@@ -28,8 +30,29 @@ docker-compose up --build <service-name>
 docker-compose logs <service-name>   # qa-manager, senior-qa, junior-qa, qa-analyst, sre-agent, accessibility-agent, api-agent, mobile-agent, compliance-agent, chaos-agent, webgui, redis, rabbitmq
 
 # Local development (without Docker)
-pip install -r agentic/requirements.txt
-pytest tests/
+pip install -r requirements.txt
+
+# Testing
+python run_tests.py --mode all --env mock          # Run all tests with mocks
+python run_tests.py --mode unit                    # Unit tests only  
+python run_tests.py --mode integration --env docker # Integration tests with Docker
+python run_tests.py --mode coverage                 # Tests with coverage report
+
+# Direct pytest usage
+pytest tests/ -v                                   # Run all tests
+pytest tests/unit/ -m unit                          # Unit tests only
+pytest tests/integration/ -m integration            # Integration tests only
+
+# Code Quality
+ruff check agents/ config/ shared/ webgui/          # Lint code
+ruff format agents/ config/ shared/ webgui/          # Format code
+black agents/ config/ shared/ webgui/                 # Alternative formatting
+mypy agents/ config/ shared/                      # Type checking
+bandit -r agents/ config/ shared/                   # Security scan
+
+# Pre-commit hooks (install once)
+pre-commit install                                 # Install git hooks
+pre-commit run --all-files                         # Run all quality checks
 ```
 
 WebGUI: `http://localhost:8000` | RabbitMQ Management: `http://localhost:15672` (guest/guest)
@@ -65,6 +88,7 @@ Chaos Engineer (Chaos)              ─┘
 - `config/model_manager.py` — multi-provider LLM manager (OpenAI, Anthropic, Google, Ollama, LM Studio) with fallback chains
 - `config/universal_llm_adapter.py` — bridge between model_manager and CrewAI's LLM interface
 - `config/models.json` — provider configuration (routing strategy, retries, timeouts)
+- `config/llm_integration.py` — comprehensive LLM service for intelligent tool implementations (scenario generation, risk identification, fuzzy verification, security analysis, performance profiling)
 - `advanced_testing/self_healing_fuzzy_verification.py` — CV-based element detection, semantic selector repair, fuzzy matching
 - `advanced_testing/risk_prioritization_exploratory.py` — ML-driven risk scoring, code change analysis, exploratory test generation
 - `webgui/app.py` — Chainlit + FastAPI web interface with file upload, session management, reasoning traces
@@ -94,4 +118,12 @@ Thirteen containers defined in `agentic/docker-compose.yml`: `redis` (:6379), `r
 
 ## Environment Configuration
 
-Configured via `.env` (see `.env.example`). Key variables: `OPENAI_API_KEY`, `OPENAI_MODEL`, `REDIS_URL`, `RABBITMQ_URL`. Feature flags: `ENABLE_SELF_HEALING`, `ENABLE_FUZZY_VERIFICATION`, `ENABLE_RISK_BASED_PRIORITIZATION`, `ENABLE_CONTEXT_AWARE_TESTING`. Multi-provider fallback configured via `PRIMARY_MODEL_PROVIDER` and `FALLBACK_MODEL_PROVIDERS`.
+Configured via `.env` (see `.env.example`). **NEW**: All Redis/RabbitMQ connections now use environment configuration with validation and logging. Key variables: 
+
+**Connection**: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`, `RABBITMQ_VHOST`
+
+**LLM**: `OPENAI_API_KEY`, `OPENAI_MODEL`, `PRIMARY_MODEL_PROVIDER`, `FALLBACK_MODEL_PROVIDERS`
+
+**Features**: `ENABLE_SELF_HEALING`, `ENABLE_FUZZY_VERIFICATION`, `ENABLE_RISK_BASED_PRIORITIZATION`, `ENABLE_CONTEXT_AWARE_TESTING`
+
+Configuration system includes validation on startup, connection logging (without passwords), and fallback to URL-based config for backwards compatibility.

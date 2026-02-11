@@ -11,6 +11,9 @@ from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
 import logging
+# Add config path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from config.environment import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -451,8 +454,8 @@ class ColorContrastTool(BaseTool):
 
 class AccessibilityTesterAgent:
     def __init__(self):
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
-        self.celery_app = Celery('accessibility_agent', broker='amqp://guest:guest@rabbitmq:5672/')
+        self.redis_client = config.get_redis_client()
+        self.celery_app = config.get_celery_app('accessibility_agent')
         self.llm = ChatOpenAI(model=os.getenv('OPENAI_MODEL', 'gpt-4o'), temperature=0.1)
 
         self.agent = Agent(

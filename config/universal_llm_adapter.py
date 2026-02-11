@@ -8,6 +8,8 @@ import sys
 import json
 import asyncio
 import logging
+# Add config path for imports
+from config.environment import config
 from typing import Dict, List, Any, Optional
 from langchain.llms.base import LLM
 from langchain.callbacks.manager import CallbackManagerForLLMRun
@@ -34,7 +36,7 @@ class UniversalLLMAdapter(LLM):
     temperature: float = Field(default=0.1)
     max_tokens: int = Field(default=4000)
     
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.provider_name = kwargs.get('provider_name', 'openai')
         self.temperature = kwargs.get('temperature', 0.1)
@@ -45,7 +47,7 @@ class UniversalLLMAdapter(LLM):
             logger.warning("Model manager not available, using direct OpenAI")
             self._init_direct_openai()
     
-    def _init_direct_openai(self):
+    def _init_direct_openai(self) -> Dict[str, Any]:
         """Initialize direct OpenAI connection as fallback"""
         try:
             from langchain_openai import ChatOpenAI

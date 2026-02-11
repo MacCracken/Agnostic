@@ -12,6 +12,8 @@ from faker import Faker
 import redis
 from celery import Celery
 import logging
+# Add config path for imports
+from config.environment import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -21,10 +23,10 @@ logger = logging.getLogger(__name__)
 class UnifiedDataGenerator:
     """Centralized data generation service optimized for all QA agents"""
     
-    def __init__(self):
+    def __init__(self) -> None:
         self.faker = Faker()
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
-        self.celery_app = Celery('data_generator', broker='amqp://guest:guest@rabbitmq:5672/')
+        self.redis_client = config.get_redis_client()
+        self.celery_app = config.get_celery_app('data_generator')
         
         # Data generation presets for different test types
         self.presets = {
@@ -346,13 +348,13 @@ class UnifiedDataGenerator:
 
 # Celery tasks for asynchronous data generation
 @celery_app.task
-def generate_test_data_async(data_type: str, count: int, config: Dict[str, Any] = None):
+def generate_test_data_async(data_type: str, count: int, config: Dict[str, Any] = None) -> Dict[str, Any]:
     """Asynchronous test data generation task"""
     generator = UnifiedDataGenerator()
     return generator.generate_test_data(data_type, count, config)
 
 @celery_app.task
-def generate_edge_case_data_async(base_data_type: str, edge_cases: List[str] = None):
+def generate_edge_case_data_async(base_data_type: str, edge_cases: List[str] = None) -> Dict[str, Any]:
     """Asynchronous edge case data generation task"""
     generator = UnifiedDataGenerator()
     return generator.generate_edge_case_data(base_data_type, edge_cases)
@@ -361,9 +363,9 @@ def generate_edge_case_data_async(base_data_type: str, edge_cases: List[str] = N
 class DataOptimizationService:
     """Service for optimizing data generation across all QA agents"""
     
-    def __init__(self):
+    def __init__(self) -> None:
         self.generator = UnifiedDataGenerator()
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
+        self.redis_client = config.get_redis_client()
         
     def optimize_for_agent(self, agent_type: str, task_config: Dict[str, Any]) -> Dict[str, Any]:
         """Optimize data generation for specific agent type"""
@@ -491,7 +493,7 @@ class DataOptimizationService:
 class DataGenerationService:
     """Main service for optimized data generation across all QA agents"""
     
-    def __init__(self):
+    def __init__(self) -> None:
         self.generator = UnifiedDataGenerator()
         self.optimizer = DataOptimizationService()
     

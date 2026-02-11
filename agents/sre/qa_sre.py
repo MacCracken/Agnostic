@@ -14,6 +14,9 @@ from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
 import logging
+# Add config path for imports
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from config.environment import config
 import requests
 import numpy as np
 
@@ -510,8 +513,8 @@ class IncidentResponseTool(BaseTool):
 
 class SREAgent:
     def __init__(self):
-        self.redis_client = redis.Redis(host='redis', port=6379, db=0)
-        self.celery_app = Celery('sre_agent', broker='amqp://guest:guest@rabbitmq:5672/')
+        self.redis_client = config.get_redis_client()
+        self.celery_app = config.get_celery_app('sre_agent')
         self.llm = ChatOpenAI(model=os.getenv('OPENAI_MODEL', 'gpt-4o'), temperature=0.1)
 
         self.agent = Agent(
