@@ -2,7 +2,7 @@ name: CI/CD Pipeline for QA System v1.0
 on:
   push:
     branches: [main, develop]
-    tags: [v1.0, latest]
+    tags: ['v*']
   pull_request:
     branches: [main, develop]
 
@@ -10,7 +10,7 @@ env:
   PYTHON_VERSION: '3.11'
   NODE_VERSION: '20.x'
   REGISTRY: ghcr.io/${{ github.repository_owner }}/qa-system
-  DOCKER_BUILDKIT: docker/buildx
+  DOCKER_BUILDKIT: 1
   ACTIONS_ALLOW_UNSECURE_COMMANDS: false
   TZ: UTC
 
@@ -175,15 +175,26 @@ EOF
     runs-on: ubuntu-latest
     needs: container-build
     steps:
-      - name: Run Trivy on local containers
+      - name: Run Trivy on redis container
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: |
-            qa-system_redis:latest
-            qa-system_rabbitmq:latest
-            qa-system_webgui:latest
+          image-ref: 'qa-system-redis:latest'
           format: 'sarif'
-          output: 'container-trivy-results.sarif'
+          output: 'container-trivy-results-redis.sarif'
+
+      - name: Run Trivy on rabbitmq container
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'qa-system-rabbitmq:latest'
+          format: 'sarif'
+          output: 'container-trivy-results-rabbitmq.sarif'
+
+      - name: Run Trivy on webgui container
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'qa-system-webgui:latest'
+          format: 'sarif'
+          output: 'container-trivy-results-webgui.sarif'
 
   # Deploy to Staging
   deploy-staging:
@@ -193,7 +204,7 @@ EOF
     steps:
       - name: Deploy to staging
         run: |
-          docker-compose -f agentic/docker-compose.staging.yml up -d
+          docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
       
       - name: Verify staging deployment
         run: |
@@ -208,7 +219,7 @@ EOF
     steps:
       - name: Deploy to production
         run: |
-          docker-compose -f agentic/docker-compose.prod.yml up -d
+          docker-compose -f docker-compose.prod.yml up -d
       
       - name: Verify production deployment
         run: |
@@ -232,7 +243,6 @@ EOF
       
       - name: Run smoke tests
         run: |
-          cd agentic
           python scripts/smoke_tests.py || true
 
   # Blue-Green Deployment (Optional)
@@ -241,24 +251,22 @@ EOF
     runs-on: ubuntu-latest
     needs: [security-scan, code-quality, build-and-test, container-scan]
     steps:
-      - name: Deploy to blue environment
+      - name: Deploy blue environment
         run: |
-          docker-compose -f agentic/docker-compose.blue.yml up -d
+          # Deploy with blue label for blue-green deployment
+          docker-compose -f docker-compose.prod.yml -p qa-system-blue up -d
       
       - name: Verify blue deployment
         run: |
           sleep 30
-          curl -f http://blue.localhost:8080/health || true
+          curl -f http://localhost:8080/health || true
       
-      - name: Promote blue to green
+      - name: Deploy green environment
         run: |
-          docker-compose -f agentic/docker-compose.green.yml up -d
+          # Deploy with green label for blue-green deployment
+          docker-compose -f docker-compose.prod.yml -p qa-system-green up -d
       
       - name: Switch to green environment
         run: |
-          ./scripts/switch-to-green.sh || true
-      
-      - name: Verify green deployment
-        run: |
-          sleep 30
-          curl -f http://localhost:8080/health || true
+          # Scale down blue, scale up green
+          docker-compose -p qa-system-blue down || true
