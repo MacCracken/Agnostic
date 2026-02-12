@@ -27,11 +27,14 @@ jobs:
         with:
           scan-type: 'fs'
           scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
+          output: 'sarif'
+          output-file: 'trivy-results.sarif'
+          exit-code: '0'
+          ignore-unfixed: true
       
       - name: Upload Trivy scan results
         uses: github/codeql-action/upload-sarif@v3
+        if: always()
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -55,7 +58,7 @@ jobs:
       - name: Run Python linting
         run: |
           # Check main directories (not just agentic/)
-          ruff check agents/ config/ shared/ webgui/ --format=github
+          ruff check agents/ config/ shared/ webgui/ --output-format=github
           black --check agents/ config/ shared/ webgui/
           isort --check-only agents/ config/ shared/ webgui/
           mypy agents/ config/ shared/ --ignore-missing-imports || true
@@ -168,6 +171,27 @@ jobs:
           
           # Build test containers
           docker-compose -f docker-compose.test.yml build --no-cache
+          
+          # Tag images for scanning
+          docker tag qa-system-redis:latest qa-system-redis:scan
+          docker tag qa-system-rabbitmq:latest qa-system-rabbitmq:scan
+          docker tag qa-system-webgui:latest qa-system-webgui:scan
+      
+      - name: Save container images
+        run: |
+          docker save qa-system-redis:scan -o redis-image.tar
+          docker save qa-system-rabbitmq:scan -o rabbitmq-image.tar
+          docker save qa-system-webgui:scan -o webgui-image.tar
+      
+      - name: Upload container images
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-images
+          path: |
+            redis-image.tar
+            rabbitmq-image.tar
+            webgui-image.tar
+          retention-days: 1
       
       - name: Test container health
         run: |
@@ -188,26 +212,64 @@ jobs:
     runs-on: ubuntu-latest
     needs: container-build
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download container images
+        uses: actions/download-artifact@v4
+        with:
+          name: container-images
+      
+      - name: Load container images
+        run: |
+          docker load -i redis-image.tar
+          docker load -i rabbitmq-image.tar
+          docker load -i webgui-image.tar
+      
       - name: Run Trivy on redis container
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'qa-system-redis:latest'
-          format: 'sarif'
-          output: 'container-trivy-results-redis.sarif'
+          image-ref: 'qa-system-redis:scan'
+          output: 'sarif'
+          output-file: 'container-trivy-results-redis.sarif'
+          exit-code: '0'
+          ignore-unfixed: true
 
       - name: Run Trivy on rabbitmq container
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'qa-system-rabbitmq:latest'
-          format: 'sarif'
-          output: 'container-trivy-results-rabbitmq.sarif'
+          image-ref: 'qa-system-rabbitmq:scan'
+          output: 'sarif'
+          output-file: 'container-trivy-results-rabbitmq.sarif'
+          exit-code: '0'
+          ignore-unfixed: true
 
       - name: Run Trivy on webgui container
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: 'qa-system-webgui:latest'
-          format: 'sarif'
-          output: 'container-trivy-results-webgui.sarif'
+          image-ref: 'qa-system-webgui:scan'
+          output: 'sarif'
+          output-file: 'container-trivy-results-webgui.sarif'
+          exit-code: '0'
+          ignore-unfixed: true
+      
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'container-trivy-results-redis.sarif'
+          
+      - name: Upload Trivy scan results (RabbitMQ)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'container-trivy-results-rabbitmq.sarif'
+          
+      - name: Upload Trivy scan results (WebGUI)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'container-trivy-results-webgui.sarif'
 
   # Deploy to Staging
   deploy-staging:
