@@ -1,4 +1,8 @@
-![Build](https://img.shields.io/github/workflow/status/anomalyco/agnostic/CI) ![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue) ![Python](https://img.shields.io/badge/python-3.11+-blue) ![Docker](https://img.shields.io/badge/docker-ready-blue)
+[![CI/CD](https://img.shields.io/github/actions/workflow/status/MacCracken/Agnostic/ci-cd.yml?branch=main&label=CI/CD)](https://github.com/MacCracken/Agnostic/actions/workflows/ci-cd.yml)
+![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/python-3.11+-blue)
+![Docker](https://img.shields.io/badge/docker-ready-blue)
 
 # Agentic QA Team System
 
