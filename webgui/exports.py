@@ -139,7 +139,7 @@ class ReportGenerator:
                 session_data["verification"] = json.loads(verify_data)
             
             # Agent results
-            agents = ["manager", "senior", "junior", "analyst", "sre", "accessibility", "api", "mobile", "compliance", "chaos"]
+            agents = ["manager", "senior", "junior", "analyst", "security_compliance", "performance"]
             for agent in agents:
                 agent_key = f"{agent}:{session_id}:comprehensive_report"
                 if agent == "manager":
@@ -157,42 +157,18 @@ class ReportGenerator:
                         if type_data:
                             session_data["agent_results"][f"analyst_{data_type}"] = json.loads(type_data)
                 
-                elif agent == "sre":
-                    for data_type in ["reliability", "database", "infrastructure"]:
-                        data_key = f"sre:{session_id}:{data_type}"
+                elif agent == "security_compliance":
+                    data_key = f"security_compliance:{session_id}:audit"
+                    type_data = self.redis_client.get(data_key)
+                    if type_data:
+                        session_data["agent_results"]["security_compliance_audit"] = json.loads(type_data)
+
+                elif agent == "performance":
+                    for data_type in ["monitoring", "load", "resilience"]:
+                        data_key = f"performance:{session_id}:{data_type}"
                         type_data = self.redis_client.get(data_key)
                         if type_data:
-                            session_data["agent_results"][f"sre_{data_type}"] = json.loads(type_data)
-                
-                elif agent == "accessibility":
-                    data_key = f"accessibility:{session_id}:audit"
-                    type_data = self.redis_client.get(data_key)
-                    if type_data:
-                        session_data["agent_results"][f"accessibility_audit"] = json.loads(type_data)
-                
-                elif agent == "api":
-                    data_key = f"api:{session_id}:tests"
-                    type_data = self.redis_client.get(data_key)
-                    if type_data:
-                        session_data["agent_results"][f"api_tests"] = json.loads(type_data)
-                
-                elif agent == "mobile":
-                    data_key = f"mobile:{session_id}:tests"
-                    type_data = self.redis_client.get(data_key)
-                    if type_data:
-                        session_data["agent_results"][f"mobile_tests"] = json.loads(type_data)
-                
-                elif agent == "compliance":
-                    data_key = f"compliance:{session_id}:audit"
-                    type_data = self.redis_client.get(data_key)
-                    if type_data:
-                        session_data["agent_results"][f"compliance_audit"] = json.loads(type_data)
-                
-                elif agent == "chaos":
-                    data_key = f"chaos:{session_id}:tests"
-                    type_data = self.redis_client.get(data_key)
-                    if type_data:
-                        session_data["agent_results"][f"chaos_tests"] = json.loads(type_data)
+                            session_data["agent_results"][f"performance_{data_type}"] = json.loads(type_data)
             
             # Timeline
             for agent in agents:
@@ -334,10 +310,10 @@ class ReportGenerator:
                 else:
                     findings.append(f"Security concerns identified (Score: {security.get('security_score', 0)}%)")
             
-            if "sre_reliability" in session_data["agent_results"]:
-                reliability = session_data["agent_results"]["sre_reliability"]
-                health = reliability.get("health_status", "unknown")
-                findings.append(f"System reliability status: {health}")
+            if "performance_resilience" in session_data["agent_results"]:
+                resilience = session_data["agent_results"]["performance_resilience"]
+                score = resilience.get("resilience_score", "unknown")
+                findings.append(f"Resilience validation score: {score}")
             
             content["key_findings"] = findings[:5]  # Limit to top 5
             
@@ -412,8 +388,7 @@ class ReportGenerator:
             compliance_sources = [
                 ("analyst_security", "Security Compliance"),
                 ("analyst_comprehensive_report", "QA Compliance"),
-                ("compliance_audit", "Regulatory Compliance"),
-                ("accessibility_audit", "Accessibility Compliance (WCAG)")
+                ("security_compliance_audit", "Regulatory Compliance")
             ]
             
             for source, title in compliance_sources:

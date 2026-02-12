@@ -1,22 +1,15 @@
-FROM python:3.11-slim
+# Use the optimized base image with all dependencies pre-installed
+FROM agnostic-qa-base:latest
 
-WORKDIR /app
+# Copy agent-specific code (all dependencies already installed in base)
+COPY --chown=appuser:appuser ./agents/security_compliance/qa_security_compliance.py /app/qa_security_compliance.py
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Set agent-specific environment variable
+ENV AGENT_ROLE=security_compliance
 
-# Copy requirements first for better caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy agent code
-COPY ./agents/security_compliance/qa_security_compliance.py /app/qa_security_compliance.py
-
-# Set Python path
-ENV PYTHONPATH=/app
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import redis; import pika; print('healthy')" || exit 1
 
 # Default command
 CMD ["python", "qa_security_compliance.py"]

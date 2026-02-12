@@ -534,7 +534,7 @@ class DataGenerationService:
         """Get data generation usage statistics"""
         return {
             "available_data_types": list(self.generator.presets.keys()),
-            "supported_agents": ["performance", "security_compliance", "resilience", "user_experience", "senior", "junior"],
+            "supported_agents": ["performance", "security_compliance", "senior", "junior", "analyst"],
             "optimization_strategies": 6,
             "cache_enabled": True,
             "async_generation": True

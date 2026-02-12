@@ -13,7 +13,7 @@
 ```bash
 # Clone Repository
 git clone <repository-url>
-cd agentic
+cd agnostic
 
 # Copy Environment Template
 cp .env.example .env
@@ -42,6 +42,30 @@ CACHE_TTL=3600
 
 ### 2. System Deployment
 
+#### ⚡ Optimized Build Process (Recommended)
+
+Using the base image significantly speeds up builds:
+
+```bash
+# Build base image first (one-time, ~5 minutes)
+./scripts/build-docker.sh --base-only
+
+# Build all agent images (~30 seconds)
+./scripts/build-docker.sh --agents-only
+
+# Start all services
+docker-compose up -d
+
+# Verify deployment
+docker-compose ps
+```
+
+**Performance Benefits:**
+- First base image build: ~5 minutes (cached for all agents)
+- Agent rebuilds: ~30 seconds (99% faster)
+- Incremental builds: ~5 seconds
+- See [Docker Build Optimization](docker/README.md) for details
+
 #### Development Environment
 ```bash
 # Start Development Services
@@ -54,7 +78,7 @@ docker-compose logs -f
 docker-compose -f docker-compose.dev.yml down
 ```
 
-#### Production Environment
+#### Production Environment (Traditional Build)
 ```bash
 # Start Core Infrastructure
 docker-compose up -d redis rabbitmq
@@ -62,11 +86,8 @@ docker-compose up -d redis rabbitmq
 # Wait for Services (Optional)
 sleep 10
 
-# Start 6-Agent System
-docker-compose up -d performance security-compliance resilience user-experience senior junior
-
-# Start Optimized Manager
-docker-compose up -d qa-manager
+# Build and start 6-Agent System (slower without base image)
+docker-compose up --build -d
 
 # Verify All Services
 docker-compose ps
@@ -88,16 +109,11 @@ curl http://localhost:8000/health
 
 #### Verify Agent Services
 ```bash
-# Check Individual Agent Health
-curl http://localhost:8001/health  # Performance Agent
-curl http://localhost:8002/health  # Security & Compliance
-curl http://localhost:8003/health  # Resilience Agent
-curl http://localhost:8004/health  # User Experience Agent
-curl http://localhost:8005/health  # Senior QA Agent
-curl http://localhost:8006/health  # Junior QA Agent
+# Check container health status
+docker-compose ps
 
-# Manager Health Check
-curl http://localhost:8080/health
+# Inspect a specific container health
+docker inspect --format='{{.State.Health.Status}}' <container-name>
 ```
 
 ## 🏗️ Service Architecture
@@ -125,33 +141,29 @@ services:
     networks: [qa-network]
     
   # 6-Agent System
-  performance:
+  performance-agent:
     depends_on: [redis, rabbitmq]
     networks: [qa-network]
     
-  security-compliance:
+  security-compliance-agent:
     depends_on: [redis, rabbitmq]
     networks: [qa-network]
     
-  resilience:
+  senior-qa:
     depends_on: [redis, rabbitmq]
     networks: [qa-network]
     
-  user-experience:
+  junior-qa:
     depends_on: [redis, rabbitmq]
     networks: [qa-network]
     
-  senior:
-    depends_on: [redis, rabbitmq]
-    networks: [qa-network]
-    
-  junior:
+  qa-analyst:
     depends_on: [redis, rabbitmq]
     networks: [qa-network]
     
   # Orchestration
   qa-manager:
-    depends_on: [redis, rabbitmq, performance, security-compliance, resilience, user-experience, senior, junior]
+    depends_on: [redis, rabbitmq, performance-agent, security-compliance-agent, senior-qa, junior-qa, qa-analyst]
     networks: [qa-network]
     
   # Interface
@@ -168,7 +180,7 @@ services:
 docker-compose logs
 
 # View Specific Service Logs
-docker-compose logs performance
+docker-compose logs performance-agent
 docker-compose logs qa-manager
 
 # Follow Logs in Real-time
@@ -184,9 +196,7 @@ docker-compose logs --tail=1000 qa-manager > qa-manager.log
 docker-compose ps
 
 # Health Check All Services
-for service in performance security-compliance resilience user-experience senior junior qa-manager; do
-  curl -f http://localhost:8080/health || echo "$service: unhealthy"
-done
+docker-compose ps
 
 # Resource Usage
 docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
@@ -194,13 +204,8 @@ docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsa
 
 ### Performance Monitoring
 ```bash
-# Agent Response Times
-for port in 8001 8002 8003 8004 8005 8006 8080; do
-  time curl -s http://localhost:$port/health
-done
-
-# Memory Usage
-docker stats --format "table {{.Container}}\t{{.MemUsage}}" $(docker-compose ps -q)
+# Agent Resource Usage
+docker stats --format "table {{.Container}}\t{{.MemUsage}}\t{{.CPUPerc}}" $(docker-compose ps -q)
 ```
 
 ## 🔧 Configuration Management
@@ -281,8 +286,8 @@ services:
       - RABBITMQ_DEFAULT_PASS=${RABBITMQ_PASSWORD}
     
   # Agent Services with Security
-  performance:
-    image: agentic/performance:latest
+  performance-agent:
+    image: agentic/performance-agent:latest
     restart: unless-stopped
     environment:
       - NODE_ENV=production
@@ -332,8 +337,8 @@ services:
 ### Horizontal Scaling
 ```bash
 # Scale Individual Agents
-docker-compose up -d --scale performance=3
-docker-compose up -d --scale senior=2
+docker-compose up -d --scale performance-agent=3
+docker-compose up -d --scale senior-qa=2
 
 # Load Balancer Configuration
 # Use nginx or traefik for load balancing across multiple agent instances
@@ -342,7 +347,7 @@ docker-compose up -d --scale senior=2
 ### Resource Limits
 ```yaml
 services:
-  performance:
+  performance-agent:
     deploy:
       resources:
         limits:
@@ -363,11 +368,11 @@ services:
 ```bash
 # Rolling Update Strategy
 docker-compose pull
-docker-compose up -d --no-deps --scale performance=2
+docker-compose up -d --no-deps --scale performance-agent=2
 
 # Health Check After Update
-curl -f http://localhost:8001/health
-docker-compose up -d --scale performance=3
+docker-compose ps performance-agent
+docker-compose up -d --scale performance-agent=3
 
 # Update Remaining Services
 # Repeat for each service
@@ -414,10 +419,10 @@ docker network ls
 docker network inspect agentic_qa-network
 
 # Test Redis Connection
-docker-compose exec performance ping redis
+docker-compose exec performance-agent ping redis
 
 # Test RabbitMQ Connection
-docker-compose exec performance curl http://rabbitmq:15672/api/health
+docker-compose exec performance-agent curl http://rabbitmq:15672/api/health
 ```
 
 #### Performance Issues
@@ -426,10 +431,7 @@ docker-compose exec performance curl http://rabbitmq:15672/api/health
 docker stats
 
 # Check Agent Health
-for agent in performance security-compliance resilience user-experience senior junior; do
-  echo "=== $agent ==="
-  curl -s http://localhost:8001/health || echo "$agent unhealthy"
-done
+docker-compose ps
 
 # Optimize Configuration
 # Reduce concurrent agents, increase timeouts, enable caching

@@ -66,20 +66,38 @@ RABBITMQ_HOST=localhost
 
 ### 2. Launch Services
 
-#### Option A: Docker Compose (Local Development)
+#### Option A: Docker Compose (Local Development) ⚡ Optimized
+
+**Fast Build (Using Base Image - Recommended):**
+```bash
+# Build optimized base image first (one-time, ~5 min)
+./scripts/build-docker.sh --base-only
+
+# Build all agent images (~30 seconds)
+./scripts/build-docker.sh --agents-only
+
+# Start everything
+docker-compose up -d
+```
+
+**Traditional Build (Slower but simpler):**
 ```bash
 # Start core services
 docker-compose up -d redis rabbitmq
 
-# Start 10-agent system
-docker-compose up -d qa-manager senior-qa junior-qa qa-analyst sre-agent accessibility-agent api-agent mobile-agent compliance-agent chaos-agent
-
-# Start web interface
-docker-compose up -d webgui
-
-# All-in-one command
+# Build and start 6-agent system
 docker-compose up --build
+
+# All-in-one command (first build will take 10-15 min)
+docker-compose up --build -d
 ```
+
+**⚡ Build Performance:**
+- First base image build: ~5 minutes (one-time)
+- Agent rebuilds: ~30 seconds (99% faster with base image)
+- Incremental builds: ~5 seconds
+
+See [Docker Build Optimization](docker/README.md) for details.
 
 #### Option B: Kubernetes (Production/Cloud)
 

@@ -1,31 +1,12 @@
-FROM python:3.11-slim
+# Use the optimized base image with all dependencies pre-installed
+FROM agnostic-qa-base:latest
 
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy web GUI code
-COPY webgui/ ./webgui/
-COPY agents/ ./agents/
-COPY config/ ./config/
-
-# Create logs directory
-RUN mkdir -p logs
+# Copy web GUI code (all dependencies already installed in base)
+COPY --chown=appuser:appuser webgui/ ./webgui/
+COPY --chown=appuser:appuser agents/ ./agents/
+COPY --chown=appuser:appuser config/ ./config/
 
 # Set environment variables
-ENV PYTHONPATH=/app
 ENV CHAINLIT_HOST=0.0.0.0
 ENV CHAINLIT_PORT=8000
 ENV CHAINLIT_SERVER_ROOT=/

@@ -9,7 +9,7 @@ import aiohttp
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
+from shared.crewai_compat import BaseTool
 from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
@@ -800,6 +800,441 @@ class TestExecutionOptimizerTool(BaseTool):
         
         return time_savings
 
+class FlakyTestDetectionTool(BaseTool):
+    name: str = "Flaky Test Detection & Management"
+    description: str = "Detects flaky tests using statistical analysis, implements quarantine mechanisms, and auto-retry strategies"
+    
+    def __init__(self):
+        super().__init__()
+        self.flaky_threshold = 0.3  # 30% failure rate threshold
+        self.min_executions = 5     # Minimum executions before classification
+        self.quarantine_duration = 7  # Days in quarantine
+    
+    def _run(self, test_history: Dict[str, Any], execution_context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Analyze test history for flaky patterns and manage quarantine"""
+        test_results = test_history.get("test_results", [])
+        
+        # Analyze flaky patterns
+        flaky_analysis = self._analyze_flaky_patterns(test_results)
+        
+        # Manage quarantine for flaky tests
+        quarantine_result = self._manage_quarantine(flaky_analysis["flaky_tests"])
+        
+        # Generate auto-retry strategies
+        retry_strategies = self._generate_retry_strategies(flaky_analysis)
+        
+        # Calculate flakiness metrics
+        metrics = self._calculate_flakiness_metrics(test_results)
+        
+        return {
+            "flaky_tests": flaky_analysis["flaky_tests"],
+            "stable_tests": flaky_analysis["stable_tests"],
+            "quarantine_actions": quarantine_result,
+            "retry_strategies": retry_strategies,
+            "flakiness_metrics": metrics,
+            "recommendations": self._generate_flaky_recommendations(flaky_analysis, metrics),
+            "timestamp": datetime.now().isoformat()
+        }
+    
+    def _analyze_flaky_patterns(self, test_results: List[Dict]) -> Dict[str, Any]:
+        """Analyze test execution history to identify flaky patterns"""
+        flaky_tests = []
+        stable_tests = []
+        
+        # Group results by test_id
+        test_executions = {}
+        for result in test_results:
+            test_id = result.get("test_id")
+            if test_id not in test_executions:
+                test_executions[test_id] = []
+            test_executions[test_id].append(result)
+        
+        for test_id, executions in test_executions.items():
+            if len(executions) < self.min_executions:
+                continue  # Not enough data
+            
+            # Calculate flakiness metrics
+            failure_count = sum(1 for e in executions if e.get("status") == "failed")
+            success_count = len(executions) - failure_count
+            flakiness_rate = failure_count / len(executions)
+            
+            # Analyze failure patterns
+            error_patterns = self._analyze_error_patterns(executions)
+            temporal_patterns = self._analyze_temporal_patterns(executions)
+            
+            # Classify as flaky or stable
+            is_flaky = (
+                flakiness_rate >= self.flaky_threshold or
+                error_patterns["diverse_errors"] or
+                temporal_patterns["time_based_flakiness"]
+            )
+            
+            test_analysis = {
+                "test_id": test_id,
+                "total_executions": len(executions),
+                "failure_count": failure_count,
+                "success_count": success_count,
+                "flakiness_rate": flakiness_rate,
+                "error_patterns": error_patterns,
+                "temporal_patterns": temporal_patterns,
+                "last_failure": executions[-1].get("timestamp") if executions else None,
+                "consecutive_failures": self._get_consecutive_failures(executions)
+            }
+            
+            if is_flaky:
+                flaky_tests.append(test_analysis)
+            else:
+                stable_tests.append(test_analysis)
+        
+        return {
+            "flaky_tests": flaky_tests,
+            "stable_tests": stable_tests,
+            "total_analyzed": len(test_executions)
+        }
+    
+    def _analyze_error_patterns(self, executions: List[Dict]) -> Dict[str, Any]:
+        """Analyze error message patterns"""
+        failed_executions = [e for e in executions if e.get("status") == "failed"]
+        
+        if not failed_executions:
+            return {
+                "diverse_errors": False,
+                "common_error": None,
+                "error_variety": 0
+            }
+        
+        # Extract error messages
+        error_messages = [e.get("error_message", "") for e in failed_executions]
+        
+        # Group similar errors
+        error_groups = self._group_similar_errors(error_messages)
+        
+        return {
+            "diverse_errors": len(error_groups) > 2,
+            "common_error": max(error_groups, key=len) if error_groups else None,
+            "error_variety": len(error_groups),
+            "error_groups": error_groups
+        }
+    
+    def _analyze_temporal_patterns(self, executions: List[Dict]) -> Dict[str, Any]:
+        """Analyze time-based flakiness patterns"""
+        if len(executions) < 3:
+            return {"time_based_flakiness": False, "pattern": None}
+        
+        # Extract timestamps and convert to datetime objects
+        timestamps = []
+        for execution in executions:
+            timestamp_str = execution.get("timestamp")
+            if timestamp_str:
+                try:
+                    timestamps.append(datetime.fromisoformat(timestamp_str))
+                except:
+                    continue
+        
+        if len(timestamps) < 3:
+            return {"time_based_flakiness": False, "pattern": None}
+        
+        # Check for patterns based on time of day, day of week
+        time_patterns = {
+            "morning_failures": 0,
+            "afternoon_failures": 0,
+            "evening_failures": 0,
+            "weekday_failures": 0,
+            "weekend_failures": 0
+        }
+        
+        for i, execution in enumerate(executions):
+            if execution.get("status") == "failed" and i < len(timestamps):
+                ts = timestamps[i]
+                hour = ts.hour
+                weekday = ts.weekday()
+                
+                if 6 <= hour < 12:
+                    time_patterns["morning_failures"] += 1
+                elif 12 <= hour < 18:
+                    time_patterns["afternoon_failures"] += 1
+                else:
+                    time_patterns["evening_failures"] += 1
+                
+                if weekday < 5:  # Monday-Friday
+                    time_patterns["weekday_failures"] += 1
+                else:
+                    time_patterns["weekend_failures"] += 1
+        
+        # Detect significant time-based patterns
+        time_based_flakiness = (
+            max(time_patterns.values()) / len([e for e in executions if e.get("status") == "failed"]) > 0.6
+        )
+        
+        return {
+            "time_based_flakiness": time_based_flakiness,
+            "pattern": time_patterns if time_based_flakiness else None
+        }
+    
+    def _group_similar_errors(self, error_messages: List[str]) -> List[List[str]]:
+        """Group similar error messages together"""
+        groups = []
+        
+        for error_msg in error_messages:
+            error_lower = error_msg.lower()
+            placed = False
+            
+            for group in groups:
+                # Check if error is similar to any in existing group
+                if self._errors_similar(error_lower, group[0].lower()):
+                    group.append(error_msg)
+                    placed = True
+                    break
+            
+            if not placed:
+                groups.append([error_msg])
+        
+        return groups
+    
+    def _errors_similar(self, error1: str, error2: str) -> bool:
+        """Check if two error messages are similar"""
+        # Simple similarity check based on common words
+        words1 = set(error1.split())
+        words2 = set(error2.split())
+        
+        if not words1 or not words2:
+            return False
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        similarity = len(intersection) / len(union)
+        return similarity > 0.6
+    
+    def _get_consecutive_failures(self, executions: List[Dict]) -> int:
+        """Count consecutive failures from the end"""
+        consecutive = 0
+        for execution in reversed(executions):
+            if execution.get("status") == "failed":
+                consecutive += 1
+            else:
+                break
+        return consecutive
+    
+    def _manage_quarantine(self, flaky_tests: List[Dict]) -> Dict[str, Any]:
+        """Manage quarantine for flaky tests"""
+        quarantine_actions = []
+        current_date = datetime.now()
+        
+        for test in flaky_tests:
+            test_id = test["test_id"]
+            
+            # Check if test is already in quarantine
+            quarantine_status = self._get_quarantine_status(test_id)
+            
+            if quarantine_status["is_quarantined"]:
+                # Check if quarantine should be lifted
+                quarantine_start = quarantine_status["quarantine_start"]
+                days_in_quarantine = (current_date - quarantine_start).days
+                
+                if days_in_quarantine >= self.quarantine_duration:
+                    # Attempt to lift quarantine
+                    if test["consecutive_failures"] == 0:
+                        action = {
+                            "test_id": test_id,
+                            "action": "lift_quarantine",
+                            "reason": "stable_period_observed",
+                            "days_quarantined": days_in_quarantine
+                        }
+                    else:
+                        action = {
+                            "test_id": test_id,
+                            "action": "extend_quarantine",
+                            "reason": "still_unstable",
+                            "days_quarantined": days_in_quarantine
+                        }
+                else:
+                    action = {
+                        "test_id": test_id,
+                        "action": "maintain_quarantine",
+                        "reason": "quarantine_period_active",
+                        "days_remaining": self.quarantine_duration - days_in_quarantine
+                    }
+            else:
+                # Add to quarantine
+                action = {
+                    "test_id": test_id,
+                    "action": "add_to_quarantine",
+                    "reason": "flakiness_detected",
+                    "flakiness_rate": test["flakiness_rate"]
+                }
+                self._add_to_quarantine(test_id, current_date)
+            
+            quarantine_actions.append(action)
+        
+        return {
+            "actions": quarantine_actions,
+            "total_quarantined": len([a for a in quarantine_actions if a["action"] in ["add_to_quarantine", "maintain_quarantine"]]),
+            "quarantine_lifted": len([a for a in quarantine_actions if a["action"] == "lift_quarantine"])
+        }
+    
+    def _get_quarantine_status(self, test_id: str) -> Dict[str, Any]:
+        """Get current quarantine status for a test (simulated)"""
+        # In real implementation, this would query a database
+        # For now, simulate with no quarantine
+        return {
+            "is_quarantined": False,
+            "quarantine_start": None,
+            "reason": None
+        }
+    
+    def _add_to_quarantine(self, test_id: str, start_date: datetime):
+        """Add test to quarantine (simulated)"""
+        # In real implementation, this would update a database
+        pass
+    
+    def _generate_retry_strategies(self, flaky_analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate retry strategies for flaky tests"""
+        strategies = []
+        
+        for test in flaky_analysis["flaky_tests"]:
+            strategy = {
+                "test_id": test["test_id"],
+                "flakiness_rate": test["flakiness_rate"],
+                "recommended_strategy": self._determine_retry_strategy(test),
+                "max_retries": self._calculate_max_retries(test),
+                "retry_delay": self._calculate_retry_delay(test),
+                "conditions": self._generate_retry_conditions(test)
+            }
+            strategies.append(strategy)
+        
+        return strategies
+    
+    def _determine_retry_strategy(self, test: Dict[str, Any]) -> str:
+        """Determine the best retry strategy for a flaky test"""
+        if test["error_patterns"]["diverse_errors"]:
+            return "exponential_backoff_with_jitter"
+        elif test["temporal_patterns"]["time_based_flakiness"]:
+            return "time_based_retry"
+        elif test["consecutive_failures"] > 3:
+            return "linear_backoff"
+        else:
+            return "simple_retry"
+    
+    def _calculate_max_retries(self, test: Dict[str, Any]) -> int:
+        """Calculate maximum retries based on flakiness rate"""
+        flakiness_rate = test["flakiness_rate"]
+        
+        if flakiness_rate > 0.7:
+            return 5
+        elif flakiness_rate > 0.5:
+            return 3
+        else:
+            return 2
+    
+    def _calculate_retry_delay(self, test: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate retry delay parameters"""
+        base_delay = 1  # second
+        
+        return {
+            "initial_delay": base_delay,
+            "max_delay": 30,
+            "multiplier": 2.0,
+            "jitter": True
+        }
+    
+    def _generate_retry_conditions(self, test: Dict[str, Any]) -> List[str]:
+        """Generate conditions under which to retry"""
+        conditions = ["failure_detected"]
+        
+        if test["temporal_patterns"]["time_based_flakiness"]:
+            conditions.append("optimal_time_window")
+        
+        if test["error_patterns"]["diverse_errors"]:
+            conditions.append("different_error_type")
+        
+        return conditions
+    
+    def _calculate_flakiness_metrics(self, test_results: List[Dict]) -> Dict[str, Any]:
+        """Calculate overall flakiness metrics"""
+        total_tests = len(set(r.get("test_id") for r in test_results))
+        total_executions = len(test_results)
+        total_failures = sum(1 for r in test_results if r.get("status") == "failed")
+        
+        # Calculate test stability distribution
+        stability_distribution = {
+            "highly_stable": 0,    # < 10% failure rate
+            "stable": 0,           # 10-30% failure rate
+            "somewhat_flaky": 0,   # 30-50% failure rate
+            "highly_flaky": 0      # > 50% failure rate
+        }
+        
+        test_executions = {}
+        for result in test_results:
+            test_id = result.get("test_id")
+            if test_id not in test_executions:
+                test_executions[test_id] = []
+            test_executions[test_id].append(result)
+        
+        for test_id, executions in test_executions.items():
+            if len(executions) < self.min_executions:
+                continue
+            
+            failure_rate = sum(1 for e in executions if e.get("status") == "failed") / len(executions)
+            
+            if failure_rate < 0.1:
+                stability_distribution["highly_stable"] += 1
+            elif failure_rate < 0.3:
+                stability_distribution["stable"] += 1
+            elif failure_rate < 0.5:
+                stability_distribution["somewhat_flaky"] += 1
+            else:
+                stability_distribution["highly_flaky"] += 1
+        
+        return {
+            "total_tests": total_tests,
+            "total_executions": total_executions,
+            "total_failures": total_failures,
+            "overall_failure_rate": total_failures / total_executions if total_executions > 0 else 0,
+            "stability_distribution": stability_distribution,
+            "flaky_test_percentage": (stability_distribution["somewhat_flaky"] + stability_distribution["highly_flaky"]) / total_tests * 100 if total_tests > 0 else 0
+        }
+    
+    def _generate_flaky_recommendations(self, flaky_analysis: Dict[str, Any], metrics: Dict[str, Any]) -> List[str]:
+        """Generate recommendations for addressing flaky tests"""
+        recommendations = []
+        
+        flaky_tests = flaky_analysis["flaky_tests"]
+        
+        if not flaky_tests:
+            recommendations.append("No flaky tests detected. Continue monitoring.")
+            return recommendations
+        
+        # Categorize flaky tests by root causes
+        error_diversity_tests = [t for t in flaky_tests if t["error_patterns"]["diverse_errors"]]
+        time_based_tests = [t for t in flaky_tests if t["temporal_patterns"]["time_based_flakiness"]]
+        high_failure_tests = [t for t in flaky_tests if t["flakiness_rate"] > 0.7]
+        
+        if error_diversity_tests:
+            recommendations.append(f"Multiple error patterns detected in {len(error_diversity_tests)} tests. Review test isolation and dependencies.")
+        
+        if time_based_tests:
+            recommendations.append(f"Time-based flakiness detected in {len(time_based_tests)} tests. Consider test scheduling adjustments.")
+        
+        if high_failure_tests:
+            recommendations.append(f"{len(high_failure_tests)} tests have >70% failure rates. Consider redesign or temporary disablement.")
+        
+        # Overall metrics recommendations
+        if metrics["flaky_test_percentage"] > 20:
+            recommendations.append("High flaky test percentage (>20%). Implement comprehensive test suite review.")
+        elif metrics["flaky_test_percentage"] > 10:
+            recommendations.append("Moderate flaky test percentage. Focus on highest flakiness rate tests first.")
+        
+        # General recommendations
+        recommendations.extend([
+            "Implement test data isolation to reduce race conditions.",
+            "Add explicit waits and synchronization for async operations.",
+            "Consider test parallelization with careful resource management.",
+            "Monitor flaky test trends and quarantine effectiveness regularly."
+        ])
+        
+        return recommendations
+
 class VisualRegressionTool(BaseTool):
     name: str = "Visual Regression Testing"
     description: str = "Performs visual regression testing including baseline capture, pixel diffing, cross-browser comparison, and component testing"
@@ -963,7 +1398,7 @@ class JuniorQAAgent:
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            tools=[RegressionTestingTool(), SyntheticDataGeneratorTool(), TestExecutionOptimizerTool(), VisualRegressionTool()]
+            tools=[RegressionTestingTool(), SyntheticDataGeneratorTool(), TestExecutionOptimizerTool(), VisualRegressionTool(), FlakyTestDetectionTool()]
         )
     
     async def execute_regression_test(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1254,6 +1689,136 @@ class JuniorQAAgent:
         }
         
         self.redis_client.publish(f"manager:{session_id}:notifications", json.dumps(notification))
+    
+    async def analyze_flaky_tests(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze flaky tests and implement management strategies"""
+        scenario = task_data.get("scenario", {})
+        session_id = task_data.get("session_id")
+        logger.info(f"Junior QA analyzing flaky tests for session: {session_id}")
+        
+        self.redis_client.set(f"junior:{session_id}:flaky_analysis", json.dumps({
+            "status": "in_progress",
+            "started_at": datetime.now().isoformat(),
+            "scenario": scenario
+        }))
+        
+        # Get test history from Redis or database
+        test_history = await self._fetch_test_history(scenario)
+        
+        # Run flaky test detection analysis
+        flaky_tool = FlakyTestDetectionTool()
+        flaky_analysis = flaky_tool._run(test_history, scenario)
+        
+        # Apply quarantine actions
+        quarantine_result = await self._apply_quarantine_actions(flaky_analysis["quarantine_actions"])
+        
+        # Update test execution configurations
+        config_updates = await self._update_test_configs(flaky_analysis["retry_strategies"])
+        
+        # Generate comprehensive report
+        final_result = {
+            "scenario_id": scenario.get("id", "flaky_analysis"),
+            "session_id": session_id,
+            "flaky_analysis": flaky_analysis,
+            "quarantine_result": quarantine_result,
+            "config_updates": config_updates,
+            "status": "completed",
+            "completed_at": datetime.now().isoformat()
+        }
+        
+        # Store results
+        self.redis_client.set(f"junior:{session_id}:flaky_analysis:result", json.dumps(final_result))
+        
+        await self._notify_manager_completion(session_id, scenario.get("id", "flaky_analysis"), final_result)
+        
+        return final_result
+    
+    async def _fetch_test_history(self, scenario: Dict[str, Any]) -> Dict[str, Any]:
+        """Fetch test execution history for analysis"""
+        # In real implementation, this would query database for historical test results
+        # For simulation, generate sample test history
+        test_id_prefix = scenario.get("id", "test")
+        
+        sample_history = []
+        test_types = ["ui", "api", "unit", "integration"]
+        
+        for i in range(20):  # Generate 20 test executions
+            test_type = random.choice(test_types)
+            status = "failed" if random.random() < 0.25 else "passed"  # 25% failure rate
+            
+            error_message = None
+            if status == "failed":
+                error_types = [
+                    "Element not found: button#submit",
+                    "Connection timeout after 30000ms",
+                    "Assertion failed: expected 200 but got 500",
+                    "TypeError: Cannot read property 'value' of undefined",
+                    "Database connection refused"
+                ]
+                error_message = random.choice(error_types)
+            
+            sample_history.append({
+                "test_id": f"{test_id_prefix}_{i:03d}",
+                "test_name": f"Test {i+1}",
+                "test_type": test_type,
+                "status": status,
+                "error_message": error_message,
+                "timestamp": (datetime.now() - timedelta(hours=random.randint(0, 72))).isoformat(),
+                "execution_time": random.uniform(1.0, 60.0)
+            })
+        
+        return {
+            "test_results": sample_history,
+            "scenario": scenario,
+            "analysis_period_days": 3
+        }
+    
+    async def _apply_quarantine_actions(self, actions: List[Dict]) -> Dict[str, Any]:
+        """Apply quarantine actions to test configurations"""
+        applied_actions = []
+        
+        for action in actions:
+            # In real implementation, this would update test configuration files
+            # or database records to mark tests as quarantined
+            
+            applied_action = {
+                "test_id": action["test_id"],
+                "action": action["action"],
+                "applied_at": datetime.now().isoformat(),
+                "status": "success"
+            }
+            applied_actions.append(applied_action)
+            
+            logger.info(f"Applied quarantine action: {action['action']} for test {action['test_id']}")
+        
+        return {
+            "total_actions": len(applied_actions),
+            "successful_actions": len([a for a in applied_actions if a["status"] == "success"]),
+            "actions": applied_actions
+        }
+    
+    async def _update_test_configs(self, retry_strategies: List[Dict]) -> Dict[str, Any]:
+        """Update test execution configurations with retry strategies"""
+        updated_configs = []
+        
+        for strategy in retry_strategies:
+            # In real implementation, this would update test configuration files
+            updated_config = {
+                "test_id": strategy["test_id"],
+                "retry_strategy": strategy["recommended_strategy"],
+                "max_retries": strategy["max_retries"],
+                "retry_delay": strategy["retry_delay"],
+                "conditions": strategy["conditions"],
+                "updated_at": datetime.now().isoformat()
+            }
+            updated_configs.append(updated_config)
+            
+            logger.info(f"Updated retry config for test {strategy['test_id']}: {strategy['recommended_strategy']}")
+        
+        return {
+            "total_updated": len(updated_configs),
+            "configs": updated_configs
+        }
 
 async def main():
     """Main entry point for Junior QA agent with Celery worker"""
@@ -1263,7 +1828,7 @@ async def main():
     logger.info("Starting Junior QA Celery worker...")
     
     # Define Celery task for regression testing
-    @junior_agent.celery_app.task(bind=True)
+    @junior_agent.celery_app.task(bind=True, name="junior_qa.execute_regression_test")
     def execute_regression_task(self, task_data_json: str):
         """Celery task wrapper for regression testing"""
         try:
@@ -1276,7 +1841,7 @@ async def main():
             return {"status": "error", "error": str(e)}
     
     # Define Celery task for data generation
-    @junior_agent.celery_app.task(bind=True)
+    @junior_agent.celery_app.task(bind=True, name="junior_qa.generate_test_data")
     def generate_test_data_task(self, task_data_json: str):
         """Celery task wrapper for test data generation"""
         try:

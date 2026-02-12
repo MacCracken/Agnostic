@@ -1,30 +1,11 @@
-FROM python:3.11-slim
+# Use the optimized base image with all dependencies pre-installed
+FROM agnostic-qa-base:latest
 
-WORKDIR /app
+# Copy agent-specific code (all dependencies already installed in base)
+COPY --chown=appuser:appuser agents/analyst/ ./agents/analyst/
+COPY --chown=appuser:appuser config/ ./config/
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    git \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy agent code
-COPY agents/analyst/ ./agents/analyst/
-COPY config/ ./config/
-
-# Create logs directory
-RUN mkdir -p logs
-
-# Set environment variables
-ENV PYTHONPATH=/app
+# Set agent-specific environment variable
 ENV AGENT_ROLE=analyst
 
 # Health check

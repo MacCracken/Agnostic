@@ -5,7 +5,7 @@ import asyncio
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
+from shared.crewai_compat import BaseTool
 from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
@@ -27,10 +27,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SelfHealingTool(BaseTool):
-    name: str = "Self-Healing Script Generator"
-    description: str = "Autonomously repairs failed UI selectors using computer vision and semantic analysis"
-    
-    async def _run(self, failed_selector: str, page_url: str, screenshot_path: Optional[str] = None) -> Dict[str, Any]:
+    name: str = "Self-Healing UI Testing"
+    description: str = "Repairs failed UI selectors using self-healing, computer vision, and semantic analysis"
+
+    def _run(self, failed_selector: str, page_url: str, screenshot_path: Optional[str] = None) -> Dict[str, Any]:
+        """Perform self-healing of failed UI selectors (sync wrapper)."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self._run_async(failed_selector, page_url, screenshot_path))
+        return {
+            "original_selector": failed_selector,
+            "healed_selector": None,
+            "healing_method": "requires_async_context",
+            "confidence": 0.0,
+            "alternative_selectors": []
+        }
+
+    async def _run_async(self, failed_selector: str, page_url: str, screenshot_path: Optional[str] = None) -> Dict[str, Any]:
         """Perform self-healing of failed UI selectors"""
         healing_result = {
             "original_selector": failed_selector,
@@ -800,7 +814,7 @@ async def main():
     logger.info("Starting Senior QA Celery worker...")
     
     # Define Celery task for handling scenarios
-    @senior_agent.celery_app.task(bind=True)
+    @senior_agent.celery_app.task(bind=True, name="senior_qa.handle_complex_scenario")
     def handle_complex_task(self, task_data_json: str):
         """Celery task wrapper for handling complex scenarios"""
         try:

@@ -5,7 +5,7 @@ import asyncio
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
+from shared.crewai_compat import BaseTool
 from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
@@ -33,10 +33,12 @@ class TestPlanDecompositionTool(BaseTool):
             "priority_matrix": self._create_priority_matrix(requirements)
         }
     
-    async def _extract_scenarios(self, requirements: str) -> List[str]:
+    def _extract_scenarios(self, requirements: str) -> List[str]:
         """Extract test scenarios using LLM."""
         try:
-            scenarios = await llm_service.generate_test_scenarios(requirements)
+            scenarios = llm_service.generate_test_scenarios(requirements)
+            if asyncio.iscoroutine(scenarios):
+                scenarios = asyncio.run(scenarios)
             logger.info(f"Generated {len(scenarios)} test scenarios using LLM")
             return scenarios
         except Exception as e:
@@ -49,10 +51,12 @@ class TestPlanDecompositionTool(BaseTool):
                 "Cross-browser compatibility"
             ]
     
-    async def _extract_criteria(self, requirements: str) -> List[str]:
+    def _extract_criteria(self, requirements: str) -> List[str]:
         """Extract acceptance criteria using LLM."""
         try:
-            criteria = await llm_service.extract_acceptance_criteria(requirements)
+            criteria = llm_service.extract_acceptance_criteria(requirements)
+            if asyncio.iscoroutine(criteria):
+                criteria = asyncio.run(criteria)
             logger.info(f"Generated {len(criteria)} acceptance criteria using LLM")
             return criteria
         except Exception as e:
@@ -64,10 +68,12 @@ class TestPlanDecompositionTool(BaseTool):
                 "Error messages user-friendly"
             ]
     
-    async def _identify_risks(self, requirements: str) -> List[str]:
+    def _identify_risks(self, requirements: str) -> List[str]:
         """Identify test risks using LLM."""
         try:
-            risks = await llm_service.identify_test_risks(requirements)
+            risks = llm_service.identify_test_risks(requirements)
+            if asyncio.iscoroutine(risks):
+                risks = asyncio.run(risks)
             logger.info(f"Identified {len(risks)} test risks using LLM")
             return risks
         except Exception as e:
@@ -79,12 +85,11 @@ class TestPlanDecompositionTool(BaseTool):
                 "UI inconsistency"
             ]
     
-    def _create_priority_matrix(self, requirements: str) -> Dict[str, str]:
+    def _create_priority_matrix(self, requirements: str) -> Dict[str, List[str]]:
         return {
-            "authentication": "critical",
-            "data_validation": "high",
-            "performance": "medium",
-            "ui_compatibility": "low"
+            "high": ["authentication", "data_validation", "security"],
+            "medium": ["performance", "resilience", "analysis"],
+            "low": ["ui_compatibility", "reporting"]
         }
 
 class FuzzyVerificationTool(BaseTool):
@@ -206,7 +211,13 @@ class QAManagerAgent:
             "session_id": session_id,
             "test_plan": test_plan,
             "status": "delegated",
-            "next_steps": ["Waiting for Senior QA analysis", "Junior QA execution pending", "QA Analyst reliability/security/performance assessment pending"]
+            "next_steps": [
+                "Waiting for Senior QA analysis",
+                "Junior QA execution pending",
+                "Security & Compliance audit pending",
+                "Performance & Resilience assessment pending",
+                "QA Analyst report pending"
+            ]
         }
     
     def _parse_decomposition_result(self, result: Any) -> Dict[str, Any]:
@@ -215,20 +226,12 @@ class QAManagerAgent:
             "scenarios": [
                 {"id": "auth_001", "name": "User Authentication", "priority": "critical", "assigned_to": "senior"},
                 {"id": "data_002", "name": "Data Validation", "priority": "high", "assigned_to": "junior"},
-                {"id": "perf_003", "name": "Performance Testing", "priority": "medium", "assigned_to": "senior"},
-                {"id": "sec_004", "name": "Security Assessment", "priority": "critical", "assigned_to": "senior"},
-                {"id": "ui_005", "name": "UI Compatibility", "priority": "low", "assigned_to": "junior"},
-                {"id": "rel_006", "name": "Site Reliability Assessment", "priority": "high", "assigned_to": "sre"},
-                {"id": "sec_007", "name": "Security Posture Analysis", "priority": "critical", "assigned_to": "analyst"},
-                {"id": "perf_008", "name": "Performance Profiling", "priority": "high", "assigned_to": "analyst"},
-                {"id": "db_009", "name": "Database Reliability Testing", "priority": "high", "assigned_to": "sre"},
-                {"id": "infra_010", "name": "Infrastructure Health Check", "priority": "medium", "assigned_to": "sre"},
-                {"id": "a11y_011", "name": "Accessibility Audit", "priority": "high", "assigned_to": "accessibility"},
-                {"id": "api_012", "name": "API Integration Testing", "priority": "high", "assigned_to": "api"},
-                {"id": "mob_013", "name": "Mobile/Device Testing", "priority": "medium", "assigned_to": "mobile"},
-                {"id": "comp_014", "name": "Compliance & Regulatory Audit", "priority": "critical", "assigned_to": "compliance"},
-                {"id": "chaos_015", "name": "Chaos & Resilience Testing", "priority": "high", "assigned_to": "chaos"},
-                {"id": "visual_016", "name": "Visual Regression Testing", "priority": "medium", "assigned_to": "junior"}
+                {"id": "perf_003", "name": "Performance Load Testing", "priority": "high", "assigned_to": "performance"},
+                {"id": "res_004", "name": "Resilience Validation", "priority": "high", "assigned_to": "performance"},
+                {"id": "sec_005", "name": "Security & Compliance", "priority": "critical", "assigned_to": "security_compliance"},
+                {"id": "ui_006", "name": "UI Compatibility", "priority": "medium", "assigned_to": "senior"},
+                {"id": "reg_007", "name": "Regression Suite", "priority": "high", "assigned_to": "junior"},
+                {"id": "report_008", "name": "Comprehensive QA Report", "priority": "high", "assigned_to": "analyst"}
             ],
             "acceptance_criteria": [
                 "Response time < 2 seconds",
@@ -270,41 +273,17 @@ class QAManagerAgent:
                     args=[task_data],
                     queue='qa_analyst'
                 )
-            elif scenario.get("assigned_to") == "sre":
+            elif scenario.get("assigned_to") == "security_compliance":
                 self.celery_app.send_task(
-                    'sre_agent.assess_reliability',
+                    'security_compliance_agent.run_security_compliance_audit',
                     args=[task_data],
-                    queue='sre_agent'
+                    queue='security_compliance'
                 )
-            elif scenario.get("assigned_to") == "accessibility":
+            elif scenario.get("assigned_to") == "performance":
                 self.celery_app.send_task(
-                    'accessibility_agent.run_accessibility_audit',
+                    'performance_agent.run_performance_suite',
                     args=[task_data],
-                    queue='accessibility_agent'
-                )
-            elif scenario.get("assigned_to") == "api":
-                self.celery_app.send_task(
-                    'api_agent.run_api_tests',
-                    args=[task_data],
-                    queue='api_agent'
-                )
-            elif scenario.get("assigned_to") == "mobile":
-                self.celery_app.send_task(
-                    'mobile_agent.run_mobile_tests',
-                    args=[task_data],
-                    queue='mobile_agent'
-                )
-            elif scenario.get("assigned_to") == "compliance":
-                self.celery_app.send_task(
-                    'compliance_agent.run_compliance_audit',
-                    args=[task_data],
-                    queue='compliance_agent'
-                )
-            elif scenario.get("assigned_to") == "chaos":
-                self.celery_app.send_task(
-                    'chaos_agent.run_chaos_tests',
-                    args=[task_data],
-                    queue='chaos_agent'
+                    queue='performance'
                 )
     
     async def perform_fuzzy_verification(self, session_id: str, test_results: Dict[str, Any]) -> Dict[str, Any]:

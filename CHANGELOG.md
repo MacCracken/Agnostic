@@ -13,12 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Standardized 6-agent architecture
 - Added comprehensive .gitignore
 - Created CONTRIBUTING.md guidelines
+ - Added Celery task wrappers for analyst, performance, and security-compliance agents
 
 ### Changed
 - Updated all documentation to reflect 6-agent structure instead of 10-agent
 - Cleaned up docker-compose.yml to match actual agent implementations
 - Removed redundant and outdated documentation files
 - Consolidated agent README files
+ - Aligned WebGUI commands and exports to the 6-agent architecture
+ - Updated QA Manager routing to active agents only
 
 ### Removed
 - Removed utility scripts: add_type_hints.py, demonstrate_llm_integration.py, update_agents_env.py, check_type_coverage.py
@@ -30,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected agent count discrepancies across all documentation
 - Fixed docker-compose.yml service dependencies
 - Updated architecture diagrams to match current implementation
+ - Fixed agent task routing names to match Celery task registration
 
 ## [1.0.0] - 2026-02-10
 

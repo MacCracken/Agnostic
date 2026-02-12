@@ -8,7 +8,7 @@ import socket
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
+from shared.crewai_compat import BaseTool
 from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
@@ -571,6 +571,10 @@ class SecurityComplianceAgent:
         }
 
         self.redis_client.set(f"security_compliance:{session_id}:audit", json.dumps(result))
+        self.redis_client.set(
+            f"security_compliance:{session_id}:{scenario.get('id', 'security_compliance')}:result",
+            json.dumps(result)
+        )
 
         await self._notify_manager(session_id, scenario.get("id", "security_compliance"), result)
 
@@ -674,23 +678,65 @@ class SecurityComplianceAgent:
 
 
 async def main():
-    """Main entry point for Security & Compliance agent"""
+    """Main entry point for Security & Compliance agent with Celery worker"""
     agent = SecurityComplianceAgent()
 
-    sample_task = {
-        "session_id": "session_20240207_143000",
-        "scenario": {
-            "id": "security_compliance_audit",
-            "name": "Comprehensive Security & Compliance Audit",
-            "priority": "critical",
-            "target_url": "http://localhost:8000",
-            "standards": ["OWASP Top 10", "GDPR", "PCI DSS"]
-        },
-        "timestamp": datetime.now().isoformat()
-    }
+    logger.info("Starting Security & Compliance Celery worker...")
 
-    result = await agent.run_security_compliance_audit(sample_task)
-    print(f"Security & Compliance Agent Result: {result}")
+    @agent.celery_app.task(bind=True, name="security_compliance_agent.run_security_compliance_audit")
+    def run_security_compliance_task(self, task_data_json: str):
+        """Celery task wrapper for security & compliance audit"""
+        try:
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(agent.run_security_compliance_audit(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery security/compliance task failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    async def redis_task_listener():
+        """Listen for tasks from Redis pub/sub"""
+        pubsub = agent.redis_client.pubsub()
+        pubsub.subscribe("security_compliance:tasks")
+
+        logger.info("Security & Compliance Redis task listener started")
+
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    task_data = json.loads(message['data'])
+                    result = await agent.run_security_compliance_audit(task_data)
+                    logger.info(f"Security & Compliance task completed: {result.get('status', 'unknown')}")
+                except Exception as e:
+                    logger.error(f"Redis task processing failed: {e}")
+
+    import threading
+
+    def start_celery_worker():
+        """Start Celery worker in separate thread"""
+        argv = [
+            'worker',
+            '--loglevel=info',
+            '--concurrency=2',
+            '--hostname=security-compliance-worker@%h',
+            '--queues=security_compliance,default'
+        ]
+        agent.celery_app.worker_main(argv)
+
+    celery_thread = threading.Thread(target=start_celery_worker, daemon=True)
+    celery_thread.start()
+
+    asyncio.create_task(redis_task_listener())
+
+    logger.info("Security & Compliance agent started with Celery worker and Redis listener")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Security & Compliance agent shutting down...")
+    except Exception as e:
+        logger.error(f"Security & Compliance agent error: {e}")
 
 
 if __name__ == "__main__":

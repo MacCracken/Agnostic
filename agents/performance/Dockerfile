@@ -1,27 +1,17 @@
-FROM python:3.11-slim
+# Use the optimized base image with all dependencies pre-installed
+FROM agnostic-qa-base:latest
 
-WORKDIR /app
+# Copy agent-specific code (all dependencies already installed in base)
+COPY --chown=appuser:appuser agents/performance/ ./agents/performance/
+COPY --chown=appuser:appuser config/ ./config/
+COPY --chown=appuser:appuser shared/ ./shared/
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy agent code
-COPY agents/performance/ ./agents/performance/
-COPY config/ ./config/
-COPY shared/ ./shared/
-
-# Create logs directory
-RUN mkdir -p logs
-
-# Set environment variables
-ENV PYTHONPATH=/app
+# Set agent-specific environment variable
 ENV AGENT_ROLE=performance
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import redis; import pika; print('healthy')" || exit 1
 
 # Run the performance agent
 CMD ["python", "-m", "agents.performance.qa_performance"]

@@ -19,17 +19,22 @@ cp .env.example .env   # then set OPENAI_API_KEY
 # Install dependencies
 pip install -e .[dev,test,web,ml,browser]  # Install with optional dependencies
 
-# Launch all containers
-docker-compose up --build
+# Build using optimized base image (99% faster rebuilds)
+./scripts/build-docker.sh              # Full build: base + all agents
+./scripts/build-docker.sh --base-only  # Build base image only (~5 min)
+./scripts/build-docker.sh --agents-only # Build agents only (~30 sec)
 
-# Detached mode
-docker-compose up -d --build
+# Launch all containers (after building)
+docker-compose up -d
+
+# Traditional build (slower but simpler)
+docker-compose up --build
 
 # Rebuild specific service
 docker-compose up --build <service-name>
 
 # View logs
-docker-compose logs <service-name>   # qa-manager, senior-qa, junior-qa, qa-analyst, sre-agent, accessibility-agent, api-agent, mobile-agent, compliance-agent, chaos-agent, webgui, redis, rabbitmq
+docker-compose logs <service-name>   # qa-manager, senior-qa, junior-qa, qa-analyst, security-compliance-agent, performance-agent, webgui, redis, rabbitmq
 ```
 
 ### Kubernetes (Production/Cloud)
@@ -133,9 +138,6 @@ Performance & Resilience Agent      ─┘
 4. **QA Analyst** (`agents/analyst/qa_analyst.py`) — aggregates test data into structured reports, runs security assessments (headers, TLS, OWASP indicators), profiles performance (latency, throughput, bottlenecks), and produces comprehensive cross-cutting reports with release readiness verdicts. Tools: `DataOrganizationReportingTool`, `SecurityAssessmentTool`, `PerformanceProfilingTool`.
 5. **Security & Compliance Agent** (`agents/security_compliance/qa_security_compliance.py`) — handles security testing (OWASP, penetration testing), compliance validation (GDPR, PCI DSS), and audit trail management. Tools: `SecurityTestingTool`, `ComplianceValidationTool`, `AuditTrailTool`.
 6. **Performance & Resilience Agent** (`agents/performance/qa_performance.py`) — monitors system performance, load testing, stress testing, and infrastructure resilience. Tools: `PerformanceMonitoringTool`, `LoadTestingTool`, `ResilienceValidationTool`.
-8. **Mobile/Device QA** (`agents/mobile/qa_mobile.py`) — tests responsive design, device compatibility matrix, network condition simulation, and mobile UX patterns. Tools: `ResponsiveTestingTool`, `DeviceCompatibilityTool`, `NetworkConditionTool`, `MobileUXTool`.
-9. **Compliance Tester** (`agents/compliance/qa_compliance.py`) — verifies GDPR compliance, PCI DSS standards, audit trail integrity, and organizational policy enforcement. Tools: `GDPRComplianceTool`, `PCIDSSComplianceTool`, `AuditTrailTool`, `PolicyEnforcementTool`.
-10. **Chaos Engineer** (`agents/chaos/qa_chaos.py`) — injects service failures, simulates network partitions, tests resource exhaustion, and validates recovery mechanisms. Tools: `ServiceFailureTool`, `NetworkPartitionTool`, `ResourceExhaustionTool`, `RecoveryValidationTool`.
 
 **Key modules:**
 - `config/model_manager.py` — multi-provider LLM manager (OpenAI, Anthropic, Google, Ollama, LM Studio) with fallback chains
@@ -156,7 +158,13 @@ Performance & Resilience Agent      ─┘
 ## Container & Orchestration
 
 ### Docker Compose (Local)
-Eight containers defined in `docker-compose.yml`: `redis` (:6379), `rabbitmq` (:5672, :15672), `qa-manager`, `senior-qa`, `junior-qa`, `qa-analyst`, `security-compliance-agent`, `performance-agent`, `webgui` (:8000). All agent containers use Python 3.11-slim with shared volume mounts for agent code and config.
+**Eight containers** defined in `docker-compose.yml`: `redis` (:6379), `rabbitmq` (:5672, :15672), `qa-manager`, `senior-qa`, `junior-qa`, `qa-analyst`, `security-compliance-agent`, `performance-agent`, `webgui` (:8000).
+
+**Optimized Build System:**
+- **Base Image** (`agnostic-qa-base`): Pre-built with all common dependencies (CrewAI, LangChain, Redis, RabbitMQ, Playwright, OpenCV)
+- **Agent Images**: Extend base image with only agent-specific code
+- **Performance**: 99% faster rebuilds (~30 sec vs 10-15 min)
+- See [docker/README.md](docker/README.md) for build optimization details
 
 ### Kubernetes (Production)
 **Kustomize-based manifests** in `k8s/manifests/` with:

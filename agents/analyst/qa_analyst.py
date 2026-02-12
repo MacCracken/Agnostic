@@ -9,7 +9,7 @@ import statistics
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
+from shared.crewai_compat import BaseTool
 from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
@@ -59,7 +59,7 @@ class DataOrganizationReportingTool(BaseTool):
         # Executive summary
         executive_summary = self._generate_executive_summary(metrics, findings)
 
-        return {
+        report = {
             "executive_summary": executive_summary,
             "metrics": metrics,
             "findings_by_severity": findings,
@@ -68,21 +68,45 @@ class DataOrganizationReportingTool(BaseTool):
             "report_generated_at": datetime.now().isoformat()
         }
 
+        # Provide legacy keys expected by unit tests
+        report["findings"] = findings
+        report["metrics"] = metrics
+        report["trend_analysis"] = trend
+
+        return report
+
     def _collect_agent_results(self, redis_client: redis.Redis, prefix: str) -> List[Dict]:
-        """Scan Redis for agent result keys and parse them"""
+        """Collect agent results from Redis"""
         results = []
-        cursor = 0
-        while True:
-            cursor, keys = redis_client.scan(cursor, match=f"{prefix}:*:result", count=100)
-            for key in keys:
-                data = redis_client.get(key)
-                if data:
-                    try:
-                        results.append(json.loads(data))
-                    except json.JSONDecodeError:
-                        continue
-            if cursor == 0:
-                break
+
+        try:
+            list_results = redis_client.lrange(f"{prefix}:results", 0, -1)
+            for item in list_results or []:
+                try:
+                    results.append(json.loads(item))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+        except Exception:
+            list_results = []
+
+        if results:
+            return results
+
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = redis_client.scan(cursor, match=f"{prefix}:*:result", count=100)
+                for key in keys:
+                    data = redis_client.get(key)
+                    if data:
+                        try:
+                            results.append(json.loads(data))
+                        except json.JSONDecodeError:
+                            continue
+                if cursor == 0:
+                    break
+        except Exception:
+            return results
         return results
 
     def _categorize_findings(self, results: List[Dict]) -> Dict[str, List]:
@@ -90,6 +114,10 @@ class DataOrganizationReportingTool(BaseTool):
         findings = {"critical": [], "high": [], "medium": [], "low": []}
 
         for result in results:
+            severity = result.get("severity")
+            if severity in findings:
+                findings[severity].append(result)
+
             # Pull from edge case analysis
             for area in result.get("edge_case_analysis", {}).get("high_risk_areas", []):
                 findings["critical"].append({"source": "edge_case", "area": area})
@@ -124,6 +152,11 @@ class DataOrganizationReportingTool(BaseTool):
         detection_times = []
 
         for result in results:
+            if "tests_run" in result:
+                total_tests += result.get("tests_run", 0)
+                passed += result.get("passed", 0)
+                failed += result.get("failed", 0)
+
             exec_data = result.get("test_execution", {}).get("results", {})
             total_tests += exec_data.get("total_tests", 0)
             passed += exec_data.get("passed", 0)
@@ -137,14 +170,15 @@ class DataOrganizationReportingTool(BaseTool):
             if exec_time:
                 detection_times.append(exec_time)
 
-        pass_rate = (passed / total_tests * 100) if total_tests > 0 else 0.0
-        failure_rate = (failed / total_tests * 100) if total_tests > 0 else 0.0
+        pass_rate = (passed / total_tests) if total_tests > 0 else 0.0
+        fail_rate = (failed / total_tests) if total_tests > 0 else 0.0
         coverage = float(np.mean(coverage_scores) * 100) if coverage_scores else 0.0
         mttr = float(np.mean(detection_times)) if detection_times else 0.0
 
         return {
-            "pass_rate": round(pass_rate, 2),
-            "failure_rate": round(failure_rate, 2),
+            "pass_rate": pass_rate,
+            "fail_rate": fail_rate,
+            "failure_rate": fail_rate,
             "coverage": round(coverage, 2),
             "mttr": round(mttr, 2),
             "total_tests": total_tests,
@@ -154,30 +188,47 @@ class DataOrganizationReportingTool(BaseTool):
 
     def _generate_trend_analysis(self, redis_client: redis.Redis, session_id: str, current_metrics: Dict) -> Dict[str, str]:
         """Compare current session metrics against historical data"""
-        previous_report = redis_client.get("analyst:latest_report_metrics")
-        if previous_report:
-            try:
-                prev = json.loads(previous_report)
-                delta = current_metrics["pass_rate"] - prev.get("pass_rate", 0)
-                if delta > 0:
-                    comparison = f"Pass rate improved by {delta:.1f}%"
-                elif delta < 0:
-                    comparison = f"Pass rate declined by {abs(delta):.1f}%"
-                else:
-                    comparison = "Pass rate unchanged"
+        previous_data = redis_client.hgetall("analyst:metrics_history")
 
-                regression = "regression_detected" if current_metrics["failure_rate"] > prev.get("failure_rate", 0) else "stable"
-            except json.JSONDecodeError:
-                comparison = "No valid previous data"
-                regression = "unknown"
+        prev = None
+        if previous_data:
+            previous_report = previous_data.get("previous_run") or previous_data.get("latest")
+            if isinstance(previous_report, (str, bytes, bytearray)):
+                try:
+                    prev = json.loads(previous_report)
+                except json.JSONDecodeError:
+                    prev = None
+        else:
+            previous_report = redis_client.get("analyst:latest_report_metrics")
+            if isinstance(previous_report, (str, bytes, bytearray)):
+                try:
+                    prev = json.loads(previous_report)
+                except json.JSONDecodeError:
+                    prev = None
+
+        if prev:
+            delta = current_metrics["pass_rate"] - prev.get("pass_rate", 0)
+            if delta > 0:
+                comparison = f"Pass rate improved by {delta:.2f}"
+                trend = "improving"
+            elif delta < 0:
+                comparison = f"Pass rate declined by {abs(delta):.2f}"
+                trend = "declining"
+            else:
+                comparison = "Pass rate unchanged"
+                trend = "stable"
         else:
             comparison = "First session — no historical data"
-            regression = "baseline"
+            trend = "stable"
 
-        # Store current metrics for future comparison
-        redis_client.set("analyst:latest_report_metrics", json.dumps(current_metrics))
+        redis_client.hset("analyst:metrics_history", mapping={"previous_run": json.dumps(current_metrics)})
 
-        return {"current_vs_previous": comparison, "regression_trend": regression}
+        return {
+            "trend": trend,
+            "comparison": comparison,
+            "current_vs_previous": comparison,
+            "regression_trend": trend
+        }
 
     def _build_action_items(self, findings: Dict[str, List]) -> List[Dict[str, str]]:
         """Create prioritized action items from findings"""
@@ -194,9 +245,11 @@ class DataOrganizationReportingTool(BaseTool):
         """Produce a human-readable executive summary"""
         critical_count = len(findings.get("critical", []))
         high_count = len(findings.get("high", []))
+        pass_rate_percent = metrics.get("pass_rate", 0) * 100
+        fail_rate_percent = metrics.get("fail_rate", metrics.get("failure_rate", 0)) * 100
         return (
             f"QA Report: {metrics['total_tests']} tests executed — "
-            f"{metrics['pass_rate']}% pass rate, {metrics['failure_rate']}% failure rate. "
+            f"{pass_rate_percent:.2f}% pass rate, {fail_rate_percent:.2f}% failure rate. "
             f"{critical_count} critical and {high_count} high-severity findings identified. "
             f"Test coverage at {metrics['coverage']}%."
         )
@@ -877,7 +930,7 @@ class QAAnalystAgent:
 
         # Gather individual reports from Redis
         report_data = self._get_redis_json(f"analyst:{session_id}:report")
-        reliability_data = self._get_redis_json(f"sre:{session_id}:reliability")
+        resilience_data = self._get_redis_json(f"performance:{session_id}:resilience")
         security_data = self._get_redis_json(f"analyst:{session_id}:security")
         performance_data = self._get_redis_json(f"analyst:{session_id}:performance")
 
@@ -885,7 +938,7 @@ class QAAnalystAgent:
             description=f"""Synthesize a comprehensive QA report for session {session_id}:
 
             Test Report: {json.dumps(report_data) if report_data else 'Not available'}
-            Reliability: {json.dumps(reliability_data) if reliability_data else 'Not available'}
+            Resilience: {json.dumps(resilience_data) if resilience_data else 'Not available'}
             Security: {json.dumps(security_data) if security_data else 'Not available'}
             Performance: {json.dumps(performance_data) if performance_data else 'Not available'}
 
@@ -904,7 +957,7 @@ class QAAnalystAgent:
         # Cross-cutting analysis
         cross_cutting = []
         if security_data and security_data.get("risk_level") in ("high", "critical"):
-            cross_cutting.append("Security vulnerabilities may impact reliability — prioritize remediation before scaling")
+            cross_cutting.append("Security vulnerabilities may impact resilience — prioritize remediation before scaling")
         if performance_data and performance_data.get("regression_detected"):
             cross_cutting.append("Performance regression detected — correlate with recent code changes")
         if report_data and report_data.get("metrics", {}).get("failure_rate", 0) > 20:
@@ -914,11 +967,11 @@ class QAAnalystAgent:
             "session_id": session_id,
             "generated_at": datetime.now().isoformat(),
             "test_report": report_data,
-            "reliability_assessment": reliability_data,
+            "resilience_assessment": resilience_data,
             "security_assessment": security_data,
             "performance_profile": performance_data,
             "cross_cutting_analysis": cross_cutting,
-            "release_readiness": self._assess_release_readiness(report_data, reliability_data, security_data, performance_data)
+            "release_readiness": self._assess_release_readiness(report_data, resilience_data, security_data, performance_data)
         }
 
         self.redis_client.set(f"analyst:{session_id}:comprehensive_report", json.dumps(comprehensive))
@@ -927,7 +980,7 @@ class QAAnalystAgent:
 
         return comprehensive
 
-    def _assess_release_readiness(self, report: Optional[Dict], reliability: Optional[Dict],
+    def _assess_release_readiness(self, report: Optional[Dict], resilience: Optional[Dict],
                                    security: Optional[Dict], performance: Optional[Dict]) -> Dict[str, Any]:
         """Determine overall release readiness"""
         blockers = []
@@ -939,11 +992,9 @@ class QAAnalystAgent:
             if len(report.get("findings_by_severity", {}).get("critical", [])) > 0:
                 blockers.append("Unresolved critical findings")
 
-        if reliability:
-            if reliability.get("health_status") == "unhealthy":
-                blockers.append("Site health status is unhealthy")
-            if not reliability.get("sla_compliance", {}).get("met", True):
-                warnings.append("SLA compliance not met")
+        if resilience:
+            if resilience.get("resilience_score", 1.0) < 0.7:
+                warnings.append("Resilience score below 0.7")
 
         if security:
             if security.get("risk_level") in ("critical", "high"):
@@ -987,23 +1038,108 @@ class QAAnalystAgent:
 
 
 async def main():
-    """Main entry point for QA Analyst agent"""
+    """Main entry point for QA Analyst agent with Celery worker"""
     analyst = QAAnalystAgent()
 
-    sample_task = {
-        "session_id": "session_20240207_143000",
-        "scenario": {
-            "id": "rel_006",
-            "name": "Site Reliability Assessment",
-            "priority": "high",
-            "target_url": "http://localhost:8000/health",
-            "sla_config": {"num_probes": 5, "uptime_threshold": 99.9, "response_time_threshold_ms": 2000}
-        },
-        "timestamp": datetime.now().isoformat()
-    }
+    logger.info("Starting QA Analyst Celery worker...")
 
-    result = await analyst.analyze_and_report(sample_task)
-    print(f"QA Analyst Result: {result}")
+    @analyst.celery_app.task(bind=True, name="qa_analyst.analyze_and_report")
+    def analyze_and_report_task(self, task_data_json: str):
+        """Celery task wrapper for report generation"""
+        try:
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(analyst.analyze_and_report(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery report task failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    @analyst.celery_app.task(bind=True, name="qa_analyst.run_security_assessment")
+    def run_security_assessment_task(self, task_data_json: str):
+        """Celery task wrapper for security assessment"""
+        try:
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(analyst.run_security_assessment(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery security task failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    @analyst.celery_app.task(bind=True, name="qa_analyst.profile_performance")
+    def profile_performance_task(self, task_data_json: str):
+        """Celery task wrapper for performance profiling"""
+        try:
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(analyst.profile_performance(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery performance task failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    @analyst.celery_app.task(bind=True, name="qa_analyst.generate_comprehensive_report")
+    def generate_comprehensive_report_task(self, session_id: str):
+        """Celery task wrapper for comprehensive report"""
+        try:
+            result = asyncio.run(analyst.generate_comprehensive_report(session_id))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery comprehensive report task failed: {e}")
+            return {"status": "error", "error": str(e)}
+
+    async def redis_task_listener():
+        """Listen for tasks from Redis pub/sub"""
+        pubsub = analyst.redis_client.pubsub()
+        pubsub.subscribe("qa_analyst:tasks")
+
+        logger.info("QA Analyst Redis task listener started")
+
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    task_data = json.loads(message['data'])
+                    task_type = task_data.get('task_type', 'report')
+
+                    if task_type == 'security':
+                        result = await analyst.run_security_assessment(task_data)
+                    elif task_type == 'performance':
+                        result = await analyst.profile_performance(task_data)
+                    elif task_type == 'comprehensive_report':
+                        session_id = task_data.get('session_id')
+                        result = await analyst.generate_comprehensive_report(str(session_id))
+                    else:
+                        result = await analyst.analyze_and_report(task_data)
+
+                    logger.info(f"Analyst task completed: {result.get('status', 'unknown')}")
+                except Exception as e:
+                    logger.error(f"Redis task processing failed: {e}")
+
+    import threading
+
+    def start_celery_worker():
+        """Start Celery worker in separate thread"""
+        argv = [
+            'worker',
+            '--loglevel=info',
+            '--concurrency=2',
+            '--hostname=qa-analyst-worker@%h',
+            '--queues=qa_analyst,default'
+        ]
+        analyst.celery_app.worker_main(argv)
+
+    celery_thread = threading.Thread(target=start_celery_worker, daemon=True)
+    celery_thread.start()
+
+    asyncio.create_task(redis_task_listener())
+
+    logger.info("QA Analyst agent started with Celery worker and Redis listener")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("QA Analyst agent shutting down...")
+    except Exception as e:
+        logger.error(f"QA Analyst agent error: {e}")
 
 
 if __name__ == "__main__":

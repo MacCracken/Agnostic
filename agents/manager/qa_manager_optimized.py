@@ -5,7 +5,7 @@ import asyncio
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
-from crewai.tools import BaseTool
+from shared.crewai_compat import BaseTool
 from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
@@ -36,41 +36,40 @@ class TestPlanDecompositionTool(BaseTool):
     def _extract_scenarios(self, requirements: str) -> List[str]:
         # LLM-based scenario extraction for 6-agent architecture
         scenarios = [
-            "Performance and load testing scenarios",
+            "Performance and resilience testing scenarios",
             "Security and compliance validation scenarios",
-            "Infrastructure resilience and reliability scenarios",
-            "User experience and accessibility scenarios",
+            "Reporting and risk analysis scenarios",
             "Complex UI and interaction scenarios",
-            "Regression and data integrity scenarios"
+            "Regression and data integrity scenarios",
+            "System workflow validation scenarios"
         ]
         return scenarios
 
     def _extract_criteria(self, requirements: str) -> List[str]:
         return [
             "System responds within performance SLA thresholds",
-            "All security and compliance requirements met",
-            "Infrastructure resilient under failure conditions",
-            "User experience meets accessibility standards",
+            "Security and compliance requirements are met",
+            "Resilience validation passes for defined failure scenarios",
             "Complex workflows function correctly",
-            "Data integrity maintained across all tests"
+            "Regression suite passes with acceptable failure rate",
+            "Report includes actionable findings and release readiness"
         ]
 
     def _identify_risks(self, requirements: str) -> List[str]:
         return [
             "Performance degradation under load",
             "Security vulnerabilities in critical paths",
-            "Infrastructure failure recovery issues",
-            "Accessibility compliance gaps",
+            "Resilience gaps under failure scenarios",
             "Complex UI interaction failures",
-            "Data corruption during regression testing"
+            "Regression instability or flaky tests",
+            "Incomplete reporting of critical risks"
         ]
 
     def _create_priority_matrix(self, requirements: str) -> Dict[str, str]:
         return {
-            "performance_critical": "performance_agent",
-            "security_critical": "security_compliance_agent", 
-            "infrastructure_critical": "resilience_agent",
-            "ux_critical": "user_experience_agent",
+            "performance_critical": "performance",
+            "security_critical": "security_compliance",
+            "analysis_critical": "qa_analyst",
             "complexity_critical": "senior_qa",
             "regression_critical": "junior_qa"
         }
@@ -78,29 +77,29 @@ class TestPlanDecompositionTool(BaseTool):
     def _create_agent_delegation_plan(self, requirements: str) -> Dict[str, Any]:
         """Create optimal delegation plan for 6-agent architecture"""
         return {
-            "performance_testing": {
-                "agent": "performance_agent",
+            "performance": {
+                "agent": "performance",
                 "triggers": ["load", "slowing", "network", "latency", "throughput"],
                 "complexity_threshold": "high_load",
-                "delegation_logic": "route_to_performance_agent"
+                "delegation_logic": "route_to_performance"
             },
             "security_compliance": {
-                "agent": "security_compliance_agent",
+                "agent": "security_compliance",
                 "triggers": ["security", "compliance", "gdpr", "pci", "owasp", "vulnerability"],
                 "complexity_threshold": "regulatory_risk",
-                "delegation_logic": "route_to_security_compliance_agent"
+                "delegation_logic": "route_to_security_compliance"
             },
-            "infrastructure_resilience": {
-                "agent": "resilience_agent",
-                "triggers": ["infrastructure", "reliability", "sre", "chaos", "monitoring", "uptime"],
+            "resilience": {
+                "agent": "performance",
+                "triggers": ["resilience", "reliability", "chaos", "recovery", "uptime"],
                 "complexity_threshold": "system_risk",
-                "delegation_logic": "route_to_resilience_agent"
+                "delegation_logic": "route_to_performance"
             },
-            "user_experience": {
-                "agent": "user_experience_agent",
-                "triggers": ["ux", "accessibility", "mobile", "responsive", "wcag", "device"],
-                "complexity_threshold": "user_impact",
-                "delegation_logic": "route_to_user_experience_agent"
+            "qa_analyst": {
+                "agent": "qa_analyst",
+                "triggers": ["report", "analysis", "metrics", "readiness", "summary"],
+                "complexity_threshold": "cross_domain",
+                "delegation_logic": "route_to_qa_analyst"
             },
             "senior_qa": {
                 "agent": "senior_qa",
@@ -186,33 +185,23 @@ class OptimizedQAManager:
 
         # Agent routing configuration for 6-agent system
         self.agent_routing = {
-            "performance_agent": {
-                "endpoint": "http://performance:8001",
-                "queue": "performance_agent",
-                "capabilities": ["load_testing", "performance_profiling", "network_simulation"]
+            "performance": {
+                "queue": "performance",
+                "capabilities": ["load_testing", "performance_monitoring", "resilience_validation"]
             },
-            "security_compliance_agent": {
-                "endpoint": "http://security-compliance:8002",
-                "queue": "security_compliance_agent",
+            "security_compliance": {
+                "queue": "security_compliance",
                 "capabilities": ["security_testing", "gdpr_compliance", "pci_dss", "owasp"]
             },
-            "resilience_agent": {
-                "endpoint": "http://resilience:8003",
-                "queue": "resilience_agent",
-                "capabilities": ["sre_monitoring", "chaos_testing", "infrastructure_health", "recovery"]
-            },
-            "user_experience_agent": {
-                "endpoint": "http://user-experience:8004",
-                "queue": "user_experience_agent",
-                "capabilities": ["responsive_testing", "accessibility", "mobile_ux", "wcag_compliance"]
+            "qa_analyst": {
+                "queue": "qa_analyst",
+                "capabilities": ["reporting", "security_assessment", "performance_profiling"]
             },
             "senior_qa": {
-                "endpoint": "http://senior:8005",
                 "queue": "senior_qa",
                 "capabilities": ["complex_ui_testing", "self_healing", "model_based_testing", "edge_cases"]
             },
             "junior_qa": {
-                "endpoint": "http://junior:8006",
                 "queue": "junior_qa",
                 "capabilities": ["regression_testing", "data_generation", "test_execution", "synthetic_data"]
             }
@@ -224,8 +213,8 @@ class OptimizedQAManager:
             backstory="""You are an expert QA Manager with 10+ years of experience orchestrating
             large-scale testing operations. You excel at decomposing requirements, delegating to
             specialized agents, and synthesizing comprehensive test reports. You now manage an
-            optimized 6-agent architecture: Performance, Security & Compliance, Resilience,
-            User Experience, Senior QA, and Junior QA agents.""",
+            optimized 6-agent architecture: Performance & Resilience, Security & Compliance,
+            QA Analyst, Senior QA, and Junior QA agents.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
@@ -309,7 +298,7 @@ class OptimizedQAManager:
         # Performance testing delegation
         if self._should_delegate("performance", delegation_plan, test_plan):
             agent_tasks["performance"] = await self._create_agent_task(
-                session_id, "performance_agent", {
+                session_id, "performance", {
                     "scenario": {
                         "id": "perf_analysis",
                         "name": "Performance & Load Analysis",
@@ -324,7 +313,7 @@ class OptimizedQAManager:
         # Security & compliance delegation
         if self._should_delegate("security_compliance", delegation_plan, test_plan):
             agent_tasks["security_compliance"] = await self._create_agent_task(
-                session_id, "security_compliance_agent", {
+                session_id, "security_compliance", {
                     "scenario": {
                         "id": "security_audit",
                         "name": "Security & Compliance Audit",
@@ -335,33 +324,17 @@ class OptimizedQAManager:
                 }
             )
 
-        # Resilience testing delegation
+        # Resilience validation delegation (via performance agent)
         if self._should_delegate("resilience", delegation_plan, test_plan):
             agent_tasks["resilience"] = await self._create_agent_task(
-                session_id, "resilience_agent", {
+                session_id, "performance", {
                     "scenario": {
-                        "id": "resilience_analysis",
-                        "name": "Infrastructure & Resilience Analysis",
+                        "id": "resilience_validation",
+                        "name": "Resilience Validation",
                         "target_url": task_data.get("target_url", "http://localhost:8000/health"),
-                        "test_scope": "full_resilience_suite",
-                        "sla_config": task_data.get("sla_config", {})
+                        "failure_scenarios": task_data.get("failure_scenarios", ["database_down", "cache_miss"])
                     },
-                    "priority": test_plan.get("priority_matrix", {}).get("infrastructure_critical", "high")
-                }
-            )
-
-        # User experience delegation
-        if self._should_delegate("user_experience", delegation_plan, test_plan):
-            agent_tasks["user_experience"] = await self._create_agent_task(
-                session_id, "user_experience_agent", {
-                    "scenario": {
-                        "id": "ux_analysis",
-                        "name": "User Experience & Accessibility Analysis",
-                        "target_url": task_data.get("target_url", "http://localhost:8000"),
-                        "test_scope": "full_ux_suite",
-                        "wcag_level": task_data.get("wcag_level", "AA")
-                    },
-                    "priority": test_plan.get("priority_matrix", {}).get("ux_critical", "high")
+                    "priority": test_plan.get("priority_matrix", {}).get("performance_critical", "high")
                 }
             )
 
@@ -395,19 +368,33 @@ class OptimizedQAManager:
                 }
             )
 
+        # QA Analyst delegation
+        if self._should_delegate("qa_analyst", delegation_plan, test_plan):
+            agent_tasks["qa_analyst"] = await self._create_agent_task(
+                session_id, "qa_analyst", {
+                    "scenario": {
+                        "id": "qa_report",
+                        "name": "Comprehensive QA Report",
+                        "priority": "high",
+                        "target_url": task_data.get("target_url", "http://localhost:8000")
+                    },
+                    "priority": test_plan.get("priority_matrix", {}).get("analysis_critical", "high")
+                }
+            )
+
         return agent_tasks
 
     def _should_delegate(self, agent_type: str, delegation_plan: Dict, test_plan: Dict) -> bool:
         """Determine if agent should be delegated based on test plan"""
-        # Check delegation plan
-        if agent_type in delegation_plan:
-            return delegation_plan[agent_type].get("delegate", True)
-        
-        # Check test scenarios for relevant triggers
-        agent_config = self.agent_routing.get(f"{agent_type}_agent", {})
-        triggers = agent_config.get("triggers", [])
+        plan = delegation_plan.get(agent_type, {})
+        if not plan:
+            return False
+
+        triggers = plan.get("triggers", [])
+        if not triggers:
+            return True
+
         scenarios = test_plan.get("test_scenarios", [])
-        
         return any(any(trigger in scenario.lower() for trigger in triggers) for scenario in scenarios)
 
     async def _create_agent_task(self, session_id: str, agent_type: str, task_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -514,17 +501,15 @@ class OptimizedQAManager:
                 agent_result = result.get("result", {})
                 
                 if agent_type == "performance":
-                    coverage_areas["performance"] = agent_result.get("performance_analysis", {}).get("coverage", {})
+                    coverage_areas["performance"] = agent_result.get("coverage", {})
                 elif agent_type == "security_compliance":
-                    coverage_areas["security"] = agent_result.get("security_compliance_audit", {}).get("coverage", {})
-                elif agent_type == "resilience":
-                    coverage_areas["resilience"] = agent_result.get("resilience_analysis", {}).get("coverage", {})
-                elif agent_type == "user_experience":
-                    coverage_areas["ux"] = agent_result.get("user_experience_analysis", {}).get("coverage", {})
+                    coverage_areas["security"] = agent_result.get("coverage", {})
+                elif agent_type == "qa_analyst":
+                    coverage_areas["analysis"] = agent_result.get("report", {}).get("metrics", {})
                 elif agent_type == "senior_qa":
-                    coverage_areas["complex_testing"] = agent_result.get("complex_ui_analysis", {}).get("coverage", {})
+                    coverage_areas["complex_testing"] = agent_result.get("edge_case_analysis", {}).get("coverage", {})
                 elif agent_type == "junior_qa":
-                    coverage_areas["regression"] = agent_result.get("regression_analysis", {}).get("coverage", {})
+                    coverage_areas["regression"] = agent_result.get("test_execution", {}).get("results", {})
 
         return coverage_areas
 

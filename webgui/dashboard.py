@@ -227,7 +227,7 @@ class DashboardManager:
             
             # Get agent tasks
             tasks = {}
-            for agent_name in ["manager", "senior", "junior", "analyst", "sre", "accessibility", "api", "mobile", "compliance", "chaos"]:
+            for agent_name in ["manager", "senior", "junior", "analyst", "security_compliance", "performance"]:
                 task_key = f"{agent_name}:{session_id}:tasks"
                 task_data = self.redis_client.lrange(task_key, 0, -1)
                 if task_data:
@@ -251,7 +251,7 @@ class DashboardManager:
         
         try:
             # Get notifications from all agents
-            for agent_name in ["manager", "senior", "junior", "analyst", "sre", "accessibility", "api", "mobile", "compliance", "chaos"]:
+            for agent_name in ["manager", "senior", "junior", "analyst", "security_compliance", "performance"]:
                 notif_key = f"{agent_name}:{session_id}:notifications"
                 notifications = self.redis_client.lrange(notif_key, 0, -1)
                 

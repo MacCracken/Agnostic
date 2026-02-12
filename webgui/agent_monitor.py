@@ -23,12 +23,8 @@ class AgentType(Enum):
     SENIOR = "senior"
     JUNIOR = "junior"
     ANALYST = "analyst"
-    SRE = "sre"
-    ACCESSIBILITY = "accessibility"
-    API = "api"
-    MOBILE = "mobile"
-    COMPLIANCE = "compliance"
-    CHAOS = "chaos"
+    SECURITY_COMPLIANCE = "security_compliance"
+    PERFORMANCE = "performance"
 
 class TaskStatus(Enum):
     PENDING = "pending"
@@ -97,12 +93,8 @@ class AgentMonitor:
             AgentType.SENIOR: {"name": "senior-qa", "description": "Senior QA Engineer"},
             AgentType.JUNIOR: {"name": "junior-qa", "description": "Junior QA Worker"},
             AgentType.ANALYST: {"name": "qa-analyst", "description": "QA Analyst"},
-            AgentType.SRE: {"name": "sre-agent", "description": "Site Reliability Engineer"},
-            AgentType.ACCESSIBILITY: {"name": "accessibility-agent", "description": "Accessibility Tester"},
-            AgentType.API: {"name": "api-agent", "description": "API Integration Engineer"},
-            AgentType.MOBILE: {"name": "mobile-agent", "description": "Mobile/Device QA"},
-            AgentType.COMPLIANCE: {"name": "compliance-agent", "description": "Compliance Tester"},
-            AgentType.CHAOS: {"name": "chaos-agent", "description": "Chaos Engineer"}
+            AgentType.SECURITY_COMPLIANCE: {"name": "security-compliance-agent", "description": "Security & Compliance Agent"},
+            AgentType.PERFORMANCE: {"name": "performance-agent", "description": "Performance & Resilience Agent"}
         }
     
     async def get_all_agent_status(self) -> List[AgentStatus]:

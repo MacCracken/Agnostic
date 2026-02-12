@@ -107,7 +107,7 @@ Raw Test Data → Data Processing → Template Rendering → Format Output
 
 **Compliance Report:**
 - Audit trails, regulatory checklists
-- Security assessments, accessibility results
+- Security assessments, performance and resilience results
 - Formal documentation for compliance teams
 
 ## Implementation Notes

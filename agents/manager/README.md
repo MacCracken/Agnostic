@@ -170,10 +170,10 @@ qa-manager:
 ```python
 delegation_rules = {
     "high_complexity": "senior_qa",
-    "regression_testing": "junior_qa", 
+    "regression_testing": "junior_qa",
     "analysis_reporting": "qa_analyst",
-    "performance_testing": "sre_agent",
-    "accessibility_testing": "accessibility_agent"
+    "performance_testing": "performance_agent",
+    "security_compliance": "security_compliance_agent"
 }
 ```
 

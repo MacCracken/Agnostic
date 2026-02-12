@@ -473,7 +473,7 @@ class HistoryManager:
                     metrics["test_coverage"] = int((metrics["scenarios_completed"] / metrics["scenarios_total"]) * 100)
             
             # Count agents with results
-            agents = ["manager", "senior", "junior", "analyst", "sre", "accessibility", "api", "mobile", "compliance", "chaos"]
+            agents = ["manager", "senior", "junior", "analyst", "security_compliance", "performance"]
             for agent in agents:
                 agent_key = f"{agent}:{session_id}:report"
                 if agent == "manager":
