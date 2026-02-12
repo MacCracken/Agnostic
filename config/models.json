@@ -69,8 +69,52 @@
   },
   "primary_provider": "openai",
   "fallback_providers": ["ollama"],
+  "agent_specific_models": {
+    "qa-manager": {
+      "preferred_provider": "openai",
+      "model": "gpt-4",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "fallback_providers": ["anthropic", "google"]
+    },
+    "senior-qa": {
+      "preferred_provider": "openai",
+      "model": "gpt-4",
+      "temperature": 0.2,
+      "max_tokens": 4000,
+      "fallback_providers": ["anthropic", "google"]
+    },
+    "junior-qa": {
+      "preferred_provider": "openai",
+      "model": "gpt-3.5-turbo",
+      "temperature": 0.1,
+      "max_tokens": 2000,
+      "fallback_providers": ["ollama", "lm_studio"]
+    },
+    "qa-analyst": {
+      "preferred_provider": "openai",
+      "model": "gpt-4",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "fallback_providers": ["anthropic", "google"]
+    },
+    "security-compliance": {
+      "preferred_provider": "anthropic",
+      "model": "claude-3-sonnet-20240229",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "fallback_providers": ["openai", "google"]
+    },
+    "performance": {
+      "preferred_provider": "openai",
+      "model": "gpt-4",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "fallback_providers": ["anthropic", "google"]
+    }
+  },
   "routing": {
-    "strategy": "primary_first",
+    "strategy": "agent_specific_first",
     "retry_attempts": 2,
     "timeout_seconds": 30
   },

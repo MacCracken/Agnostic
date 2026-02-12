@@ -480,14 +480,17 @@ class ModelManager:
                 
                 logger.info(f"Loaded {len(self.providers)} model providers")
                 logger.info(f"Primary provider: {self.primary_provider}")
+                return config
                 
             else:
                 logger.warning(f"Model config file not found: {config_path}")
                 self._create_default_config()
+                return {}
                 
         except Exception as e:
             logger.error(f"Error loading model config: {e}")
             self._create_default_config()
+            return {}
     
     def _create_provider(self, config: Dict[str, Any]) -> Optional[BaseModelProvider]:
         """Create a provider instance based on configuration"""
@@ -538,6 +541,7 @@ class ModelManager:
         
         # Load the default config
         self.load_config()
+        return default_config
     
     async def chat_completion(self, messages: List[Dict[str, str]], provider: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """Perform chat completion with specified or primary provider"""
@@ -550,21 +554,65 @@ class ModelManager:
                 "details": f"Provider '{target_provider}' not found or not enabled"
             }
         
-        # Try primary provider first
-        result = await self.providers[target_provider].chat_completion(messages, **kwargs)
+        # Load config to check for agent-specific settings
+        try:
+            config_path = os.path.join(os.getcwd(), self.config_file)
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        except:
+            config = {}
         
-        # If primary fails and fallbacks are configured, try them
-        if not result.get("success", False) and self.fallback_providers:
-            for fallback_provider in self.fallback_providers:
-                if fallback_provider in self.providers and fallback_provider != target_provider:
-                    logger.info(f"Trying fallback provider: {fallback_provider}")
-                    fallback_result = await self.providers[fallback_provider].chat_completion(messages, **kwargs)
-                    if fallback_result.get("success", False):
-                        logger.info(f"Fallback provider {fallback_provider} succeeded")
-                        fallback_result["fallback_used"] = fallback_provider
-                        return fallback_result
+        # Check for agent-specific model configuration
+        agent_role = kwargs.get("agent_role")
+        if agent_role and "agent_specific_models" in config:
+            agent_config = config["agent_specific_models"].get(agent_role, {})
+            preferred_provider = agent_config.get("preferred_provider", target_provider)
+            
+            # Use agent-specific temperature and tokens if specified
+            if "temperature" in agent_config:
+                kwargs["temperature"] = agent_config["temperature"]
+            if "max_tokens" in agent_config:
+                kwargs["max_tokens"] = agent_config["max_tokens"]
+            
+            # Use agent-specific fallback chain if configured
+            agent_fallbacks = agent_config.get("fallback_providers", self.fallback_providers)
+        else:
+            preferred_provider = target_provider
+            agent_fallbacks = self.fallback_providers
         
-        return result
+        # Try preferred provider first
+        if preferred_provider in self.providers:
+            logger.info(f"Using preferred provider for {agent_role}: {preferred_provider}")
+            result = await self.providers[preferred_provider].chat_completion(messages, **kwargs)
+            
+            # If preferred fails and fallbacks are configured, try them
+            if not result.get("success", False) and agent_fallbacks:
+                for fallback_provider in agent_fallbacks:
+                    if fallback_provider in self.providers and fallback_provider != preferred_provider:
+                        logger.info(f"Trying fallback provider: {fallback_provider}")
+                        fallback_result = await self.providers[fallback_provider].chat_completion(messages, **kwargs)
+                        if fallback_result.get("success", False):
+                            logger.info(f"Fallback provider {fallback_provider} succeeded")
+                            fallback_result["fallback_used"] = fallback_provider
+                            return fallback_result
+            
+            return result
+        else:
+            # Fallback to original target provider if preferred is not available
+            result = await self.providers[target_provider].chat_completion(messages, **kwargs)
+            
+            # If primary fails and fallbacks are configured, try them
+            if not result.get("success", False) and self.fallback_providers:
+                for fallback_provider in self.fallback_providers:
+                    if fallback_provider in self.providers and fallback_provider != target_provider:
+                        logger.info(f"Trying fallback provider: {fallback_provider}")
+                        fallback_result = await self.providers[fallback_provider].chat_completion(messages, **kwargs)
+                        if fallback_result.get("success", False):
+                            logger.info(f"Fallback provider {fallback_provider} succeeded")
+                            fallback_result["fallback_used"] = fallback_provider
+                            return fallback_result
+            
+            return result
     
     async def test_all_connections(self) -> Dict[str, bool]:
         """Test connections to all enabled providers"""

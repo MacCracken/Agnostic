@@ -1,0 +1,243 @@
+{
+  "scan_targets": {
+    "web_application": {
+      "base_url": "${TEST_WEBAPP_URL:-http://localhost:3000}",
+      "endpoints": [
+        "/",
+        "/login",
+        "/dashboard",
+        "/api/users",
+        "/api/products"
+      ],
+      "authentication": {
+        "type": "form",
+        "login_url": "/login",
+        "username_field": "username",
+        "password_field": "password",
+        "test_credentials": {
+          "username": "${TEST_USER:-testuser}",
+          "password": "${TEST_PASSWORD:-testpass}"
+        }
+      },
+      "scan_frequency": "daily",
+      "timeout_seconds": 300
+    },
+    "api_services": {
+      "base_url": "${TEST_API_URL:-http://localhost:3001/api}",
+      "endpoints": [
+        "/users",
+        "/products",
+        "/orders",
+        "/health"
+      ],
+      "authentication": {
+        "type": "bearer",
+        "token_url": "/auth/login",
+        "test_token": "${TEST_API_TOKEN:-test_bearer_token}"
+      },
+      "scan_frequency": "hourly",
+      "timeout_seconds": 120
+    },
+    "mobile_application": {
+      "package_name": "${TEST_MOBILE_APP_PACKAGE:-com.example.testapp}",
+      "activities": [
+        "MainActivity",
+        "LoginActivity",
+        "DashboardActivity"
+      ],
+      "scan_frequency": "weekly",
+      "timeout_seconds": 600
+    }
+  },
+  "sla_thresholds": {
+    "performance": {
+      "response_time": {
+        "critical": 5000,
+        "warning": 2000,
+        "target": 1000
+      },
+      "throughput": {
+        "critical_rps": 10,
+        "warning_rps": 50,
+        "target_rps": 100
+      },
+      "error_rate": {
+        "critical_percent": 5.0,
+        "warning_percent": 2.0,
+        "target_percent": 1.0
+      },
+      "availability": {
+        "critical_percent": 99.0,
+        "warning_percent": 99.5,
+        "target_percent": 99.9
+      }
+    },
+    "security": {
+      "vulnerability_severity": {
+        "critical_threshold": 0,
+        "high_threshold": 2,
+        "medium_threshold": 10,
+        "low_threshold": 50
+      },
+      "compliance_score": {
+        "critical_percent": 80,
+        "warning_percent": 90,
+        "target_percent": 95
+      }
+    },
+    "resource_usage": {
+      "cpu_usage": {
+        "critical_percent": 90,
+        "warning_percent": 75,
+        "target_percent": 60
+      },
+      "memory_usage": {
+        "critical_percent": 90,
+        "warning_percent": 80,
+        "target_percent": 70
+      },
+      "disk_usage": {
+        "critical_percent": 95,
+        "warning_percent": 85,
+        "target_percent": 75
+      }
+    }
+  },
+  "performance_baselines": {
+    "web_application": {
+      "page_load_time": {
+        "home": 1.5,
+        "login": 2.0,
+        "dashboard": 3.0,
+        "search": 1.0
+      },
+      "api_response_time": {
+        "users": 500,
+        "products": 300,
+        "orders": 800,
+        "health": 100
+      },
+      "concurrent_users": {
+        "target": 1000,
+        "maximum": 5000
+      },
+      "resource_limits": {
+        "max_memory_mb": 2048,
+        "max_cpu_percent": 80,
+        "max_disk_io_mb": 100
+      }
+    },
+    "api_services": {
+      "endpoint_performance": {
+        "get_users": 200,
+        "create_user": 500,
+        "update_user": 400,
+        "delete_user": 300,
+        "get_products": 150,
+        "create_order": 800
+      },
+      "rate_limits": {
+        "requests_per_minute": 1000,
+        "burst_limit": 1200
+      },
+      "database_performance": {
+        "max_query_time_ms": 100,
+        "max_connection_pool_size": 50
+      }
+    },
+    "mobile_application": {
+      "startup_time": {
+        "cold_start": 3.0,
+        "warm_start": 1.0
+      },
+      "screen_transition": {
+        "average_time": 0.5,
+        "max_time": 1.5
+      },
+      "memory_usage": {
+        "max_heap_mb": 256,
+        "max_native_mb": 128
+      },
+      "battery_usage": {
+        "target_percent_per_hour": 5,
+        "max_percent_per_hour": 10
+      }
+    }
+  },
+  "testing_configuration": {
+    "test_environments": {
+      "development": {
+        "scan_frequency": "manual",
+        "performance_testing": false,
+        "security_scanning": false
+      },
+      "staging": {
+        "scan_frequency": "daily",
+        "performance_testing": true,
+        "security_scanning": true
+      },
+      "production": {
+        "scan_frequency": "continuous",
+        "performance_testing": true,
+        "security_scanning": true
+      }
+    },
+    "notification_settings": {
+      "email_alerts": {
+        "enabled": true,
+        "recipients": ["qa-team@example.com"],
+        "severity_threshold": "high"
+      },
+      "slack_alerts": {
+        "enabled": true,
+        "webhook_url": "${SLACK_WEBHOOK_URL}",
+        "channel": "#qa-alerts",
+        "severity_threshold": "critical"
+      },
+      "pagerduty_alerts": {
+        "enabled": false,
+        "service_key": "${PAGERDUTY_SERVICE_KEY}",
+        "severity_threshold": "critical"
+      }
+    },
+    "reporting": {
+      "schedule": "daily",
+      "format": ["pdf", "json", "csv"],
+      "retention_days": 90,
+      "include_trends": true,
+      "include_recommendations": true
+    }
+  },
+  "agent_configuration": {
+    "qa-manager": {
+      "max_concurrent_tasks": 10,
+      "task_timeout_seconds": 3600,
+      "retry_attempts": 3
+    },
+    "senior-qa": {
+      "max_concurrent_tasks": 5,
+      "task_timeout_seconds": 7200,
+      "retry_attempts": 2
+    },
+    "junior-qa": {
+      "max_concurrent_tasks": 20,
+      "task_timeout_seconds": 1800,
+      "retry_attempts": 3
+    },
+    "qa-analyst": {
+      "max_concurrent_tasks": 8,
+      "task_timeout_seconds": 5400,
+      "retry_attempts": 2
+    },
+    "security-compliance": {
+      "max_concurrent_tasks": 3,
+      "task_timeout_seconds": 10800,
+      "retry_attempts": 1
+    },
+    "performance": {
+      "max_concurrent_tasks": 4,
+      "task_timeout_seconds": 14400,
+      "retry_attempts": 1
+    }
+  }
+}
