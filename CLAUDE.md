@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Agentic QA Team System — a containerized, multi-agent QA platform powered by CrewAI. Ten specialized AI agents (QA Manager, Senior QA Engineer, Junior QA Worker, QA Analyst, Site Reliability Engineer, Accessibility Tester, API Integration Engineer, Mobile/Device QA, Compliance Tester, Chaos Engineer) collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance/accessibility/compliance analysis. A Chainlit-based WebGUI provides human-in-the-loop interaction.
+Agentic QA Team System — a containerized, multi-agent QA platform powered by CrewAI. Six specialized AI agents (QA Manager, Senior QA Engineer, Junior QA Worker, QA Analyst, Security & Compliance Agent, Performance & Resilience Agent) collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance testing. A Chainlit-based WebGUI provides human-in-the-loop interaction.
 
 All application code lives under the project root directory.
 
@@ -121,13 +121,9 @@ pre-commit run --all-files                         # Run all quality checks
 QA Manager (Orchestrator)          ──┐
 Senior QA Engineer (Expert)         ─┤
 Junior QA Worker (Executor)         ─┤
-QA Analyst (Analyst)                ─┤
-Site Reliability Engineer (SRE)     ─┤
-Accessibility Tester (A11y)         ─┼── Redis + RabbitMQ Bus ── Chainlit WebGUI (:8000)
-API Integration Engineer (API)      ─┤
-Mobile/Device QA (Mobile)           ─┤
-Compliance Tester (Compliance)      ─┤
-Chaos Engineer (Chaos)              ─┘
+QA Analyst (Analyst)                ─┼── Redis + RabbitMQ Bus ── Chainlit WebGUI (:8000)
+Security & Compliance Agent         ─┤
+Performance & Resilience Agent      ─┘
 ```
 
 **Agent roles and delegation flow:**
@@ -135,9 +131,8 @@ Chaos Engineer (Chaos)              ─┘
 2. **Senior QA Engineer** (`agents/senior/senior_qa.py`) — handles complex scenarios: self-healing UI selectors (CV + semantic analysis), model-based testing (FSM), edge-case/boundary analysis. Tools: `SelfHealingTool`, `ModelBasedTestingTool`, `EdgeCaseAnalysisTool`.
 3. **Junior QA Worker** (`agents/junior/junior_qa.py`) — executes regression suites, root cause detection, synthetic data generation, risk-based test ordering, visual regression testing. Tools: `RegressionTestingTool`, `SyntheticDataGeneratorTool`, `TestExecutionOptimizerTool`, `VisualRegressionTool`.
 4. **QA Analyst** (`agents/analyst/qa_analyst.py`) — aggregates test data into structured reports, runs security assessments (headers, TLS, OWASP indicators), profiles performance (latency, throughput, bottlenecks), and produces comprehensive cross-cutting reports with release readiness verdicts. Tools: `DataOrganizationReportingTool`, `SecurityAssessmentTool`, `PerformanceProfilingTool`.
-5. **Site Reliability Engineer** (`agents/sre/qa_sre.py`) — monitors site reliability (health checks, SLA compliance), tests database resilience, checks infrastructure health, and handles incident response. Tools: `SiteReliabilityTool`, `DatabaseTestingTool`, `InfrastructureHealthTool`, `IncidentResponseTool`.
-6. **Accessibility Tester** (`agents/accessibility/qa_accessibility.py`) — audits WCAG 2.1 AA/AAA compliance, screen reader compatibility, keyboard navigation, and color contrast. Tools: `WCAGComplianceTool`, `ScreenReaderTool`, `KeyboardNavigationTool`, `ColorContrastTool`.
-7. **API Integration Engineer** (`agents/api/qa_api.py`) — validates OpenAPI specs, verifies consumer/provider contracts, checks API versioning, and performs endpoint load testing. Tools: `APISchemaValidationTool`, `ContractTestingTool`, `APIVersioningTool`, `APILoadTool`.
+5. **Security & Compliance Agent** (`agents/security_compliance/qa_security_compliance.py`) — handles security testing (OWASP, penetration testing), compliance validation (GDPR, PCI DSS), and audit trail management. Tools: `SecurityTestingTool`, `ComplianceValidationTool`, `AuditTrailTool`.
+6. **Performance & Resilience Agent** (`agents/performance/qa_performance.py`) — monitors system performance, load testing, stress testing, and infrastructure resilience. Tools: `PerformanceMonitoringTool`, `LoadTestingTool`, `ResilienceValidationTool`.
 8. **Mobile/Device QA** (`agents/mobile/qa_mobile.py`) — tests responsive design, device compatibility matrix, network condition simulation, and mobile UX patterns. Tools: `ResponsiveTestingTool`, `DeviceCompatibilityTool`, `NetworkConditionTool`, `MobileUXTool`.
 9. **Compliance Tester** (`agents/compliance/qa_compliance.py`) — verifies GDPR compliance, PCI DSS standards, audit trail integrity, and organizational policy enforcement. Tools: `GDPRComplianceTool`, `PCIDSSComplianceTool`, `AuditTrailTool`, `PolicyEnforcementTool`.
 10. **Chaos Engineer** (`agents/chaos/qa_chaos.py`) — injects service failures, simulates network partitions, tests resource exhaustion, and validates recovery mechanisms. Tools: `ServiceFailureTool`, `NetworkPartitionTool`, `ResourceExhaustionTool`, `RecoveryValidationTool`.
@@ -161,7 +156,7 @@ Chaos Engineer (Chaos)              ─┘
 ## Container & Orchestration
 
 ### Docker Compose (Local)
-Thirteen containers defined in `docker-compose.yml`: `redis` (:6379), `rabbitmq` (:5672, :15672), `qa-manager`, `senior-qa`, `junior-qa`, `qa-analyst`, `sre-agent`, `accessibility-agent`, `api-agent`, `mobile-agent`, `compliance-agent`, `chaos-agent`, `webgui` (:8000). All agent containers use Python 3.11-slim with shared volume mounts for agent code and config.
+Eight containers defined in `docker-compose.yml`: `redis` (:6379), `rabbitmq` (:5672, :15672), `qa-manager`, `senior-qa`, `junior-qa`, `qa-analyst`, `security-compliance-agent`, `performance-agent`, `webgui` (:8000). All agent containers use Python 3.11-slim with shared volume mounts for agent code and config.
 
 ### Kubernetes (Production)
 **Kustomize-based manifests** in `k8s/manifests/` with:

@@ -4,7 +4,7 @@
 
 ## 🎯 Project Overview
 
-A containerized, multi-agent QA platform powered by CrewAI. **Six optimized AI agents** collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance/accessibility/compliance analysis. A Chainlit-based WebGUI provides human-in-the-loop interaction.
+A containerized, multi-agent QA platform powered by CrewAI. **Six specialized AI agents** collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance testing. A Chainlit-based WebGUI provides human-in-the-loop interaction.
 
 ## 🏗️ 6-Agent Architecture
 
@@ -12,22 +12,21 @@ A containerized, multi-agent QA platform powered by CrewAI. **Six optimized AI a
 
 | Agent | Capabilities | Primary Focus | Documentation |
 |-------|--------------|----------------|----------------|
-| **Performance Agent** | Load testing, performance profiling, network simulation, SLA monitoring | System Performance | [Performance Agent](agents/performance/README.md) |
+| **QA Manager** | Test planning, delegation, fuzzy verification, report synthesis | Orchestration | [QA Manager](agents/manager/qa_manager.py) |
+| **Senior QA Engineer** | Complex UI testing, self-healing, model-based testing | Complex Testing | [Senior QA](agents/senior/senior_qa.py) |
+| **Junior QA Worker** | Regression testing, data generation, test execution | Test Automation | [Junior QA](agents/junior/junior_qa.py) |
+| **QA Analyst** | Data organization, security assessment, performance profiling | Analysis & Reporting | [QA Analyst](agents/analyst/qa_analyst.py) |
 | **Security & Compliance Agent** | OWASP testing, GDPR/PCI DSS, security assessment | Security & Compliance | [Security & Compliance](agents/security_compliance/README.md) |
-| **Resilience Agent** | SRE monitoring, chaos testing, infrastructure health | Infrastructure Reliability | [Resilience Agent](agents/resilience/README.md) |
-| **User Experience Agent** | Responsive design, accessibility, mobile UX, WCAG compliance | User Experience | [User Experience Agent](agents/user_experience/README.md) |
-| **Senior QA Agent** | Complex UI testing, self-healing, model-based testing | Complex Testing | [Senior QA](agents/senior/senior_qa.py) |
-| **Junior QA Agent** | Regression testing, data generation, test execution | Test Automation | [Junior QA](agents/junior/junior_qa.py) |
+| **Performance & Resilience Agent** | Load testing, SRE monitoring, infrastructure health | Performance & Reliability | [Performance Agent](agents/performance/README.md) |
 
 ### System Architecture
 ```
-Optimized QA Manager (Orchestrator) ──┐
-Performance Agent                    ─┤
-Security & Compliance Agent           ─┤
-Resilience Agent                      ─┼── Redis + RabbitMQ Bus ── Chainlit WebGUI (:8000)
-User Experience Agent                 ─┤
-Senior QA Agent                       ─┤
-Junior QA Agent                       ─┘
+QA Manager (Orchestrator)          ──┐
+Senior QA Engineer (Expert)         ─┤
+Junior QA Worker (Executor)         ─┤
+QA Analyst (Analyst)                ─┼── Redis + RabbitMQ Bus ── Chainlit WebGUI (:8000)
+Security & Compliance Agent         ─┤
+Performance & Resilience Agent      ─┘
 ```
 
 ### Key Improvements

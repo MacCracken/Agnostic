@@ -1,8 +1,8 @@
 # TODO.md
 
-**✅ ALL MAJOR DEVELOPMENT TASKS COMPLETED - NOW WITH KUBERNETES SUPPORT** ✅
+# Future Enhancements
 
-The Agentic QA Team System is now feature-complete with comprehensive functionality implemented, including **Kubernetes orchestration** support for production deployments. This document captures remaining optional enhancements and future improvements.
+The Agentic QA Team System is feature-complete with comprehensive functionality implemented, including **Kubernetes orchestration** support for production deployments. This document captures optional enhancements and future improvements.
 
 ---
 
@@ -18,17 +18,13 @@ The Agentic QA Team System is now feature-complete with comprehensive functional
 
 ---
 
-## Agent Expansion (6 New Agents + Junior Enhancement)
+## Agent Expansion (2 New Agents + Junior Enhancement)
 
-- [x] **Site Reliability Engineer** — Extract SRE from Analyst into dedicated agent with SiteReliabilityTool, DatabaseTestingTool, InfrastructureHealthTool, IncidentResponseTool
-- [x] **Accessibility Tester** — WCAGComplianceTool, ScreenReaderTool, KeyboardNavigationTool, ColorContrastTool
-- [x] **API Integration Engineer** — APISchemaValidationTool, ContractTestingTool, APIVersioningTool, APILoadTool
-- [x] **Mobile/Device QA** — ResponsiveTestingTool, DeviceCompatibilityTool, NetworkConditionTool, MobileUXTool
-- [x] **Compliance & Regulatory Tester** — GDPRComplianceTool, PCIDSSComplianceTool, AuditTrailTool, PolicyEnforcementTool
-- [x] **Chaos & Resilience Engineer** — ServiceFailureTool, NetworkPartitionTool, ResourceExhaustionTool, RecoveryValidationTool
+- [x] **Security & Compliance Agent** — Combined security testing and compliance validation with SecurityTestingTool, ComplianceValidationTool, AuditTrailTool
+- [x] **Performance & Resilience Agent** — Combined performance monitoring and resilience testing with PerformanceMonitoringTool, LoadTestingTool, ResilienceValidationTool
 - [x] **Junior QA Visual Regression** — VisualRegressionTool (baseline capture, pixel diff, cross-browser, component testing)
-- [x] Update QA Manager with 16 scenarios and routing for all 10 agents
-- [x] Update docker-compose.yml with all 13 services
+- [x] Update QA Manager with scenarios and routing for all 6 agents
+- [x] Update docker-compose.yml with all 8 services
 - [x] Update WebGUI with all agent commands
 - [x] Update CLAUDE.md and README.md documentation
 

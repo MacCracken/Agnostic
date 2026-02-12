@@ -4,19 +4,24 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better caching
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy agent code
-COPY ./agents/performance/qa_performance.py /app/qa_performance.py
+COPY agents/performance/ ./agents/performance/
+COPY config/ ./config/
+COPY shared/ ./shared/
 
-# Set Python path
+# Create logs directory
+RUN mkdir -p logs
+
+# Set environment variables
 ENV PYTHONPATH=/app
+ENV AGENT_ROLE=performance
 
-# Default command
-CMD ["python", "qa_performance.py"]
+# Run the performance agent
+CMD ["python", "-m", "agents.performance.qa_performance"]

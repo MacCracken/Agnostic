@@ -101,14 +101,14 @@ services:
       - ./config:/app/config
       - ./logs:/app/logs
 
-  sre-agent:
+  security-compliance-agent:
     build:
       context: .
-      dockerfile: agents/sre/Dockerfile
+      dockerfile: agents/security_compliance/Dockerfile
     environment:
       - REDIS_URL=redis://redis:6379/0
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - AGENT_ROLE=sre
+      - AGENT_ROLE=security_compliance
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - redis
@@ -120,90 +120,14 @@ services:
       - ./config:/app/config
       - ./logs:/app/logs
 
-  accessibility-agent:
+  performance-agent:
     build:
       context: .
-      dockerfile: agents/accessibility/Dockerfile
+      dockerfile: agents/performance/Dockerfile
     environment:
       - REDIS_URL=redis://redis:6379/0
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - AGENT_ROLE=accessibility
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    depends_on:
-      - redis
-      - rabbitmq
-    networks:
-      - qa-network
-    volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-
-  api-agent:
-    build:
-      context: .
-      dockerfile: agents/api/Dockerfile
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - AGENT_ROLE=api
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    depends_on:
-      - redis
-      - rabbitmq
-    networks:
-      - qa-network
-    volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-
-  mobile-agent:
-    build:
-      context: .
-      dockerfile: agents/mobile/Dockerfile
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - AGENT_ROLE=mobile
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    depends_on:
-      - redis
-      - rabbitmq
-    networks:
-      - qa-network
-    volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-
-  compliance-agent:
-    build:
-      context: .
-      dockerfile: agents/compliance/Dockerfile
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - AGENT_ROLE=compliance
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    depends_on:
-      - redis
-      - rabbitmq
-    networks:
-      - qa-network
-    volumes:
-      - ./agents:/app/agents
-      - ./config:/app/config
-      - ./logs:/app/logs
-
-  chaos-agent:
-    build:
-      context: .
-      dockerfile: agents/chaos/Dockerfile
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - AGENT_ROLE=chaos
+      - AGENT_ROLE=performance
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - redis
@@ -232,12 +156,8 @@ services:
       - senior-qa
       - junior-qa
       - qa-analyst
-      - sre-agent
-      - accessibility-agent
-      - api-agent
-      - mobile-agent
-      - compliance-agent
-      - chaos-agent
+      - security-compliance-agent
+      - performance-agent
     networks:
       - qa-network
     volumes:
