@@ -1,4 +1,4 @@
-# ADR-005: Security and Communication Encryption
+# ADR-010: Security and Communication Encryption
 
 ## Status
 Accepted

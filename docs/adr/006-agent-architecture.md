@@ -1,4 +1,4 @@
-# ADR-001: Agent Architecture and Communication Pattern
+# ADR-006: Agent Architecture and Communication Pattern
 
 ## Status
 Accepted

@@ -11,6 +11,11 @@ This directory contains Architecture Decision Records (ADRs) for the Agentic QA 
 | [ADR-003](003-session-management-architecture.md) | Session Management Architecture | Accepted |
 | [ADR-004](004-report-generation-strategy.md) | Report Generation Strategy | Accepted |
 | [ADR-005](005-authentication-authorization-design.md) | Authentication and Authorization Design | Accepted |
+| [ADR-006](006-agent-architecture.md) | Agent Architecture | Accepted |
+| [ADR-007](007-llm-integration.md) | LLM Integration | Accepted |
+| [ADR-008](008-deployment-strategy.md) | Deployment Strategy | Accepted |
+| [ADR-009](009-webgui-architecture.md) | WebGUI Architecture | Accepted |
+| [ADR-010](010-security-strategy.md) | Security Strategy | Accepted |
 
 ## ADR Template
 

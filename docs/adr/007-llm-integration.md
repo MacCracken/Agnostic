@@ -1,4 +1,4 @@
-# ADR-002: Multi-Provider LLM Integration Strategy
+# ADR-007: Multi-Provider LLM Integration Strategy
 
 ## Status
 Accepted
