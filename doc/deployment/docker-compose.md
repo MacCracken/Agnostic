@@ -488,9 +488,9 @@ WEBHOOK_SECRET=your_webhook_secret
 ## 📚 Additional Resources
 
 ### Documentation
-- [Architecture Overview](README.md)
-- [Agent Documentation Index](AGENTS_INDEX.md)
-- [Data Generation Service](shared/data_generation_optimization.md)
+- [Quick Start](../getting-started/quick-start.md)
+- [Agent Documentation](../agents/index.md)
+- [Kubernetes Deployment](kubernetes.md)
 
 ### Monitoring Dashboards
 - WebGUI: http://localhost:8000
@@ -499,7 +499,7 @@ WEBHOOK_SECRET=your_webhook_secret
 
 ### Support
 - Check logs first: `docker-compose logs <service>`
-- Review documentation: [Agent Documentation Index](AGENTS_INDEX.md)
+- Review documentation: [Agent Documentation](../agents/index.md)
 - Check system requirements: Memory, disk, network
 - Create issue with full environment details and error logs
 

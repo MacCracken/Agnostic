@@ -2,273 +2,130 @@
 
 # Agentic QA Team System
 
-## 🎯 Project Overview
+A containerized, multi-agent QA platform powered by CrewAI. Six specialized AI agents collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance testing.
 
-A containerized, multi-agent QA platform powered by CrewAI. **Six specialized AI agents** collaborate via Redis/RabbitMQ to orchestrate intelligent testing workflows with self-healing, fuzzy verification, risk-based prioritization, and comprehensive reliability/security/performance testing. A Chainlit-based WebGUI provides human-in-the-loop interaction.
+## Quick Start
 
-## 🏗️ 6-Agent Architecture
+```bash
+# 1. Clone and setup
+git clone <repository-url> && cd agnostic
+cp .env.example .env
+# Edit .env: set OPENAI_API_KEY
 
-### Quick Reference
+# 2. Launch (Docker)
+docker-compose up --build -d
 
-| Agent | Capabilities | Primary Focus | Documentation |
-|-------|--------------|----------------|----------------|
-| **QA Manager** | Test planning, delegation, fuzzy verification, report synthesis | Orchestration | [QA Manager](agents/manager/qa_manager.py) |
-| **Senior QA Engineer** | Complex UI testing, self-healing, model-based testing | Complex Testing | [Senior QA](agents/senior/senior_qa.py) |
-| **Junior QA Worker** | Regression testing, data generation, test execution | Test Automation | [Junior QA](agents/junior/junior_qa.py) |
-| **QA Analyst** | Data organization, security assessment, performance profiling | Analysis & Reporting | [QA Analyst](agents/analyst/qa_analyst.py) |
-| **Security & Compliance Agent** | OWASP testing, GDPR/PCI DSS, security assessment | Security & Compliance | [Security & Compliance](agents/security_compliance/README.md) |
-| **Performance & Resilience Agent** | Load testing, SRE monitoring, infrastructure health | Performance & Reliability | [Performance Agent](agents/performance/README.md) |
+# 3. Access WebGUI
+open http://localhost:8000
+```
 
-### System Architecture
+[Full Quick Start Guide →](doc/getting-started/quick-start.md)
+
+## 6-Agent Architecture
+
 ```
 QA Manager (Orchestrator)          ──┐
 Senior QA Engineer (Expert)         ─┤
 Junior QA Worker (Executor)         ─┤
-QA Analyst (Analyst)                ─┼── Redis + RabbitMQ Bus ── Chainlit WebGUI (:8000)
+QA Analyst (Analyst)                ─┼── Redis + RabbitMQ ── WebGUI (:8000)
 Security & Compliance Agent         ─┤
 Performance & Resilience Agent      ─┘
 ```
 
-### Key Improvements
-- **40% Fewer Agents**: Optimized from 10 to 6 specialized agents
-- **Full Parallel Execution**: Multiple agents work simultaneously  
-- **Intelligent Routing**: Optimal task-agent matching
-- **Cross-Domain Analysis**: Correlation between testing areas
-- **Fuzzy Verification**: Nuanced assessment beyond binary
-- **Centralized Data Generation**: 80% cache hit rate
+| Agent | Capabilities | Primary Focus |
+|-------|--------------|---------------|
+| **QA Manager** | Test planning, delegation, fuzzy verification | Orchestration |
+| **Senior QA Engineer** | Self-healing UI, model-based testing, edge cases | Complex Testing |
+| **Junior QA Worker** | Regression execution, data generation, optimization | Test Automation |
+| **QA Analyst** | Reporting, security assessment, performance profiling | Analysis |
+| **Security & Compliance Agent** | OWASP, GDPR, PCI DSS | Security |
+| **Performance & Resilience Agent** | Load testing, monitoring, resilience checks | Performance |
 
-## 📚 Documentation
+## Documentation
 
-### 📖 Core Documentation
-- **[CLAUDE.md](CLAUDE.md)** - Development guidelines and system overview
-- **[Agent Documentation](AGENTS_INDEX.md)** - Detailed agent specifications
-- **[Kubernetes Deployment Guide](KUBERNETES_DEPLOYMENT.md)** - Production deployment instructions
-- **[Kubernetes Resources](k8s/)** - Kubernetes manifests and Helm chart
-- **[Deployment Guide](DEPLOYMENT_GUIDE.md)** - Comprehensive deployment instructions
+| Guide | Description |
+|-------|-------------|
+| [Quick Start](doc/getting-started/quick-start.md) | Get running in 5 minutes |
+| [Docker Deployment](doc/deployment/docker-compose.md) | Local & production Docker setup |
+| [Kubernetes Deployment](doc/deployment/kubernetes.md) | Production K8s with Helm |
+| [Development Setup](doc/development/setup.md) | Local development guide |
+| [Agent Docs](doc/agents/index.md) | Agent architecture details |
+| [Contributing](doc/development/contributing.md) | Contribution guidelines |
+| [Changelog](doc/project/changelog.md) | Version history |
+| [Roadmap](doc/project/roadmap.md) | Future plans |
 
-### 🔧 Development Resources
-- **[Environment Configuration](.env.example)** - Environment variables reference
-- **[Helm Chart](k8s/helm/agentic-qa/)** - Production deployment with Helm
-- **[Kubernetes Manifests](k8s/manifests/)** - Direct Kubernetes deployment
+### Additional Resources
 
-## 🚀 Quick Start
+- [Architecture Decision Records](docs/adr/) - System design decisions
+- [API Documentation](docs/api/) - Agent, WebGUI, LLM APIs
+- [Security Assessment](doc/security/assessment.md) - Security findings
+- [Docker Build](docker/README.md) - Build optimization
+- [Helm Chart](k8s/helm/agentic-qa/README.md) - K8s deployment
 
-### 1. Environment Setup
+## Deployment Options
+
+### Docker Compose (Recommended for Local)
+
 ```bash
-# Copy environment template
-cp .env.example .env
-
-# Set required variables
-OPENAI_API_KEY=your_key_here
-REDIS_HOST=localhost
-RABBITMQ_HOST=localhost
-```
-
-### 2. Launch Services
-
-#### Option A: Docker Compose (Local Development) ⚡ Optimized
-
-**Fast Build (Using Base Image - Recommended):**
-```bash
-# Build optimized base image first (one-time, ~5 min)
-./scripts/build-docker.sh --base-only
-
-# Build all agent images (~30 seconds)
-./scripts/build-docker.sh --agents-only
-
-# Start everything
+# Optimized build (99% faster)
+./scripts/build-docker.sh --base-only  # One-time (~5 min)
+./scripts/build-docker.sh --agents-only  # Rebuilds (~30 sec)
 docker-compose up -d
 ```
 
-**Traditional Build (Slower but simpler):**
+[Docker Deployment Guide →](doc/deployment/docker-compose.md)
+
+### Kubernetes (Production)
+
 ```bash
-# Start core services
-docker-compose up -d redis rabbitmq
-
-# Build and start 6-agent system
-docker-compose up --build
-
-# All-in-one command (first build will take 10-15 min)
-docker-compose up --build -d
-```
-
-**⚡ Build Performance:**
-- First base image build: ~5 minutes (one-time)
-- Agent rebuilds: ~30 seconds (99% faster with base image)
-- Incremental builds: ~5 seconds
-
-See [Docker Build Optimization](docker/README.md) for details.
-
-#### Option B: Kubernetes (Production/Cloud)
-
-**Direct Manifests:**
-```bash
-# Apply all manifests
-kubectl apply -k k8s/
-
-# Set secrets
-kubectl create secret generic qa-secrets \
-  --from-literal=openai-api-key=$(echo -n "your-key" | base64) \
-  -n agentic-qa
-
-# Check status
-kubectl get pods -n agentic-qa
-```
-
-**Helm Chart (Recommended):**
-```bash
-# Install with Helm
+# Using Helm (recommended)
 helm install agentic-qa ./k8s/helm/agentic-qa \
   --namespace agentic-qa \
   --create-namespace \
-  --set secrets.openaiApiKey=$(echo -n "your-openai-key" | base64)
+  --set secrets.openaiApiKey=$(echo -n "your-key" | base64)
 ```
 
-### 3. Access Interfaces
+[Kubernetes Deployment Guide →](doc/deployment/kubernetes.md)
 
-#### Docker Environment
-```bash
-# WebGUI - Main interface
-http://localhost:8000
+## Usage Example
 
-# RabbitMQ Management
-http://localhost:15672 (guest/guest)
-
-# Check system status
-docker-compose ps
-```
-
-#### Kubernetes Environment
-```bash
-# Port forward WebGUI
-kubectl port-forward service/webgui-service 8000:8000 -n agentic-qa
-# Access: http://localhost:8000
-
-# Port forward RabbitMQ
-kubectl port-forward service/rabbitmq-service 15672:15672 -n agentic-qa
-# Access: http://localhost:15672 (guest/guest)
-
-# Check pod status
-kubectl get pods -n agentic-qa
-```
-
-### 4. Usage Example
 ```python
 from agents.manager.qa_manager_optimized import OptimizedQAManager
 
 manager = OptimizedQAManager()
 result = await manager.orchestrate_qa_session({
-    "requirements": "Comprehensive authentication system testing",
+    "requirements": "Test user authentication flow",
     "target_url": "http://localhost:8000",
-    "compliance_standards": ["GDPR", "PCI DSS"],
-    "test_scope": "full_comprehensive"
+    "compliance_standards": ["OWASP", "GDPR"]
 })
 ```
 
-## 📊 Performance Metrics
+## Key Features
 
-### System Improvements
-| Metric | 10-Agent System | 6-Agent System | Improvement |
-|--------|------------------|----------------|-------------|
-| **Agent Count** | 10 | 6 | 40% reduction |
-| **Parallel Execution** | Limited | Full | Unlimited |
-| **Memory Usage** | High | Optimized | 40% reduction |
-| **Network Overhead** | High | Streamlined | 50% reduction |
-| **Setup Complexity** | Complex | Simplified | 60% reduction |
-| **Maintenance Overhead** | High | Low | 40% reduction |
+- **Self-Healing UI Testing**: CV-based element detection with automatic selector repair
+- **Fuzzy Verification**: LLM-based quality scoring beyond pass/fail
+- **Risk-Based Prioritization**: ML-driven test ordering by risk score
+- **Security & Compliance**: Automated OWASP, GDPR, PCI DSS validation
+- **Performance Profiling**: Load testing with bottleneck identification
+- **Real-time Dashboard**: Live monitoring via Chainlit WebGUI
 
-### Quality Enhancements
-- **Test Coverage**: Enhanced through cross-domain analysis
-- **Defect Detection**: Better correlation across agents
-- **Regression Testing**: Optimized data generation with 80% cache hit rate
-- **Compliance Coverage**: Integrated security and privacy testing
+## Technology Stack
 
-## 🎯 Business Benefits
-
-### Operational Excellence
-- **Reduced Maintenance**: 40% fewer agents to maintain
-- **Improved Scalability**: Streamlined architecture supports growth
-- **Better Resource Utilization**: Optimal agent deployment
-- **Enhanced Monitoring**: Unified observability across system
-
-### Cost Efficiency
-- **Infrastructure Savings**: Fewer containers required
-- **Licensing Optimization**: Consolidated tool licensing
-- **Operational Efficiency**: Reduced manual overhead
-- **Future-Proof Design**: Extensible for new requirements
-
-### Quality Assurance
-- **Comprehensive Coverage**: All testing domains integrated
-- **Better Defect Detection**: Cross-domain correlation
-- **Compliance Assurance**: Integrated security and privacy
-- **User Experience Focus**: Accessibility and mobile optimization
-
-## 🔧 Technical Specifications
-
-### Core Technologies
-- **Agent Framework**: CrewAI 0.75.0 + LangChain 0.2.16
-- **LLM Providers**: OpenAI (primary), Anthropic, Google Gemini, Ollama, LM Studio
-- **Messaging**: Redis 5.0.8 + Celery 5.4.0 + RabbitMQ
-- **Containerization**: Docker + Docker Compose
-- **Orchestration**: Kubernetes + Helm
-- **Web Interface**: Chainlit 1.1.304 + FastAPI
-- **Browser Automation**: Playwright 1.45.0
+- **Agents**: CrewAI 0.75.0 + LangChain 0.2.16
+- **LLMs**: OpenAI, Anthropic, Google Gemini, Ollama, LM Studio
+- **Web UI**: Chainlit 1.1.304 + FastAPI
+- **Messaging**: Redis 5.0.8 + RabbitMQ
+- **Automation**: Playwright 1.45.0
 - **ML/CV**: scikit-learn 1.5.1, OpenCV 4.10.0
 
-### System Requirements
-- **Docker**: 20.10+ for container orchestration
-- **Kubernetes**: v1.20+ for production deployment
-- **Helm**: v3.x for package management (optional)
-- **Memory**: 4GB+ for local, 8GB+ for production
-- **Storage**: 10GB+ local, 20GB+ production with persistence
-- **Network**: Internal network communication between services
+## Contributing
 
-## 🔧 Configuration
+See [Contributing Guidelines](doc/development/contributing.md).
 
-### Environment Variables
-```bash
-# Core Services
-REDIS_HOST=localhost
-REDIS_PORT=6379
-RABBITMQ_HOST=localhost
-RABBITMQ_PORT=5672
+## License
 
-# LLM Configuration
-OPENAI_API_KEY=your_api_key
-PRIMARY_MODEL_PROVIDER=openai
-FALLBACK_MODEL_PROVIDERS=anthropic,google
-
-# Feature Flags
-ENABLE_SELF_HEALING=true
-ENABLE_FUZZY_VERIFICATION=true
-ENABLE_RISK_BASED_PRIORITIZATION=true
-ENABLE_CONTEXT_AWARE_TESTING=true
-```
-
-## 🔮 Future Enhancements
-
-### Planned Improvements
-- **AI-Driven Test Selection**: LLM-powered test case selection
-- **Predictive Analytics**: ML-based failure prediction
-- **Advanced Self-Healing**: Automated issue resolution
-- **Enhanced Visualization**: Real-time dashboards and reports
-
-### Extension Points
-- **Custom Agent Framework**: Framework for adding new agents
-- **Plugin Architecture**: Extensible tool and capability system
-- **Integration APIs**: External system integration capabilities
-- **Configuration Management**: Dynamic configuration updates
-
-## 🤝 Contributing
-
-Please refer to [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file.
 
 ---
 
-*Last Updated: 2026-02-11*  
-*Architecture Version: 6-Agent Optimized*  
-*Documentation Version: v3.0*
+*Last Updated: 2026-02-11* | [Documentation](doc/README.md) | [Changelog](doc/project/changelog.md)

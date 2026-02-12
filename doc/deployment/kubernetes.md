@@ -316,4 +316,4 @@ kubectl delete namespace agentic-qa
 - Set up CI/CD pipelines for automated deployments
 - Configure alerting for system health
 
-For additional help, check the [Helm chart README](k8s/helm/agentic-qa/README.md) or the main [project documentation](CLAUDE.md).
+For additional help, check the [Helm chart README](../../k8s/helm/agentic-qa/README.md) or the [Development Setup](../development/setup.md).

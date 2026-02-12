@@ -281,3 +281,14 @@ Frontend assets are organized in `webgui/static/`:
 - `js/` - JavaScript for real-time updates, charts, and interactive elements
 - `images/` - Icons, logos, and static images
 - `templates/` - HTML templates for custom reports and email notifications
+
+---
+
+## Full Documentation
+
+For comprehensive documentation, see the [doc/](doc/) directory:
+- [Quick Start Guide](doc/getting-started/quick-start.md)
+- [Deployment Guides](doc/deployment/)
+- [Development Setup](doc/development/setup.md)
+- [Agent Documentation](doc/agents/)
+- [Project Roadmap](doc/project/roadmap.md)

@@ -117,9 +117,9 @@ pytest --cov=agents --cov=webgui --cov=config
 
 When adding features:
 - Update relevant sections in `README.md`
-- Update `CLAUDE.md` if architecture changes
+- Update `doc/development/setup.md` if architecture changes
 - Add API documentation to `docs/api/`
-- Update agent index in `AGENTS_INDEX.md`
+- Update agent index in `doc/agents/index.md`
 
 ## Security Considerations
 
@@ -130,9 +130,9 @@ When adding features:
 
 ## Getting Help
 
-- Check `docs/guides/troubleshooting.md` for common issues
+- Check `doc/getting-started/quick-start.md` for common issues
 - Review existing issues and discussions
 - Ask questions in GitHub discussions
-- Check `CLAUDE.md` for development guidance
+- Check `doc/development/setup.md` for development guidance
 
 Thank you for contributing! 🚀
