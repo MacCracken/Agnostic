@@ -10,6 +10,8 @@ All application code lives under the project root directory.
 
 ## Build & Run Commands
 
+### Docker Compose (Local Development)
+
 ```bash
 # Setup
 cp .env.example .env   # then set OPENAI_API_KEY
@@ -28,7 +30,57 @@ docker-compose up --build <service-name>
 
 # View logs
 docker-compose logs <service-name>   # qa-manager, senior-qa, junior-qa, qa-analyst, sre-agent, accessibility-agent, api-agent, mobile-agent, compliance-agent, chaos-agent, webgui, redis, rabbitmq
+```
 
+### Kubernetes (Production/Cloud)
+
+#### Option 1: Direct Kubernetes Manifests
+
+```bash
+# Apply all manifests
+kubectl apply -k k8s/
+
+# Set OpenAI API key
+kubectl create secret generic qa-secrets \
+  --from-literal=openai-api-key=$(echo -n "your-key" | base64) \
+  --from-literal=rabbitmq-password=Z3Vlc3Q= \
+  -n agentic-qa
+
+# Check deployment status
+kubectl get pods -n agentic-qa
+kubectl get services -n agentic-qa
+
+# Port forward webgui
+kubectl port-forward service/webgui-service 8000:8000 -n agentic-qa
+```
+
+#### Option 2: Helm Chart (Recommended)
+
+```bash
+# Install with Helm
+helm install agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --create-namespace \
+  --set secrets.openaiApiKey=$(echo -n "your-openai-key" | base64)
+
+# Upgrade deployment
+helm upgrade agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --set ingress.enabled=true \
+  --set ingress.host=qa.yourdomain.com
+
+# Scale specific agents
+helm upgrade agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --set agents.juniorQa.replicaCount=3
+
+# Uninstall
+helm uninstall agentic-qa --namespace agentic-qa
+```
+
+### Development & Testing
+
+```bash
 # Local development (without Docker)
 pip install -r requirements.txt
 
@@ -42,7 +94,11 @@ python run_tests.py --mode coverage                 # Tests with coverage report
 pytest tests/ -v                                   # Run all tests
 pytest tests/unit/ -m unit                          # Unit tests only
 pytest tests/integration/ -m integration            # Integration tests only
+```
 
+### Code Quality
+
+```bash
 # Code Quality
 ruff check agents/ config/ shared/ webgui/          # Lint code
 ruff format agents/ config/ shared/ webgui/          # Format code
@@ -55,7 +111,9 @@ pre-commit install                                 # Install git hooks
 pre-commit run --all-files                         # Run all quality checks
 ```
 
-WebGUI: `http://localhost:8000` | RabbitMQ Management: `http://localhost:15672` (guest/guest)
+**Access URLs:**
+- **Docker:** WebGUI: `http://localhost:8000` | RabbitMQ: `http://localhost:15672` (guest/guest)
+- **Kubernetes:** WebGUI: `kubectl port-forward service/webgui-service 8000:8000 -n agentic-qa` | RabbitMQ: `kubectl port-forward service/rabbitmq-service 15672:15672 -n agentic-qa`
 
 ## Architecture
 
@@ -93,9 +151,26 @@ Chaos Engineer (Chaos)              ─┘
 - `advanced_testing/risk_prioritization_exploratory.py` — ML-driven risk scoring, code change analysis, exploratory test generation
 - `webgui/app.py` — Chainlit + FastAPI web interface with file upload, session management, reasoning traces
 
-## Docker Services
+## Container & Orchestration
 
-Thirteen containers defined in `agentic/docker-compose.yml`: `redis` (:6379), `rabbitmq` (:5672, :15672), `qa-manager`, `senior-qa`, `junior-qa`, `qa-analyst`, `sre-agent`, `accessibility-agent`, `api-agent`, `mobile-agent`, `compliance-agent`, `chaos-agent`, `webgui` (:8000). All agent containers use Python 3.11-slim with shared volume mounts for agent code and config.
+### Docker Compose (Local)
+Thirteen containers defined in `docker-compose.yml`: `redis` (:6379), `rabbitmq` (:5672, :15672), `qa-manager`, `senior-qa`, `junior-qa`, `qa-analyst`, `sre-agent`, `accessibility-agent`, `api-agent`, `mobile-agent`, `compliance-agent`, `chaos-agent`, `webgui` (:8000). All agent containers use Python 3.11-slim with shared volume mounts for agent code and config.
+
+### Kubernetes (Production)
+**Kustomize-based manifests** in `k8s/manifests/` with:
+- Namespace `agentic-qa`
+- Infrastructure services (Redis, RabbitMQ) with persistent volumes
+- Agent deployments with health checks, resource limits, and scaling
+- ConfigMaps/Secrets for configuration management
+- Service discovery and networking
+- Optional Ingress for external access
+
+**Helm chart** in `k8s/helm/agentic-qa/` with:
+- Configurable agent enablement and resource allocation
+- Autoscaling support
+- Custom values for different environments
+- Integrated secrets management
+- Dependency management and lifecycle hooks
 
 ## Key Technology Stack
 
@@ -109,12 +184,13 @@ Thirteen containers defined in `agentic/docker-compose.yml`: `redis` (:6379), `r
 
 ## Adding New Agents
 
-1. Create directory under `agentic/agents/`
+1. Create directory under `agents/`
 2. Implement agent class using CrewAI; extend `BaseTool` for custom tools
 3. Add a Dockerfile (follow existing pattern: Python 3.11-slim, PYTHONPATH=/app)
 4. Add service to `docker-compose.yml`
-5. Add scenario + routing in `agents/manager/qa_manager.py`
-6. Integrate with WebGUI in `webgui/app.py`
+5. Add Kubernetes manifest in `k8s/manifests/` or update Helm chart template
+6. Add scenario + routing in `agents/manager/qa_manager.py`
+7. Integrate with WebGUI in `webgui/app.py`
 
 ## Environment Configuration
 

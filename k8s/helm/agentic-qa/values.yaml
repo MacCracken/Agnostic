@@ -1,0 +1,271 @@
+# Default values for agentic-qa chart.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Global configuration
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: ""
+
+# Image configuration
+image:
+  registry: docker.io
+  repository: agentic-qa
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+# Common annotations and labels
+commonLabels: {}
+commonAnnotations: {}
+
+# Namespace configuration
+namespace:
+  create: true
+  name: "agentic-qa"
+
+# Secrets configuration
+secrets:
+  openaiApiKey: ""  # Set this to your OpenAI API key (base64 encoded)
+  rabbitmqPassword: "Z3Vlc3Q="  # "guest" in base64
+
+# Infrastructure services
+redis:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: redis
+    tag: "7-alpine"
+  service:
+    port: 6379
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  persistence:
+    enabled: true
+    size: 1Gi
+
+rabbitmq:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: rabbitmq
+    tag: "3-management-alpine"
+  auth:
+    username: guest
+  service:
+    amqpPort: 5672
+    managementPort: 15672
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  persistence:
+    enabled: true
+    size: 2Gi
+
+# QA Agents configuration
+agents:
+  qaManager:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8001
+
+  seniorQa:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8002
+
+  juniorQa:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "200m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    healthPort: 8003
+
+  qaAnalyst:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8004
+
+  sreAgent:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8005
+
+  accessibilityAgent:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8006
+
+  apiAgent:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8007
+
+  mobileAgent:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8008
+
+  complianceAgent:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8009
+
+  chaosAgent:
+    enabled: true
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "300m"
+      limits:
+        memory: "1Gi"
+        cpu: "800m"
+    healthPort: 8010
+
+# WebGUI configuration
+webgui:
+  enabled: true
+  replicaCount: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  service:
+    type: LoadBalancer
+    port: 8000
+    targetPort: 8000
+
+# Ingress configuration
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  host: "qa.yourdomain.com"
+  tls:
+    enabled: false
+    secretName: "agentic-qa-tls"
+
+# Environment configuration
+env:
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  RABBITMQ_HOST: "rabbitmq-service"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: "guest"
+  RABBITMQ_VHOST: "/"
+  WEBGUI_HOST: "0.0.0.0"
+  WEBGUI_PORT: "8000"
+  PRIMARY_MODEL_PROVIDER: "openai"
+  ENABLE_SELF_HEALING: "true"
+  ENABLE_FUZZY_VERIFICATION: "true"
+  ENABLE_RISK_BASED_PRIORITIZATION: "true"
+  ENABLE_CONTEXT_AWARE_TESTING: "true"
+  LOG_LEVEL: "INFO"
+  PYTHONPATH: "/app"
+
+# Pod security context
+podSecurityContext:
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: false
+
+# Service account configuration
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Node selector and tolerations
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Autoscaling
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80

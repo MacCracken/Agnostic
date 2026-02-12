@@ -1,0 +1,22 @@
+apiVersion: v2
+name: agentic-qa
+description: A Helm chart for Agentic QA Team System - Containerized multi-agent QA platform
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - qa
+  - testing
+  - ai-agents
+  - crewai
+  - automation
+home: https://github.com/your-org/agentic-qa
+sources:
+  - https://github.com/your-org/agentic-qa
+maintainers:
+  - name: QA Team
+    email: qa-team@yourdomain.com
+dependencies: []
+annotations:
+  category: DevelopmentTools
+  licenses: MIT

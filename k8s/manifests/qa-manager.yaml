@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-manager
+  namespace: agentic-qa
+  labels:
+    app: qa-manager
+    component: qa-agent
+    role: manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qa-manager
+  template:
+    metadata:
+      labels:
+        app: qa-manager
+        component: qa-agent
+        role: manager
+    spec:
+      containers:
+      - name: qa-manager
+        image: agentic-qa/qa-manager:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: AGENT_ROLE
+          value: "manager"
+        - name: REDIS_URL
+          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+        - name: RABBITMQ_URL
+          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8001
+          name: health
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "800m"
+        volumeMounts:
+        - name: agents-code
+          mountPath: /app/agents
+          readOnly: true
+        - name: config-code
+          mountPath: /app/config
+          readOnly: true
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: agents-code
+        configMap:
+          name: agents-source-code
+      - name: config-code
+        configMap:
+          name: config-source-code
+      - name: logs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qa-manager-service
+  namespace: agentic-qa
+  labels:
+    app: qa-manager
+    component: qa-agent
+spec:
+  selector:
+    app: qa-manager
+  ports:
+  - name: health
+    port: 8001
+    targetPort: 8001
+  type: ClusterIP

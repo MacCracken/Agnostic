@@ -4,6 +4,8 @@ import json
 import asyncio
 import random
 import string
+import traceback
+import aiohttp
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from crewai import Agent, Task, Crew, Process
@@ -34,8 +36,8 @@ class RegressionTestingTool(BaseTool):
     name: str = "Regression Testing Suite"
     description: str = "Executes comprehensive regression tests with automated root cause detection"
     
-    def _run(self, test_suite: Dict[str, Any], environment: str = "staging") -> Dict[str, Any]:
-        """Execute regression test suite with root cause analysis"""
+    async def _run(self, test_suite: Dict[str, Any], environment: str = "staging") -> Dict[str, Any]:
+        """Execute regression test suite with real test execution and root cause analysis"""
         execution_result = {
             "test_suite": test_suite.get("name", "unknown"),
             "environment": environment,
@@ -48,30 +50,77 @@ class RegressionTestingTool(BaseTool):
             },
             "failed_tests": [],
             "root_cause_analysis": None,
-            "regression_detected": False
+            "regression_detected": False,
+            "execution_details": []
         }
         
         start_time = datetime.now()
         
-        # Execute test cases
+        # Execute test cases using Playwright for UI tests and pytest for backend tests
         test_cases = test_suite.get("test_cases", [])
         execution_result["results"]["total_tests"] = len(test_cases)
         
-        for test_case in test_cases:
-            test_result = self._execute_single_test(test_case, environment)
-            
-            if test_result["status"] == "passed":
-                execution_result["results"]["passed"] += 1
-            elif test_result["status"] == "failed":
-                execution_result["results"]["failed"] += 1
-                execution_result["failed_tests"].append({
-                    "test_id": test_case["id"],
-                    "test_name": test_case["name"],
-                    "error_message": test_result["error"],
-                    "stack_trace": test_result["stack_trace"]
-                })
-            else:
-                execution_result["results"]["skipped"] += 1
+        # Group tests by type for optimized execution
+        ui_tests = [tc for tc in test_cases if tc.get("type") in ["ui", "e2e", "frontend"]]
+        api_tests = [tc for tc in test_cases if tc.get("type") in ["api", "integration", "backend"]]
+        unit_tests = [tc for tc in test_cases if tc.get("type") in ["unit", "component"]]
+        
+        # Execute UI tests with Playwright
+        if ui_tests:
+            ui_results = await self._execute_ui_tests(ui_tests, environment)
+            execution_result["execution_details"].extend(ui_results)
+            for result in ui_results:
+                if result["status"] == "passed":
+                    execution_result["results"]["passed"] += 1
+                elif result["status"] == "failed":
+                    execution_result["results"]["failed"] += 1
+                    execution_result["failed_tests"].append({
+                        "test_id": result["test_id"],
+                        "test_name": result["test_name"],
+                        "error_message": result["error"],
+                        "stack_trace": result["stack_trace"],
+                        "test_type": "ui"
+                    })
+                else:
+                    execution_result["results"]["skipped"] += 1
+        
+        # Execute API tests with requests/httpx
+        if api_tests:
+            api_results = await self._execute_api_tests(api_tests, environment)
+            execution_result["execution_details"].extend(api_results)
+            for result in api_results:
+                if result["status"] == "passed":
+                    execution_result["results"]["passed"] += 1
+                elif result["status"] == "failed":
+                    execution_result["results"]["failed"] += 1
+                    execution_result["failed_tests"].append({
+                        "test_id": result["test_id"],
+                        "test_name": result["test_name"],
+                        "error_message": result["error"],
+                        "stack_trace": result["stack_trace"],
+                        "test_type": "api"
+                    })
+                else:
+                    execution_result["results"]["skipped"] += 1
+        
+        # Execute unit tests with pytest
+        if unit_tests:
+            unit_results = await self._execute_unit_tests(unit_tests, environment)
+            execution_result["execution_details"].extend(unit_results)
+            for result in unit_results:
+                if result["status"] == "passed":
+                    execution_result["results"]["passed"] += 1
+                elif result["status"] == "failed":
+                    execution_result["results"]["failed"] += 1
+                    execution_result["failed_tests"].append({
+                        "test_id": result["test_id"],
+                        "test_name": result["test_name"],
+                        "error_message": result["error"],
+                        "stack_trace": result["stack_trace"],
+                        "test_type": "unit"
+                    })
+                else:
+                    execution_result["results"]["skipped"] += 1
         
         # Calculate execution time
         end_time = datetime.now()
@@ -88,9 +137,255 @@ class RegressionTestingTool(BaseTool):
         
         return execution_result
     
+    async def _execute_ui_tests(self, test_cases: List[Dict[str, Any]], environment: str) -> List[Dict[str, Any]]:
+        """Execute UI tests using Playwright"""
+        results = []
+        
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                viewport={'width': 1280, 'height': 720},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            
+            for test_case in test_cases:
+                result = {
+                    "test_id": test_case["id"],
+                    "test_name": test_case["name"],
+                    "status": "unknown",
+                    "error": None,
+                    "stack_trace": None,
+                    "execution_time": 0
+                }
+                
+                try:
+                    page = await context.new_page()
+                    start_time = datetime.now()
+                    
+                    # Navigate to test URL
+                    test_url = test_case.get("url", f"http://{environment}.example.com")
+                    await page.goto(test_url, timeout=30000)
+                    
+                    # Execute test steps
+                    steps = test_case.get("steps", [])
+                    for step in steps:
+                        await self._execute_ui_step(page, step)
+                    
+                    # Verify expectations
+                    expectations = test_case.get("expectations", [])
+                    for expectation in expectations:
+                        await self._verify_expectation(page, expectation)
+                    
+                    result["status"] = "passed"
+                    await page.close()
+                    
+                except Exception as e:
+                    result["status"] = "failed"
+                    result["error"] = str(e)
+                    result["stack_trace"] = traceback.format_exc()
+                    logger.error(f"UI test {test_case['name']} failed: {e}")
+                
+                end_time = datetime.now()
+                result["execution_time"] = (end_time - start_time).total_seconds()
+                results.append(result)
+            
+            await browser.close()
+        
+        return results
+    
+    async def _execute_ui_step(self, page, step: Dict[str, Any]):
+        """Execute a single UI step using Playwright"""
+        action = step.get("action")
+        selector = step.get("selector")
+        value = step.get("value")
+        
+        if action == "click":
+            await page.click(selector, timeout=10000)
+        elif action == "fill":
+            await page.fill(selector, value, timeout=10000)
+        elif action == "select":
+            await page.select_option(selector, value, timeout=10000)
+        elif action == "hover":
+            await page.hover(selector, timeout=10000)
+        elif action == "press":
+            await page.keyboard.press(value)
+        elif action == "wait":
+            await page.wait_for_timeout(int(value))
+        elif action == "screenshot":
+            await page.screenshot(path=step.get("path", "screenshot.png"))
+        else:
+            raise ValueError(f"Unknown UI action: {action}")
+    
+    async def _verify_expectation(self, page, expectation: Dict[str, Any]):
+        """Verify test expectations using Playwright"""
+        check_type = expectation.get("type")
+        selector = expectation.get("selector")
+        expected = expectation.get("expected")
+        
+        if check_type == "visible":
+            element = await page.wait_for_selector(selector, state='visible', timeout=5000)
+            if not element:
+                raise AssertionError(f"Element {selector} should be visible")
+        
+        elif check_type == "hidden":
+            element = await page.wait_for_selector(selector, state='hidden', timeout=5000)
+            if not element:
+                raise AssertionError(f"Element {selector} should be hidden")
+        
+        elif check_type == "text":
+            element = await page.wait_for_selector(selector, timeout=5000)
+            text = await element.text_content()
+            if expected not in text:
+                raise AssertionError(f"Expected text '{expected}' not found in '{text}'")
+        
+        elif check_type == "attribute":
+            element = await page.wait_for_selector(selector, timeout=5000)
+            attribute = expectation.get("attribute")
+            value = await element.get_attribute(attribute)
+            if value != expected:
+                raise AssertionError(f"Expected attribute {attribute}='{expected}', got '{value}'")
+        
+        elif check_type == "url":
+            current_url = page.url
+            if expected not in current_url:
+                raise AssertionError(f"Expected URL to contain '{expected}', got '{current_url}'")
+        
+        elif check_type == "title":
+            title = await page.title()
+            if expected not in title:
+                raise AssertionError(f"Expected title to contain '{expected}', got '{title}'")
+    
+    async def _execute_api_tests(self, test_cases: List[Dict[str, Any]], environment: str) -> List[Dict[str, Any]]:
+        """Execute API tests using HTTP requests"""
+        results = []
+        
+        for test_case in test_cases:
+            result = {
+                "test_id": test_case["id"],
+                "test_name": test_case["name"],
+                "status": "unknown",
+                "error": None,
+                "stack_trace": None,
+                "execution_time": 0
+            }
+            
+            try:
+                start_time = datetime.now()
+                
+                # Make HTTP request
+                base_url = test_case.get("base_url", f"http://api.{environment}.example.com")
+                endpoint = test_case.get("endpoint", "")
+                method = test_case.get("method", "GET")
+                headers = test_case.get("headers", {})
+                data = test_case.get("data", {})
+                params = test_case.get("params", {})
+                
+                url = f"{base_url}{endpoint}"
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.request(method, url, headers=headers, json=data, params=params) as response:
+                        response_data = await response.json()
+                        status_code = response.status
+                
+                # Verify expectations
+                expectations = test_case.get("expectations", [])
+                for expectation in expectations:
+                    self._verify_api_expectation(response_data, status_code, expectation)
+                
+                result["status"] = "passed"
+                result["response_data"] = response_data
+                result["status_code"] = status_code
+                
+            except Exception as e:
+                result["status"] = "failed"
+                result["error"] = str(e)
+                result["stack_trace"] = traceback.format_exc()
+                logger.error(f"API test {test_case['name']} failed: {e}")
+            
+            end_time = datetime.now()
+            result["execution_time"] = (end_time - start_time).total_seconds()
+            results.append(result)
+        
+        return results
+    
+    def _verify_api_expectation(self, response_data: Dict, status_code: int, expectation: Dict[str, Any]):
+        """Verify API test expectations"""
+        check_type = expectation.get("type")
+        expected = expectation.get("expected")
+        
+        if check_type == "status_code":
+            if status_code != expected:
+                raise AssertionError(f"Expected status code {expected}, got {status_code}")
+        
+        elif check_type == "json_path":
+            import jsonpath_ng
+            jsonpath_expr = jsonpath_ng.parse(expected["path"])
+            matches = [match.value for match in jsonpath_expr.find(response_data)]
+            if expected["value"] not in matches:
+                raise AssertionError(f"Expected {expected['path']}={expected['value']}, got {matches}")
+        
+        elif check_type == "response_time":
+            # This would need to be implemented with timing
+            pass
+        
+        elif check_type == "contains":
+            response_str = str(response_data)
+            if expected not in response_str:
+                raise AssertionError(f"Expected response to contain '{expected}'")
+    
+    async def _execute_unit_tests(self, test_cases: List[Dict[str, Any]], environment: str) -> List[Dict[str, Any]]:
+        """Execute unit tests using pytest"""
+        results = []
+        
+        for test_case in test_cases:
+            result = {
+                "test_id": test_case["id"],
+                "test_name": test_case["name"],
+                "status": "unknown",
+                "error": None,
+                "stack_trace": None,
+                "execution_time": 0
+            }
+            
+            try:
+                start_time = datetime.now()
+                
+                # Run pytest for specific test file or function
+                test_path = test_case.get("test_path", "")
+                test_function = test_case.get("test_function", "")
+                
+                if test_path and test_function:
+                    pytest_args = [test_path, "-k", test_function, "-v", "--tb=short"]
+                elif test_path:
+                    pytest_args = [test_path, "-v", "--tb=short"]
+                else:
+                    raise ValueError("Either test_path or test_function must be specified")
+                
+                # Run pytest and capture results
+                pytest_result = pytest.main(pytest_args)
+                
+                if pytest_result == 0:
+                    result["status"] = "passed"
+                else:
+                    result["status"] = "failed"
+                    result["error"] = f"Pytest exited with code {pytest_result}"
+                
+            except Exception as e:
+                result["status"] = "failed"
+                result["error"] = str(e)
+                result["stack_trace"] = traceback.format_exc()
+                logger.error(f"Unit test {test_case['name']} failed: {e}")
+            
+            end_time = datetime.now()
+            result["execution_time"] = (end_time - start_time).total_seconds()
+            results.append(result)
+        
+        return results
+    
     def _execute_single_test(self, test_case: Dict[str, Any], environment: str) -> Dict[str, Any]:
-        """Execute a single test case"""
-        # Simulate test execution
+        """Execute a single test case (legacy method for backward compatibility)"""
+        # This method is kept for backward compatibility
+        # Real test execution should use the new async methods above
         test_type = test_case.get("type", "functional")
         
         # Simulate different failure rates based on test type
@@ -961,24 +1256,98 @@ class JuniorQAAgent:
         self.redis_client.publish(f"manager:{session_id}:notifications", json.dumps(notification))
 
 async def main():
-    """Main entry point for Junior QA agent"""
+    """Main entry point for Junior QA agent with Celery worker"""
     junior_agent = JuniorQAAgent()
     
-    # Example usage
-    sample_task = {
-        "session_id": "session_20240207_143000",
-        "scenario": {
-            "id": "data_002",
-            "name": "Data Validation Testing",
-            "priority": "high",
-            "description": "Test data validation and input sanitization",
-            "requires_test_data": True
-        },
-        "timestamp": datetime.now().isoformat()
-    }
+    # Start Celery worker for task processing
+    logger.info("Starting Junior QA Celery worker...")
     
-    result = await junior_agent.execute_regression_test(sample_task)
-    print(f"Junior QA Result: {result}")
+    # Define Celery task for regression testing
+    @junior_agent.celery_app.task(bind=True)
+    def execute_regression_task(self, task_data_json: str):
+        """Celery task wrapper for regression testing"""
+        try:
+            import asyncio
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(junior_agent.execute_regression_test(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery regression task failed: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    # Define Celery task for data generation
+    @junior_agent.celery_app.task(bind=True)
+    def generate_test_data_task(self, task_data_json: str):
+        """Celery task wrapper for test data generation"""
+        try:
+            import asyncio
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(junior_agent.generate_test_data(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery data generation task failed: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    # Start Redis listener for real-time task processing
+    async def redis_task_listener():
+        """Listen for tasks from Redis pub/sub"""
+        pubsub = junior_agent.redis_client.pubsub()
+        pubsub.subscribe(f"junior_qa:tasks")
+        
+        logger.info("Junior QA Redis task listener started")
+        
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    task_data = json.loads(message['data'])
+                    task_type = task_data.get('task_type', 'regression')
+                    
+                    logger.info(f"Received {task_type} task via Redis: {task_data.get('scenario', {}).get('name', 'Unknown')}")
+                    
+                    # Route to appropriate handler
+                    if task_type == 'regression':
+                        result = await junior_agent.execute_regression_test(task_data)
+                    elif task_type == 'data_generation':
+                        result = await junior_agent.generate_test_data(task_data)
+                    else:
+                        result = await junior_agent.execute_regression_test(task_data)  # Default
+                    
+                    logger.info(f"Task completed: {result.get('status', 'unknown')}")
+                    
+                except Exception as e:
+                    logger.error(f"Redis task processing failed: {e}")
+    
+    # Run both Celery worker and Redis listener
+    import threading
+    
+    def start_celery_worker():
+        """Start Celery worker in separate thread"""
+        argv = [
+            'worker',
+            '--loglevel=info',
+            '--concurrency=4',  # Higher concurrency for test execution
+            '--hostname=junior-qa-worker@%h',
+            '--queues=junior_qa,default'
+        ]
+        junior_agent.celery_app.worker_main(argv)
+    
+    # Start Celery worker thread
+    celery_thread = threading.Thread(target=start_celery_worker, daemon=True)
+    celery_thread.start()
+    
+    # Start Redis listener in main thread
+    asyncio.create_task(redis_task_listener())
+    
+    logger.info("Junior QA agent started with Celery worker and Redis listener")
+    
+    # Keep the agent running
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Junior QA agent shutting down...")
+    except Exception as e:
+        logger.error(f"Junior QA agent error: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

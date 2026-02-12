@@ -1,0 +1,260 @@
+# Senior QA Agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: senior-qa
+  namespace: agentic-qa
+  labels:
+    app: senior-qa
+    component: qa-agent
+    role: senior
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: senior-qa
+  template:
+    metadata:
+      labels:
+        app: senior-qa
+        component: qa-agent
+        role: senior
+    spec:
+      containers:
+      - name: senior-qa
+        image: agentic-qa/senior-qa:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: AGENT_ROLE
+          value: "senior"
+        - name: REDIS_URL
+          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+        - name: RABBITMQ_URL
+          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8002
+          name: health
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "800m"
+        volumeMounts:
+        - name: agents-code
+          mountPath: /app/agents
+          readOnly: true
+        - name: config-code
+          mountPath: /app/config
+          readOnly: true
+        - name: advanced-testing
+          mountPath: /app/advanced_testing
+          readOnly: true
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: agents-code
+        configMap:
+          name: agents-source-code
+      - name: config-code
+        configMap:
+          name: config-source-code
+      - name: advanced-testing
+        configMap:
+          name: advanced-testing-source-code
+      - name: logs
+        emptyDir: {}
+
+# Junior QA Agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junior-qa
+  namespace: agentic-qa
+  labels:
+    app: junior-qa
+    component: qa-agent
+    role: junior
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junior-qa
+  template:
+    metadata:
+      labels:
+        app: junior-qa
+        component: qa-agent
+        role: junior
+    spec:
+      containers:
+      - name: junior-qa
+        image: agentic-qa/junior-qa:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: AGENT_ROLE
+          value: "junior"
+        - name: REDIS_URL
+          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+        - name: RABBITMQ_URL
+          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8003
+          name: health
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: agents-code
+          mountPath: /app/agents
+          readOnly: true
+        - name: config-code
+          mountPath: /app/config
+          readOnly: true
+        - name: examples
+          mountPath: /app/examples
+          readOnly: true
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: agents-code
+        configMap:
+          name: agents-source-code
+      - name: config-code
+        configMap:
+          name: config-source-code
+      - name: examples
+        configMap:
+          name: examples-source-code
+      - name: logs
+        emptyDir: {}
+
+# QA Analyst Agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-analyst
+  namespace: agentic-qa
+  labels:
+    app: qa-analyst
+    component: qa-agent
+    role: analyst
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qa-analyst
+  template:
+    metadata:
+      labels:
+        app: qa-analyst
+        component: qa-agent
+        role: analyst
+    spec:
+      containers:
+      - name: qa-analyst
+        image: agentic-qa/qa-analyst:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: AGENT_ROLE
+          value: "analyst"
+        - name: REDIS_URL
+          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+        - name: RABBITMQ_URL
+          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8004
+          name: health
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "300m"
+          limits:
+            memory: "1Gi"
+            cpu: "800m"
+        volumeMounts:
+        - name: agents-code
+          mountPath: /app/agents
+          readOnly: true
+        - name: config-code
+          mountPath: /app/config
+          readOnly: true
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8004
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8004
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: agents-code
+        configMap:
+          name: agents-source-code
+      - name: config-code
+        configMap:
+          name: config-source-code
+      - name: logs
+        emptyDir: {}

@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webgui
+  namespace: agentic-qa
+  labels:
+    app: webgui
+    component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webgui
+  template:
+    metadata:
+      labels:
+        app: webgui
+        component: frontend
+    spec:
+      containers:
+      - name: webgui
+        image: agentic-qa/webgui:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: REDIS_URL
+          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "200m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: webgui-code
+          mountPath: /app/webgui
+          readOnly: true
+        - name: agents-code
+          mountPath: /app/agents
+          readOnly: true
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: webgui-code
+        configMap:
+          name: webgui-source-code
+      - name: agents-code
+        configMap:
+          name: agents-source-code
+      - name: logs
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webgui-service
+  namespace: agentic-qa
+  labels:
+    app: webgui
+    component: frontend
+spec:
+  selector:
+    app: webgui
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  type: LoadBalancer

@@ -403,21 +403,148 @@ class QAManagerAgent:
             return "testing_in_progress"
         else:
             return "completed"
+    
+    async def _coordinate_next_steps(self, session_id: str, notification: Dict[str, Any]):
+        """Coordinate next steps based on agent notifications"""
+        try:
+            agent = notification.get('agent')
+            status = notification.get('status')
+            
+            if status == 'completed':
+                # Check if all agents have completed their tasks
+                session_status = self.get_session_status(session_id)
+                
+                if session_status['status'] == 'testing_in_progress':
+                    # Request analyst report for comprehensive analysis
+                    await self.request_analyst_report(session_id)
+                
+                # Store completion status
+                self.redis_client.set(
+                    f"session:{session_id}:agent:{agent}:completed",
+                    json.dumps({
+                        "completed_at": datetime.now().isoformat(),
+                        "notification": notification
+                    })
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to coordinate next steps: {e}")
 
 async def main():
-    """Main entry point for QA Manager agent"""
+    """Main entry point for QA Manager agent with Celery worker"""
     manager = QAManagerAgent()
     
-    # Example usage
-    sample_requirements = {
-        "title": "E-commerce Checkout Flow",
-        "description": "Test the complete checkout process including payment integration",
-        "business_goals": "Ensure 99.9% conversion rate with zero payment failures",
-        "constraints": "Must support PCI compliance and 3D secure authentication"
-    }
+    # Start Celery worker for task processing
+    logger.info("Starting QA Manager Celery worker...")
     
-    result = await manager.process_requirements(sample_requirements)
-    print(f"QA Manager Result: {result}")
+    # Define Celery task for requirement processing
+    @manager.celery_app.task(bind=True)
+    def process_requirements_task(self, requirements_json: str):
+        """Celery task wrapper for requirement processing"""
+        try:
+            import asyncio
+            requirements = json.loads(requirements_json)
+            result = asyncio.run(manager.process_requirements(requirements))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery requirements processing failed: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    # Start Redis listener for real-time task processing
+    async def redis_task_listener():
+        """Listen for tasks from Redis pub/sub"""
+        pubsub = manager.redis_client.pubsub()
+        pubsub.subscribe(f"qa_manager:tasks")
+        
+        logger.info("QA Manager Redis task listener started")
+        
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    task_data = json.loads(message['data'])
+                    task_type = task_data.get('task_type', 'requirements')
+                    
+                    if task_type == 'requirements':
+                        requirements = task_data.get('requirements', {})
+                        logger.info(f"Processing requirements: {requirements.get('title', 'Unknown')}")
+                        result = await manager.process_requirements(requirements)
+                    elif task_type == 'session_status':
+                        session_id = task_data.get('session_id')
+                        result = manager.get_session_status(session_id)
+                    else:
+                        logger.warning(f"Unknown task type: {task_type}")
+                        continue
+                    
+                    logger.info(f"Task completed successfully")
+                    
+                except Exception as e:
+                    logger.error(f"Redis task processing failed: {e}")
+    
+    # Monitor agent coordination and orchestration
+    async def orchestration_monitor():
+        """Monitor and coordinate between agents"""
+        logger.info("QA Manager orchestration monitor started")
+        
+        while True:
+            try:
+                # Check for completed tasks and coordinate next steps
+                # Monitor Redis for agent notifications
+                pubsub = manager.redis_client.pubsub()
+                pubsub.psubscribe(f"manager:*:notifications")
+                
+                for message in pubsub.listen():
+                    if message['type'] == 'pmessage':
+                        try:
+                            notification = json.loads(message['data'])
+                            session_id = notification.get('session_id')
+                            agent = notification.get('agent')
+                            
+                            logger.info(f"Received notification from {agent} for session {session_id}")
+                            
+                            # Trigger next steps based on agent completion
+                            await manager._coordinate_next_steps(session_id, notification)
+                            
+                        except Exception as e:
+                            logger.error(f"Orchestration notification processing failed: {e}")
+                
+                await asyncio.sleep(5)  # Brief pause before next monitoring cycle
+                
+            except Exception as e:
+                logger.error(f"Orchestration monitor error: {e}")
+                await asyncio.sleep(10)  # Wait longer on error
+    
+    # Run both Celery worker and Redis listeners
+    import threading
+    
+    def start_celery_worker():
+        """Start Celery worker in separate thread"""
+        argv = [
+            'worker',
+            '--loglevel=info',
+            '--concurrency=2',
+            '--hostname=qa-manager-worker@%h',
+            '--queues=qa_manager,default'
+        ]
+        manager.celery_app.worker_main(argv)
+    
+    # Start Celery worker thread
+    celery_thread = threading.Thread(target=start_celery_worker, daemon=True)
+    celery_thread.start()
+    
+    # Start Redis listeners
+    asyncio.create_task(redis_task_listener())
+    asyncio.create_task(orchestration_monitor())
+    
+    logger.info("QA Manager agent started with Celery worker and orchestration monitor")
+    
+    # Keep the agent running
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("QA Manager agent shutting down...")
+    except Exception as e:
+        logger.error(f"QA Manager agent error: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

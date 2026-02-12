@@ -120,7 +120,7 @@ The following are **optional improvements** that could be added in future versio
 - **Advanced performance profiling** with flame graphs
 - **Test data privacy** and PII masking
 - **Web dashboard** for real-time monitoring
-- **Kubernetes deployment** manifests
+- [x] **Kubernetes deployment** manifests and Helm chart
 
 ### Advanced Features
 - **Agent learning** from previous sessions

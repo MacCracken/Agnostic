@@ -41,15 +41,16 @@ Junior QA Agent                       ─┘
 ## 📚 Documentation
 
 ### 📖 Core Documentation
-- **[Quick Start Guide](docs/guides/quick-start.md)** - Setup and deployment instructions
+- **[CLAUDE.md](CLAUDE.md)** - Development guidelines and system overview
 - **[Agent Documentation](AGENTS_INDEX.md)** - Detailed agent specifications
-- **[API Reference](docs/api/)** - Complete API documentation
-- **[Security Guide](docs/SECURITY.md)** - Security considerations and best practices
+- **[Kubernetes Deployment Guide](KUBERNETES_DEPLOYMENT.md)** - Production deployment instructions
+- **[Kubernetes Resources](k8s/)** - Kubernetes manifests and Helm chart
+- **[Deployment Guide](DEPLOYMENT_GUIDE.md)** - Comprehensive deployment instructions
 
 ### 🔧 Development Resources
-- **[WebGUI API](docs/api/webgui.md)** - Web interface documentation
-- **[LLM Integration](docs/api/llm_integration.md)** - Language model configuration
-- **[Agent APIs](docs/api/agents.md)** - Individual agent endpoints
+- **[Environment Configuration](.env.example)** - Environment variables reference
+- **[Helm Chart](k8s/helm/agentic-qa/)** - Production deployment with Helm
+- **[Kubernetes Manifests](k8s/manifests/)** - Direct Kubernetes deployment
 
 ## 🚀 Quick Start
 
@@ -65,21 +66,50 @@ RABBITMQ_HOST=localhost
 ```
 
 ### 2. Launch Services
+
+#### Option A: Docker Compose (Local Development)
 ```bash
 # Start core services
 docker-compose up -d redis rabbitmq
 
-# Start 6-agent system
-docker-compose up -d performance security-compliance resilience user-experience senior junior
+# Start 10-agent system
+docker-compose up -d qa-manager senior-qa junior-qa qa-analyst sre-agent accessibility-agent api-agent mobile-agent compliance-agent chaos-agent
 
-# Start manager and web interface
-docker-compose up -d qa-manager webgui
+# Start web interface
+docker-compose up -d webgui
 
 # All-in-one command
 docker-compose up --build
 ```
 
+#### Option B: Kubernetes (Production/Cloud)
+
+**Direct Manifests:**
+```bash
+# Apply all manifests
+kubectl apply -k k8s/
+
+# Set secrets
+kubectl create secret generic qa-secrets \
+  --from-literal=openai-api-key=$(echo -n "your-key" | base64) \
+  -n agentic-qa
+
+# Check status
+kubectl get pods -n agentic-qa
+```
+
+**Helm Chart (Recommended):**
+```bash
+# Install with Helm
+helm install agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --create-namespace \
+  --set secrets.openaiApiKey=$(echo -n "your-openai-key" | base64)
+```
+
 ### 3. Access Interfaces
+
+#### Docker Environment
 ```bash
 # WebGUI - Main interface
 http://localhost:8000
@@ -89,6 +119,20 @@ http://localhost:15672 (guest/guest)
 
 # Check system status
 docker-compose ps
+```
+
+#### Kubernetes Environment
+```bash
+# Port forward WebGUI
+kubectl port-forward service/webgui-service 8000:8000 -n agentic-qa
+# Access: http://localhost:8000
+
+# Port forward RabbitMQ
+kubectl port-forward service/rabbitmq-service 15672:15672 -n agentic-qa
+# Access: http://localhost:15672 (guest/guest)
+
+# Check pod status
+kubectl get pods -n agentic-qa
 ```
 
 ### 4. Usage Example
@@ -149,14 +193,17 @@ result = await manager.orchestrate_qa_session({
 - **LLM Providers**: OpenAI (primary), Anthropic, Google Gemini, Ollama, LM Studio
 - **Messaging**: Redis 5.0.8 + Celery 5.4.0 + RabbitMQ
 - **Containerization**: Docker + Docker Compose
+- **Orchestration**: Kubernetes + Helm
 - **Web Interface**: Chainlit 1.1.304 + FastAPI
 - **Browser Automation**: Playwright 1.45.0
 - **ML/CV**: scikit-learn 1.5.1, OpenCV 4.10.0
 
 ### System Requirements
 - **Docker**: 20.10+ for container orchestration
-- **Memory**: 4GB+ for 6-agent parallel execution
-- **Storage**: 10GB+ for logs and caching
+- **Kubernetes**: v1.20+ for production deployment
+- **Helm**: v3.x for package management (optional)
+- **Memory**: 4GB+ for local, 8GB+ for production
+- **Storage**: 10GB+ local, 20GB+ production with persistence
 - **Network**: Internal network communication between services
 
 ## 🔧 Configuration

@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import asyncio
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import BaseTool
@@ -10,6 +10,8 @@ from langchain_openai import ChatOpenAI
 import redis
 from celery import Celery
 import logging
+import cv2
+import numpy as np
 
 # Add config path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -28,7 +30,7 @@ class SelfHealingTool(BaseTool):
     name: str = "Self-Healing Script Generator"
     description: str = "Autonomously repairs failed UI selectors using computer vision and semantic analysis"
     
-    def _run(self, failed_selector: str, page_url: str, screenshot_path: Optional[str] = None) -> Dict[str, Any]:
+    async def _run(self, failed_selector: str, page_url: str, screenshot_path: Optional[str] = None) -> Dict[str, Any]:
         """Perform self-healing of failed UI selectors"""
         healing_result = {
             "original_selector": failed_selector,
@@ -40,7 +42,7 @@ class SelfHealingTool(BaseTool):
         
         # Method 1: Computer Vision-based element detection
         if screenshot_path:
-            cv_result = self._computer_vision_healing(failed_selector, screenshot_path)
+            cv_result = await self._computer_vision_healing(failed_selector, screenshot_path)
             healing_result.update(cv_result)
         
         # Method 2: Semantic analysis of element context
@@ -57,8 +59,8 @@ class SelfHealingTool(BaseTool):
         
         return healing_result
     
-    def _computer_vision_healing(self, failed_selector: str, screenshot_path: str) -> Dict[str, Any]:
-        """Use computer vision to locate UI elements"""
+    async def _computer_vision_healing(self, failed_selector: str, screenshot_path: str) -> Dict[str, Any]:
+        """Use Playwright and computer vision to locate UI elements"""
         try:
             # Load screenshot
             image = cv2.imread(screenshot_path)
@@ -68,28 +70,44 @@ class SelfHealingTool(BaseTool):
             # Convert to grayscale for processing
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             
-            # Apply template matching for common UI elements
-            templates = self._get_ui_templates()
+            # Apply advanced template matching for common UI elements
+            templates = await self._get_dynamic_ui_templates(failed_selector)
             best_match = {"confidence": 0.0, "location": None, "template": None}
             
             for template_name, template_img in templates.items():
-                result = cv2.matchTemplate(gray, template_img, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                # Try multiple template matching methods
+                methods = [cv2.TM_CCOEFF_NORMED, cv2.TM_CCORR_NORMED, cv2.TM_SQDIFF_NORMED]
                 
-                if max_val > best_match["confidence"]:
-                    best_match = {
-                        "confidence": max_val,
-                        "location": max_loc,
-                        "template": template_name
-                    }
+                for method in methods:
+                    result = cv2.matchTemplate(gray, template_img, method)
+                    if method == cv2.TM_SQDIFF_NORMED:
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                        confidence = 1.0 - min_val  # Invert for SQDIFF
+                        location = min_loc
+                    else:
+                        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+                        confidence = max_val
+                        location = max_loc
+                    
+                    if confidence > best_match["confidence"]:
+                        best_match = {
+                            "confidence": confidence,
+                            "location": location,
+                            "template": template_name,
+                            "method": method
+                        }
             
             if best_match["confidence"] > 0.7:
-                # Generate new selector based on location
-                new_selector = self._generate_selector_from_location(best_match["location"])
+                # Use Playwright to get element at location and generate robust selector
+                new_selector = await self._generate_playwright_selector_from_location(
+                    best_match["location"], screenshot_path
+                )
                 return {
                     "healed_selector": new_selector,
-                    "healing_method": "computer_vision",
-                    "confidence": best_match["confidence"]
+                    "healing_method": "playwright_computer_vision",
+                    "confidence": best_match["confidence"],
+                    "location": best_match["location"],
+                    "template_used": best_match["template"]
                 }
             
         except Exception as e:
@@ -159,24 +177,216 @@ class SelfHealingTool(BaseTool):
         
         return alternatives
     
-    def _get_ui_templates(self) -> Dict[str, np.ndarray]:
-        """Get template images for common UI elements"""
-        # In real implementation, these would be loaded from template files
+    async def _get_dynamic_ui_templates(self, failed_selector: str) -> Dict[str, np.ndarray]:
+        """Generate dynamic templates based on failed selector and common UI patterns"""
         templates = {}
         
-        # Create simple templates for demonstration
-        button_template = np.ones((30, 100), dtype=np.uint8) * 255
-        templates["button"] = button_template
+        # Extract element type from selector
+        element_type = self._extract_element_type(failed_selector)
         
-        input_template = np.ones((25, 200), dtype=np.uint8) * 255
-        templates["input"] = input_template
+        # Generate realistic UI element templates with better visual characteristics
+        if element_type in ["button", "input", "submit"]:
+            # Button templates with various sizes and styles
+            templates["button_small"] = self._create_button_template(25, 80, "primary")
+            templates["button_medium"] = self._create_button_template(30, 120, "primary")
+            templates["button_large"] = self._create_button_template(35, 160, "primary")
+            templates["button_secondary"] = self._create_button_template(30, 100, "secondary")
+            
+        elif element_type == "input":
+            # Input field templates with different types
+            templates["input_text"] = self._create_input_template(25, 200, "text")
+            templates["input_password"] = self._create_input_template(25, 180, "password")
+            templates["input_email"] = self._create_input_template(25, 220, "email")
+            templates["input_search"] = self._create_input_template(25, 250, "search")
+            
+        elif element_type == "a":
+            # Link templates
+            templates["link_standard"] = self._create_link_template(20, 100)
+            templates["link_button"] = self._create_button_template(25, 90, "link")
+            
+        # Add generic templates as fallback
+        templates["generic_element"] = self._create_generic_template(30, 100)
         
         return templates
     
-    def _generate_selector_from_location(self, location: Tuple[int, int]) -> str:
-        """Generate CSS selector from element location"""
+    def _create_button_template(self, height: int, width: int, style: str) -> np.ndarray:
+        """Create realistic button template with styling"""
+        template = np.ones((height, width), dtype=np.uint8) * 240  # Light gray background
+        
+        # Add border
+        template[0, :] = 180  # Top border
+        template[-1, :] = 180  # Bottom border
+        template[:, 0] = 180  # Left border
+        template[:, -1] = 180  # Right border
+        
+        # Add style-specific features
+        if style == "primary":
+            template[2:-2, 2:-2] = 220  # Slightly darker center
+        elif style == "secondary":
+            template[2:-2, 2:-2] = 245  # Lighter center
+        elif style == "link":
+            template[2:-2, 2:-2] = 235  # Medium center
+            
+        return template
+    
+    def _create_input_template(self, height: int, width: int, input_type: str) -> np.ndarray:
+        """Create realistic input field template"""
+        template = np.ones((height, width), dtype=np.uint8) * 255  # White background
+        
+        # Add border
+        template[0, :] = 150  # Top border
+        template[-1, :] = 150  # Bottom border
+        template[:, 0] = 150  # Left border
+        template[:, -1] = 150  # Right border
+        
+        # Add input-specific features
+        if input_type == "password":
+            # Add dots to represent password characters
+            for i in range(10, min(30, width - 10), 8):
+                template[height//2-1:height//2+2, i:i+2] = 100
+                
+        elif input_type == "search":
+            # Add search icon representation
+            template[height//2-2:height//2+3, 5:10] = 120
+            
+        return template
+    
+    def _create_link_template(self, height: int, width: int) -> np.ndarray:
+        """Create realistic link template"""
+        template = np.ones((height, width), dtype=np.uint8) * 250  # Light background
+        
+        # Add underline
+        template[-2:, :] = 100  # Underline
+        
+        return template
+    
+    def _create_generic_template(self, height: int, width: int) -> np.ndarray:
+        """Create generic element template"""
+        template = np.ones((height, width), dtype=np.uint8) * 230
+        template[0, :] = 180
+        template[-1, :] = 180
+        template[:, 0] = 180
+        template[:, -1] = 180
+        return template
+    
+    async def _generate_playwright_selector_from_location(self, location: Tuple[int, int], screenshot_path: str) -> str:
+        """Generate robust CSS selector using Playwright element detection"""
+        try:
+            async with async_playwright() as p:
+                # Launch browser (headless for automation)
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+                
+                # Get page URL from context or use a default
+                page_url = "about:blank"  # This should be passed as context
+                
+                # Navigate to page and get element at location
+                await page.goto(page_url)
+                
+                # Use Playwright's elementFromPoint to get element at coordinates
+                element_handle = await page.evaluate("""
+                    (x, y) => {
+                        const element = document.elementFromPoint(x, y);
+                        if (!element) return null;
+                        
+                        // Generate multiple selector options
+                        const selectors = [];
+                        
+                        // ID selector
+                        if (element.id) {
+                            selectors.push(`#${element.id}`);
+                        }
+                        
+                        // Class selector
+                        if (element.className) {
+                            const classes = element.className.split(' ').filter(c => c.trim());
+                            if (classes.length > 0) {
+                                selectors.push(`.${classes.join('.')}`);
+                            }
+                        }
+                        
+                        // Tag + attributes
+                        let selector = element.tagName.toLowerCase();
+                        
+                        // Add test-id if available
+                        const testId = element.getAttribute('data-testid');
+                        if (testId) {
+                            selectors.push(`[data-testid="${testId}"]`);
+                        }
+                        
+                        // Add aria-label if available
+                        const ariaLabel = element.getAttribute('aria-label');
+                        if (ariaLabel) {
+                            selectors.push(`[aria-label="${ariaLabel}"]`);
+                        }
+                        
+                        // Add type attribute for inputs
+                        const type = element.getAttribute('type');
+                        if (type) {
+                            selector += `[type="${type}"]`;
+                        }
+                        
+                        // Add name attribute
+                        const name = element.getAttribute('name');
+                        if (name) {
+                            selector += `[name="${name}"]`;
+                        }
+                        
+                        selectors.push(selector);
+                        
+                        // Get position among siblings
+                        const siblings = Array.from(element.parentNode.children);
+                        const index = siblings.indexOf(element) + 1;
+                        selectors.push(`${element.tagName.toLowerCase()}:nth-child(${index})`);
+                        
+                        return {
+                            tagName: element.tagName.toLowerCase(),
+                            id: element.id,
+                            className: element.className,
+                            selectors: selectors,
+                            textContent: element.textContent ? element.textContent.slice(0, 50) : '',
+                            attributes: {
+                                type: element.getAttribute('type'),
+                                name: element.getAttribute('name'),
+                                'data-testid': element.getAttribute('data-testid'),
+                                'aria-label': element.getAttribute('aria-label'),
+                                title: element.getAttribute('title'),
+                                alt: element.getAttribute('alt')
+                            }
+                        };
+                    }
+                """, location[0], location[1])
+                
+                await browser.close()
+                
+                if element_handle and element_handle.get('selectors'):
+                    # Return the most specific selector available
+                    selectors = element_handle['selectors']
+                    
+                    # Prioritize selectors in order of reliability
+                    priority_order = [
+                        '[data-testid=',
+                        '#',
+                        '[aria-label=',
+                        '[name=',
+                        '[type=',
+                        '.',
+                        ':nth-child'
+                    ]
+                    
+                    for prefix in priority_order:
+                        for selector in selectors:
+                            if selector.startswith(prefix):
+                                return selector
+                    
+                    # Fallback to first available selector
+                    return selectors[0] if selectors else f"element-at-{location[0]}-{location[1]}"
+                
+        except Exception as e:
+            logger.error(f"Playwright selector generation failed: {e}")
+        
+        # Fallback selector
         x, y = location
-        # Simplified selector generation based on position
         return f"element-at-{x}-{y}"
     
     def _extract_element_type(self, selector: str) -> Optional[str]:
@@ -421,7 +631,8 @@ class SeniorQAAgent:
         self.redis_client.set(f"senior:{session_id}:{scenario['id']}:result", json.dumps(analysis_result))
         
         # Notify QA Manager of completion
-        await self._notify_manager_completion(session_id, scenario["id"], analysis_result)
+        if session_id and scenario.get("id"):
+            await self._notify_manager_completion(session_id, scenario["id"], analysis_result)
         
         return analysis_result
     
@@ -582,23 +793,76 @@ class SeniorQAAgent:
         self.redis_client.publish(f"manager:{session_id}:notifications", json.dumps(notification))
 
 async def main():
-    """Main entry point for Senior QA agent"""
+    """Main entry point for Senior QA agent with Celery worker"""
     senior_agent = SeniorQAAgent()
     
-    # Example usage
-    sample_task = {
-        "session_id": "session_20240207_143000",
-        "scenario": {
-            "id": "auth_001",
-            "name": "User Authentication Flow",
-            "priority": "critical",
-            "description": "Complete authentication process including login, logout, and session management"
-        },
-        "timestamp": datetime.now().isoformat()
-    }
+    # Start Celery worker for task processing
+    logger.info("Starting Senior QA Celery worker...")
     
-    result = await senior_agent.handle_complex_scenario(sample_task)
-    print(f"Senior QA Result: {result}")
+    # Define Celery task for handling scenarios
+    @senior_agent.celery_app.task(bind=True)
+    def handle_complex_task(self, task_data_json: str):
+        """Celery task wrapper for handling complex scenarios"""
+        try:
+            import asyncio
+            task_data = json.loads(task_data_json)
+            result = asyncio.run(senior_agent.handle_complex_scenario(task_data))
+            return {"status": "success", "result": result}
+        except Exception as e:
+            logger.error(f"Celery task failed: {e}")
+            return {"status": "error", "error": str(e)}
+    
+    # Start Redis listener for real-time task processing
+    async def redis_task_listener():
+        """Listen for tasks from Redis pub/sub"""
+        pubsub = senior_agent.redis_client.pubsub()
+        pubsub.subscribe(f"senior_qa:tasks")
+        
+        logger.info("Senior QA Redis task listener started")
+        
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                try:
+                    task_data = json.loads(message['data'])
+                    logger.info(f"Received task via Redis: {task_data.get('scenario', {}).get('name', 'Unknown')}")
+                    
+                    # Process task asynchronously
+                    result = await senior_agent.handle_complex_scenario(task_data)
+                    logger.info(f"Task completed: {result.get('status', 'unknown')}")
+                    
+                except Exception as e:
+                    logger.error(f"Redis task processing failed: {e}")
+    
+    # Run both Celery worker and Redis listener
+    import threading
+    
+    def start_celery_worker():
+        """Start Celery worker in separate thread"""
+        argv = [
+            'worker',
+            '--loglevel=info',
+            '--concurrency=2',
+            '--hostname=senior-qa-worker@%h'
+        ]
+        senior_agent.celery_app.worker_main(argv)
+    
+    # Start Celery worker thread
+    celery_thread = threading.Thread(target=start_celery_worker, daemon=True)
+    celery_thread.start()
+    
+    # Start Redis listener in main thread
+    asyncio.create_task(redis_task_listener())
+    
+    logger.info("Senior QA agent started with Celery worker and Redis listener")
+    
+    # Keep the agent running
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Senior QA agent shutting down...")
+    except Exception as e:
+        logger.error(f"Senior QA agent error: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
