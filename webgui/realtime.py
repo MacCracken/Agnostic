@@ -1,0 +1,329 @@
+"""
+Real-time Communication Module
+WebSocket infrastructure for live updates and notifications.
+"""
+import os
+import sys
+import json
+import asyncio
+from typing import Dict, List, Set, Any, Optional
+from datetime import datetime
+import logging
+from enum import Enum
+from dataclasses import dataclass
+
+# Add config path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.environment import config
+
+logger = logging.getLogger(__name__)
+
+class EventType(Enum):
+    SESSION_CREATED = "session_created"
+    SESSION_STATUS_CHANGED = "session_status_changed"
+    TEST_STEP_COMPLETED = "test_step_completed"
+    AGENT_TASK_ASSIGNED = "agent_task_assigned"
+    ERROR_OCCURRED = "error_occurred"
+    NOTIFICATION = "notification"
+    AGENT_STATUS_CHANGED = "agent_status_changed"
+    RESOURCE_UPDATE = "resource_update"
+
+@dataclass
+class WebSocketMessage:
+    type: EventType
+    timestamp: str
+    session_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    user_id: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None
+
+class RealtimeManager:
+    """Manages WebSocket connections and real-time communication"""
+    
+    def __init__(self):
+        self.redis_client = config.get_redis_client()
+        self.active_connections: Dict[str, Set[str]] = {}  # user_id -> set of connection_ids
+        self.connection_subscriptions: Dict[str, Set[str]] = {}  # connection_id -> set of channels
+        self.pubsub = None
+        self.background_tasks = set()
+        
+    async def initialize(self):
+        """Initialize Redis pub/sub subscription"""
+        try:
+            self.pubsub = self.redis_client.pubsub()
+            
+            # Subscribe to all webgui channels
+            channels = [
+                "webgui:session_updates",
+                "webgui:agent_activity", 
+                "webgui:test_progress",
+                "webgui:notifications",
+                "webgui:resource_updates"
+            ]
+            
+            self.pubsub.subscribe(*channels)
+            logger.info(f"Subscribed to {len(channels)} channels")
+            
+            # Start background listener
+            task = asyncio.create_task(self._redis_listener())
+            self.background_tasks.add(task)
+            task.add_done_callback(self.background_tasks.discard)
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize pub/sub: {e}")
+    
+    async def add_connection(self, user_id: str, connection_id: str, websocket):
+        """Add a new WebSocket connection"""
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = set()
+        
+        self.active_connections[user_id].add(connection_id)
+        self.connection_subscriptions[connection_id] = set()
+        
+        # Store websocket reference
+        if not hasattr(self, 'websockets'):
+            self.websockets = {}
+        self.websockets[connection_id] = websocket
+        
+        logger.info(f"Added connection {connection_id} for user {user_id}")
+        
+        # Send welcome message
+        await self.send_to_connection(connection_id, WebSocketMessage(
+            type=EventType.NOTIFICATION,
+            timestamp=datetime.now().isoformat(),
+            user_id=user_id,
+            data={"message": "Connected to real-time updates"}
+        ))
+    
+    async def remove_connection(self, connection_id: str):
+        """Remove a WebSocket connection"""
+        # Find user_id for this connection
+        user_id = None
+        for uid, connections in self.active_connections.items():
+            if connection_id in connections:
+                user_id = uid
+                connections.remove(connection_id)
+                break
+        
+        if user_id and not self.active_connections[user_id]:
+            del self.active_connections[user_id]
+        
+        # Clean up subscriptions
+        if connection_id in self.connection_subscriptions:
+            del self.connection_subscriptions[connection_id]
+        
+        # Clean up websocket reference
+        if hasattr(self, 'websockets') and connection_id in self.websockets:
+            del self.websockets[connection_id]
+        
+        logger.info(f"Removed connection {connection_id} for user {user_id}")
+    
+    async def subscribe_to_session(self, connection_id: str, session_id: str):
+        """Subscribe connection to specific session updates"""
+        if connection_id not in self.connection_subscriptions:
+            self.connection_subscriptions[connection_id] = set()
+        
+        channel = f"webgui:session:{session_id}"
+        self.connection_subscriptions[connection_id].add(channel)
+        
+        # Also subscribe to Redis channel
+        if self.pubsub:
+            self.pubsub.subscribe(channel)
+        
+        logger.info(f"Connection {connection_id} subscribed to session {session_id}")
+    
+    async def unsubscribe_from_session(self, connection_id: str, session_id: str):
+        """Unsubscribe connection from specific session updates"""
+        if connection_id in self.connection_subscriptions:
+            channel = f"webgui:session:{session_id}"
+            self.connection_subscriptions[connection_id].discard(channel)
+        
+        logger.info(f"Connection {connection_id} unsubscribed from session {session_id}")
+    
+    async def broadcast_to_user(self, user_id: str, message: WebSocketMessage):
+        """Send message to all connections for a user"""
+        if user_id in self.active_connections:
+            for connection_id in self.active_connections[user_id]:
+                await self.send_to_connection(connection_id, message)
+    
+    async def send_to_connection(self, connection_id: str, message: WebSocketMessage):
+        """Send message to specific connection"""
+        try:
+            if hasattr(self, 'websockets') and connection_id in self.websockets:
+                websocket = self.websockets[connection_id]
+                await websocket.send_json({
+                    "type": message.type.value,
+                    "timestamp": message.timestamp,
+                    "session_id": message.session_id,
+                    "agent_name": message.agent_name,
+                    "user_id": message.user_id,
+                    "data": message.data
+                })
+        except Exception as e:
+            logger.error(f"Error sending to connection {connection_id}: {e}")
+            # Connection might be dead, clean it up
+            await self.remove_connection(connection_id)
+    
+    async def publish_event(self, channel: str, message: WebSocketMessage):
+        """Publish event to Redis pub/sub"""
+        try:
+            event_data = {
+                "type": message.type.value,
+                "timestamp": message.timestamp,
+                "session_id": message.session_id,
+                "agent_name": message.agent_name,
+                "user_id": message.user_id,
+                "data": message.data
+            }
+            
+            self.redis_client.publish(channel, json.dumps(event_data))
+            logger.debug(f"Published event to {channel}: {message.type.value}")
+            
+        except Exception as e:
+            logger.error(f"Error publishing event to {channel}: {e}")
+    
+    async def _redis_listener(self):
+        """Background task to listen to Redis pub/sub messages"""
+        logger.info("Starting Redis pub/sub listener")
+        
+        try:
+            while True:
+                if self.pubsub:
+                    message = self.pubsub.get_message(timeout=1.0)
+                    if message and message['type'] == 'message':
+                        await self._handle_redis_message(message)
+                
+                await asyncio.sleep(0.01)  # Small delay to prevent CPU spin
+                
+        except Exception as e:
+            logger.error(f"Redis listener error: {e}")
+            # Restart listener
+            await asyncio.sleep(5)
+            task = asyncio.create_task(self._redis_listener())
+            self.background_tasks.add(task)
+            task.add_done_callback(self.background_tasks.discard)
+    
+    async def _handle_redis_message(self, redis_message):
+        """Handle incoming Redis pub/sub message"""
+        try:
+            channel = redis_message['channel'].decode()
+            data = json.loads(redis_message['data'])
+            
+            # Determine target connections
+            target_connections = []
+            
+            if channel.startswith("webgui:session:"):
+                # Session-specific updates
+                session_id = channel.split(":")[-1]
+                for conn_id, subscriptions in self.connection_subscriptions.items():
+                    if channel in subscriptions:
+                        target_connections.append(conn_id)
+            
+            elif channel == "webgui:notifications":
+                # Global notifications - send to all connections
+                target_connections = list(self.connection_subscriptions.keys())
+            
+            elif channel == "webgui:agent_activity":
+                # Agent activity - send to connections subscribed to relevant sessions
+                session_id = data.get("session_id")
+                if session_id:
+                    session_channel = f"webgui:session:{session_id}"
+                    for conn_id, subscriptions in self.connection_subscriptions.items():
+                        if session_channel in subscriptions:
+                            target_connections.append(conn_id)
+            
+            # Send to target connections
+            for connection_id in target_connections:
+                message = WebSocketMessage(
+                    type=EventType(data["type"]),
+                    timestamp=data["timestamp"],
+                    session_id=data.get("session_id"),
+                    agent_name=data.get("agent_name"),
+                    user_id=data.get("user_id"),
+                    data=data.get("data")
+                )
+                await self.send_to_connection(connection_id, message)
+                
+        except Exception as e:
+            logger.error(f"Error handling Redis message: {e}")
+    
+    async def cleanup(self):
+        """Clean up resources"""
+        logger.info("Cleaning up real-time manager")
+        
+        # Cancel background tasks
+        for task in self.background_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        # Close pub/sub
+        if self.pubsub:
+            self.pubsub.close()
+        
+        # Clear connections
+        self.active_connections.clear()
+        self.connection_subscriptions.clear()
+        if hasattr(self, 'websockets'):
+            self.websockets.clear()
+
+class WebSocketHandler:
+    """FastAPI WebSocket endpoint handler"""
+    
+    def __init__(self, realtime_manager: RealtimeManager):
+        self.realtime_manager = realtime_manager
+    
+    async def handle_websocket(self, websocket, user_id: str):
+        """Handle WebSocket connection lifecycle"""
+        connection_id = f"{user_id}_{datetime.now().timestamp()}"
+        
+        try:
+            # Accept connection
+            await websocket.accept()
+            
+            # Add to manager
+            await self.realtime_manager.add_connection(user_id, connection_id, websocket)
+            
+            # Handle messages
+            while True:
+                try:
+                    data = await websocket.receive_json()
+                    await self._handle_client_message(connection_id, data)
+                    
+                except Exception as e:
+                    logger.error(f"Error handling client message: {e}")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"WebSocket connection error: {e}")
+        finally:
+            # Clean up
+            await self.realtime_manager.remove_connection(connection_id)
+    
+    async def _handle_client_message(self, connection_id: str, data: Dict[str, Any]):
+        """Handle incoming message from client"""
+        message_type = data.get("type")
+        
+        if message_type == "subscribe_session":
+            session_id = data.get("session_id")
+            if session_id:
+                await self.realtime_manager.subscribe_to_session(connection_id, session_id)
+        
+        elif message_type == "unsubscribe_session":
+            session_id = data.get("session_id")
+            if session_id:
+                await self.realtime_manager.unsubscribe_from_session(connection_id, session_id)
+        
+        elif message_type == "ping":
+            # Respond with pong
+            await self.realtime_manager.send_to_connection(connection_id, WebSocketMessage(
+                type=EventType.NOTIFICATION,
+                timestamp=datetime.now().isoformat(),
+                data={"message": "pong"}
+            ))
+
+# Singleton instance
+realtime_manager = RealtimeManager()
+websocket_handler = WebSocketHandler(realtime_manager)

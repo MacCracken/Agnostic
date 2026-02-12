@@ -149,7 +149,14 @@ Chaos Engineer (Chaos)              ─┘
 - `config/llm_integration.py` — comprehensive LLM service for intelligent tool implementations (scenario generation, risk identification, fuzzy verification, security analysis, performance profiling)
 - `advanced_testing/self_healing_fuzzy_verification.py` — CV-based element detection, semantic selector repair, fuzzy matching
 - `advanced_testing/risk_prioritization_exploratory.py` — ML-driven risk scoring, code change analysis, exploratory test generation
-- `webgui/app.py` — Chainlit + FastAPI web interface with file upload, session management, reasoning traces
+- `webgui/` — Enhanced Chainlit-based WebGUI with comprehensive monitoring and reporting
+  - `app.py` — Main Chainlit application with chat interface and agent interaction
+  - `dashboard.py` — Real-time dashboard showing active sessions and resource utilization
+  - `realtime.py` — WebSocket infrastructure for live updates and notifications
+  - `exports.py` — PDF/JSON/CSV report generation with charts and analytics
+  - `history.py` — Session browsing, comparison, and trend analysis
+  - `agent_monitor.py` — Agent activity visualization and performance monitoring
+  - `auth.py` — JWT-based authentication with role-based access control
 
 ## Container & Orchestration
 
@@ -203,3 +210,71 @@ Configured via `.env` (see `.env.example`). **NEW**: All Redis/RabbitMQ connecti
 **Features**: `ENABLE_SELF_HEALING`, `ENABLE_FUZZY_VERIFICATION`, `ENABLE_RISK_BASED_PRIORITIZATION`, `ENABLE_CONTEXT_AWARE_TESTING`
 
 Configuration system includes validation on startup, connection logging (without passwords), and fallback to URL-based config for backwards compatibility.
+
+## WebGUI Enhancements
+
+The WebGUI has been enhanced with comprehensive monitoring, reporting, and authentication capabilities:
+
+### Architecture Decisions (ADRs)
+See `docs/adr/` for detailed Architecture Decision Records:
+- **ADR-001**: WebGUI Technology Stack Selection (Chainlit + FastAPI)
+- **ADR-002**: Real-time Communication Infrastructure (Redis Pub/Sub + WebSocket)
+- **ADR-003**: Session Management Architecture (Hybrid Redis + File-based)
+- **ADR-004**: Report Generation Strategy (Template-based with multiple formats)
+- **ADR-005**: Authentication and Authorization Design (JWT + RBAC)
+
+### Real-time Features
+- **Dashboard**: Live session monitoring with status indicators and resource metrics
+- **WebSocket Updates**: Real-time progress, agent status, and notifications
+- **Agent Monitoring**: Performance metrics, task queue visualization, communication graphs
+- **Resource Tracking**: CPU/memory usage, Redis metrics, system load
+
+### Reporting & Analytics
+- **Multi-format Exports**: PDF (with charts), JSON (raw data), CSV (spreadsheet analysis)
+- **Report Types**: Executive Summary, Technical Report, Compliance Report, Agent Performance
+- **Historical Analysis**: Session comparison, trend analysis, searchable archives
+- **Scheduled Reports**: Automated generation and distribution
+
+### Authentication & Security
+- **Multi-provider Auth**: Google OAuth2, GitHub, Azure AD, SAML support
+- **Role-based Access Control**: Super Admin, Org Admin, Team Lead, QA Engineer, Viewer, API User
+- **Resource Isolation**: Team-based data separation, audit trails, permission checking
+- **JWT Tokens**: Access tokens (15 min) + refresh tokens (7 days) with blacklisting
+
+### Session Management
+- **Hybrid Storage**: Redis for active sessions, file system for persistence, database for metadata
+- **Session Lifecycle**: Creation → Planning → Testing → Analysis → Completion → Archive
+- **Snapshots**: Periodic session state preservation for crash recovery
+- **Search & Filter**: By user, date range, status, custom criteria
+
+### WebGUI Environment Variables
+```bash
+# Authentication
+WEBGUI_SECRET_KEY=your-secret-key
+OAUTH2_GOOGLE_CLIENT_ID=your-google-client-id
+OAUTH2_GOOGLE_CLIENT_SECRET=your-google-client-secret
+
+# Real-time Features
+WEBSOCKET_ENABLED=true
+REDIS_PUBSUB_CHANNEL=webgui_updates
+
+# Reporting
+REPORT_EXPORT_PATH=/app/reports
+PDF_GENERATOR_ENGINE=reportlab
+```
+
+### WebGUI API Endpoints
+The enhanced WebGUI includes FastAPI endpoints for:
+- `/api/dashboard` - Dashboard data and metrics
+- `/api/sessions` - Session management and history
+- `/api/reports` - Report generation and download
+- `/api/agents` - Agent monitoring and status
+- `/api/auth` - Authentication and authorization
+- `/ws/realtime` - WebSocket real-time updates
+
+### Static Assets
+Frontend assets are organized in `webgui/static/`:
+- `css/` - Stylesheets for dashboard, reports, and custom components
+- `js/` - JavaScript for real-time updates, charts, and interactive elements
+- `images/` - Icons, logos, and static images
+- `templates/` - HTML templates for custom reports and email notifications

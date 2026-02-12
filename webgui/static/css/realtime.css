@@ -1,0 +1,121 @@
+/* Real-time Updates Styles */
+.realtime-container {
+    padding: 20px;
+}
+
+.notification {
+    margin-bottom: 12px;
+    padding: 12px;
+    border-radius: 4px;
+    animation: slideIn 0.3s ease-out;
+}
+
+.notification.info {
+    background-color: #d1ecf1;
+    border: 1px solid #bee5eb;
+    color: #0c5460;
+}
+
+.notification.success {
+    background-color: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+}
+
+.notification.warning {
+    background-color: #fff3cd;
+    border: 1px solid #ffeaa7;
+    color: #856404;
+}
+
+.notification.error {
+    background-color: #f8d7da;
+    border: 1px solid #f5c6cb;
+    color: #721c24;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.connection-status {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 8px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: bold;
+    z-index: 1000;
+}
+
+.connection-status.connected {
+    background-color: #28a745;
+    color: white;
+}
+
+.connection-status.disconnected {
+    background-color: #dc3545;
+    color: white;
+}
+
+.connection-status.connecting {
+    background-color: #ffc107;
+    color: #212529;
+}
+
+.agent-status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+}
+
+.agent-card {
+    background: white;
+    border-radius: 8px;
+    padding: 16px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.agent-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.agent-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    margin-right: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    color: white;
+}
+
+.agent-name {
+    font-weight: bold;
+    color: #2c3e50;
+}
+
+.agent-status {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    margin-left: auto;
+}
+
+.agent-status.idle { background-color: #28a745; color: white; }
+.agent-status.busy { background-color: #ffc107; color: #212529; }
+.agent-status.error { background-color: #dc3545; color: white; }
+.agent-status.offline { background-color: #6c757d; color: white; }

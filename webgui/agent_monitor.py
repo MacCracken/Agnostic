@@ -1,0 +1,543 @@
+"""
+Agent Monitor Module
+Real-time agent activity visualization and performance monitoring.
+"""
+import os
+import sys
+import json
+import asyncio
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime, timedelta
+from dataclasses import dataclass, asdict
+from enum import Enum
+import logging
+
+# Add config path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config.environment import config
+
+logger = logging.getLogger(__name__)
+
+class AgentType(Enum):
+    MANAGER = "manager"
+    SENIOR = "senior"
+    JUNIOR = "junior"
+    ANALYST = "analyst"
+    SRE = "sre"
+    ACCESSIBILITY = "accessibility"
+    API = "api"
+    MOBILE = "mobile"
+    COMPLIANCE = "compliance"
+    CHAOS = "chaos"
+
+class TaskStatus(Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+@dataclass
+class AgentStatus:
+    agent_name: str
+    agent_type: AgentType
+    status: str
+    current_task: Optional[str]
+    current_session: Optional[str]
+    tasks_completed: int
+    tasks_failed: int
+    last_heartbeat: datetime
+    cpu_usage: float
+    memory_usage: float
+    response_time_ms: float
+    uptime_seconds: int
+    error_rate: float
+
+@dataclass
+class TaskInfo:
+    task_id: str
+    agent_name: str
+    session_id: str
+    task_type: str
+    status: TaskStatus
+    created_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    duration_seconds: int
+    result: Optional[Dict[str, Any]]
+    error_message: Optional[str]
+
+@dataclass
+class AgentMetrics:
+    agent_name: str
+    time_range: str
+    total_tasks: int
+    completed_tasks: int
+    failed_tasks: int
+    success_rate: float
+    average_duration_seconds: float
+    average_response_time_ms: float
+    cpu_usage_average: float
+    memory_usage_average: float
+    error_rate: float
+    last_updated: datetime
+
+class AgentMonitor:
+    """Monitors agent activity and performance"""
+    
+    def __init__(self):
+        self.redis_client = config.get_redis_client()
+        self.agent_status_cache = {}
+        self.task_cache = {}
+        self.cache_timeout = 60  # 1 minute
+        
+        # Agent configuration
+        self.agents = {
+            AgentType.MANAGER: {"name": "qa-manager", "description": "QA Manager Orchestrator"},
+            AgentType.SENIOR: {"name": "senior-qa", "description": "Senior QA Engineer"},
+            AgentType.JUNIOR: {"name": "junior-qa", "description": "Junior QA Worker"},
+            AgentType.ANALYST: {"name": "qa-analyst", "description": "QA Analyst"},
+            AgentType.SRE: {"name": "sre-agent", "description": "Site Reliability Engineer"},
+            AgentType.ACCESSIBILITY: {"name": "accessibility-agent", "description": "Accessibility Tester"},
+            AgentType.API: {"name": "api-agent", "description": "API Integration Engineer"},
+            AgentType.MOBILE: {"name": "mobile-agent", "description": "Mobile/Device QA"},
+            AgentType.COMPLIANCE: {"name": "compliance-agent", "description": "Compliance Tester"},
+            AgentType.CHAOS: {"name": "chaos-agent", "description": "Chaos Engineer"}
+        }
+    
+    async def get_all_agent_status(self) -> List[AgentStatus]:
+        """Get status of all agents"""
+        agent_statuses = []
+        
+        try:
+            for agent_type, config in self.agents.items():
+                agent_name = config["name"]
+                status = await self._get_agent_status(agent_name, agent_type)
+                if status:
+                    agent_statuses.append(status)
+            
+            # Sort by agent name
+            agent_statuses.sort(key=lambda x: x.agent_name)
+            
+        except Exception as e:
+            logger.error(f"Error getting all agent status: {e}")
+        
+        return agent_statuses
+    
+    async def get_agent_status(self, agent_name: str) -> Optional[AgentStatus]:
+        """Get status of specific agent"""
+        try:
+            # Find agent type
+            agent_type = None
+            for atype, config in self.agents.items():
+                if config["name"] == agent_name:
+                    agent_type = atype
+                    break
+            
+            if not agent_type:
+                return None
+            
+            return await self._get_agent_status(agent_name, agent_type)
+            
+        except Exception as e:
+            logger.error(f"Error getting agent status {agent_name}: {e}")
+            return None
+    
+    async def _get_agent_status(self, agent_name: str, agent_type: AgentType) -> Optional[AgentStatus]:
+        """Get detailed status for an agent"""
+        try:
+            # Check cache first
+            cache_key = f"agent_status:{agent_name}"
+            cached = self.redis_client.get(cache_key)
+            
+            if cached:
+                data = json.loads(cached)
+                # Parse dates
+                data["last_heartbeat"] = datetime.fromisoformat(data.get("last_heartbeat", datetime.now().isoformat()))
+                return AgentStatus(**data)
+            
+            # Get status from Redis
+            status_key = f"agent:{agent_name}:status"
+            status_data = self.redis_client.get(status_key)
+            
+            if not status_data:
+                # Agent not found, return offline status
+                return AgentStatus(
+                    agent_name=agent_name,
+                    agent_type=agent_type,
+                    status="offline",
+                    current_task=None,
+                    current_session=None,
+                    tasks_completed=0,
+                    tasks_failed=0,
+                    last_heartbeat=datetime.now() - timedelta(hours=1),
+                    cpu_usage=0.0,
+                    memory_usage=0.0,
+                    response_time_ms=0.0,
+                    uptime_seconds=0,
+                    error_rate=0.0
+                )
+            
+            data = json.loads(status_data)
+            
+            # Get additional metrics
+            tasks_completed = self._get_agent_task_count(agent_name, "completed")
+            tasks_failed = self._get_agent_task_count(agent_name, "failed")
+            
+            status = AgentStatus(
+                agent_name=agent_name,
+                agent_type=agent_type,
+                status=data.get("status", "unknown"),
+                current_task=data.get("current_task"),
+                current_session=data.get("current_session"),
+                tasks_completed=tasks_completed,
+                tasks_failed=tasks_failed,
+                last_heartbeat=datetime.fromisoformat(data.get("last_heartbeat", datetime.now().isoformat())),
+                cpu_usage=data.get("cpu_usage", 0.0),
+                memory_usage=data.get("memory_usage", 0.0),
+                response_time_ms=data.get("response_time_ms", 0.0),
+                uptime_seconds=data.get("uptime_seconds", 0),
+                error_rate=self._calculate_error_rate(agent_name)
+            )
+            
+            # Cache the result
+            self.redis_client.setex(cache_key, self.cache_timeout, json.dumps(asdict(status), default=str))
+            
+            return status
+            
+        except Exception as e:
+            logger.error(f"Error getting agent status {agent_name}: {e}")
+            return None
+    
+    async def get_active_tasks(self, agent_name: Optional[str] = None) -> List[TaskInfo]:
+        """Get currently active tasks"""
+        active_tasks = []
+        
+        try:
+            # Get task keys
+            if agent_name:
+                task_keys = self.redis_client.keys(f"task:{agent_name}:*")
+            else:
+                task_keys = self.redis_client.keys("task:*")
+            
+            for key in task_keys:
+                task_data = self.redis_client.get(key)
+                if task_data:
+                    try:
+                        data = json.loads(task_data)
+                        
+                        # Filter for active tasks
+                        if data.get("status") in ["pending", "in_progress"]:
+                            # Parse dates
+                            created_at = datetime.fromisoformat(data.get("created_at", datetime.now().isoformat()))
+                            started_at = None
+                            if data.get("started_at"):
+                                started_at = datetime.fromisoformat(data["started_at"])
+                            completed_at = None
+                            if data.get("completed_at"):
+                                completed_at = datetime.fromisoformat(data["completed_at"])
+                            
+                            task = TaskInfo(
+                                task_id=data.get("task_id", ""),
+                                agent_name=data.get("agent_name", ""),
+                                session_id=data.get("session_id", ""),
+                                task_type=data.get("task_type", ""),
+                                status=TaskStatus(data.get("status", "pending")),
+                                created_at=created_at,
+                                started_at=started_at,
+                                completed_at=completed_at,
+                                duration_seconds=data.get("duration_seconds", 0),
+                                result=data.get("result"),
+                                error_message=data.get("error_message")
+                            )
+                            
+                            active_tasks.append(task)
+                    
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.warning(f"Error parsing task data: {e}")
+                        continue
+            
+            # Sort by created_at
+            active_tasks.sort(key=lambda x: x.created_at, reverse=True)
+            
+        except Exception as e:
+            logger.error(f"Error getting active tasks: {e}")
+        
+        return active_tasks
+    
+    async def get_agent_metrics(
+        self,
+        agent_name: str,
+        time_range: str = "24h"
+    ) -> Optional[AgentMetrics]:
+        """Get performance metrics for an agent"""
+        try:
+            # Calculate time range
+            now = datetime.now()
+            if time_range == "1h":
+                start_time = now - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = now - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = now - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = now - timedelta(days=30)
+            else:
+                start_time = now - timedelta(hours=24)
+            
+            # Get tasks in time range
+            tasks = await self._get_agent_tasks_in_range(agent_name, start_time, now)
+            
+            if not tasks:
+                return None
+            
+            # Calculate metrics
+            total_tasks = len(tasks)
+            completed_tasks = len([t for t in tasks if t.get("status") == "completed"])
+            failed_tasks = len([t for t in tasks if t.get("status") == "failed"])
+            success_rate = (completed_tasks / total_tasks * 100) if total_tasks > 0 else 0
+            
+            # Calculate durations
+            durations = [t.get("duration_seconds", 0) for t in tasks if t.get("duration_seconds")]
+            avg_duration = sum(durations) / len(durations) if durations else 0
+            
+            # Get performance data
+            perf_data = await self._get_agent_performance_data(agent_name, start_time, now)
+            
+            metrics = AgentMetrics(
+                agent_name=agent_name,
+                time_range=time_range,
+                total_tasks=total_tasks,
+                completed_tasks=completed_tasks,
+                failed_tasks=failed_tasks,
+                success_rate=success_rate,
+                average_duration_seconds=avg_duration,
+                average_response_time_ms=perf_data.get("avg_response_time_ms", 0),
+                cpu_usage_average=perf_data.get("avg_cpu_usage", 0),
+                memory_usage_average=perf_data.get("avg_memory_usage", 0),
+                error_rate=self._calculate_error_rate(agent_name),
+                last_updated=datetime.now()
+            )
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error getting agent metrics {agent_name}: {e}")
+            return None
+    
+    async def get_agent_communication_graph(self) -> Dict[str, Any]:
+        """Get agent communication flow visualization data"""
+        graph_data = {
+            "nodes": [],
+            "edges": [],
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "time_range": "24h"
+            }
+        }
+        
+        try:
+            # Add nodes for each agent
+            for agent_type, config in self.agents.items():
+                agent_name = config["name"]
+                status = await self._get_agent_status(agent_name, agent_type)
+                
+                if status:
+                    node = {
+                        "id": agent_name,
+                        "label": config["description"],
+                        "type": agent_type.value,
+                        "status": status.status,
+                        "tasks_completed": status.tasks_completed,
+                        "current_task": status.current_task
+                    }
+                    graph_data["nodes"].append(node)
+            
+            # Get communication edges from recent notifications
+            time_threshold = datetime.now() - timedelta(hours=24)
+            
+            for agent_type, config in self.agents.items():
+                agent_name = config["name"]
+                
+                # Get recent notifications
+                notif_pattern = f"{agent_name}:*:notifications"
+                notif_keys = self.redis_client.keys(notif_pattern)
+                
+                for key in notif_keys:
+                    notifications = self.redis_client.lrange(key, 0, -1)
+                    for notif in notifications:
+                        try:
+                            data = json.loads(notif)
+                            notif_time = datetime.fromisoformat(data.get("timestamp", ""))
+                            
+                            if notif_time >= time_threshold:
+                                # Create edge if this is communication between agents
+                                target_agent = data.get("target_agent")
+                                if target_agent and target_agent != agent_name:
+                                    edge = {
+                                        "source": agent_name,
+                                        "target": target_agent,
+                                        "type": data.get("type", "notification"),
+                                        "timestamp": data.get("timestamp"),
+                                        "message": data.get("message", "")[:50] + "..."
+                                    }
+                                    graph_data["edges"].append(edge)
+                        
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+            
+        except Exception as e:
+            logger.error(f"Error getting communication graph: {e}")
+        
+        return graph_data
+    
+    async def get_queue_depths(self) -> Dict[str, int]:
+        """Get current queue depths for each agent"""
+        queue_depths = {}
+        
+        try:
+            for agent_type, config in self.agents.items():
+                agent_name = config["name"]
+                
+                # Count pending tasks
+                pending_tasks = 0
+                task_keys = self.redis_client.keys(f"task:{agent_name}:*")
+                
+                for key in task_keys:
+                    task_data = self.redis_client.get(key)
+                    if task_data:
+                        try:
+                            data = json.loads(task_data)
+                            if data.get("status") == "pending":
+                                pending_tasks += 1
+                        except json.JSONDecodeError:
+                            continue
+                
+                queue_depths[agent_name] = pending_tasks
+            
+        except Exception as e:
+            logger.error(f"Error getting queue depths: {e}")
+        
+        return queue_depths
+    
+    def _get_agent_task_count(self, agent_name: str, status: str) -> int:
+        """Get count of tasks with specific status for agent"""
+        try:
+            task_keys = self.redis_client.keys(f"task:{agent_name}:*")
+            count = 0
+            
+            for key in task_keys:
+                task_data = self.redis_client.get(key)
+                if task_data:
+                    try:
+                        data = json.loads(task_data)
+                        if data.get("status") == status:
+                            count += 1
+                    except json.JSONDecodeError:
+                        continue
+            
+            return count
+            
+        except Exception as e:
+            logger.error(f"Error getting task count for {agent_name}: {e}")
+            return 0
+    
+    def _calculate_error_rate(self, agent_name: str) -> float:
+        """Calculate error rate for agent"""
+        try:
+            total_tasks = self._get_agent_task_count(agent_name, "completed") + self._get_agent_task_count(agent_name, "failed")
+            failed_tasks = self._get_agent_task_count(agent_name, "failed")
+            
+            if total_tasks == 0:
+                return 0.0
+            
+            return (failed_tasks / total_tasks) * 100
+            
+        except Exception as e:
+            logger.error(f"Error calculating error rate for {agent_name}: {e}")
+            return 0.0
+    
+    async def _get_agent_tasks_in_range(
+        self,
+        agent_name: str,
+        start_time: datetime,
+        end_time: datetime
+    ) -> List[Dict[str, Any]]:
+        """Get tasks for agent within time range"""
+        tasks = []
+        
+        try:
+            task_keys = self.redis_client.keys(f"task:{agent_name}:*")
+            
+            for key in task_keys:
+                task_data = self.redis_client.get(key)
+                if task_data:
+                    try:
+                        data = json.loads(task_data)
+                        created_at = datetime.fromisoformat(data.get("created_at", ""))
+                        
+                        if start_time <= created_at <= end_time:
+                            tasks.append(data)
+                    
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            
+        except Exception as e:
+            logger.error(f"Error getting tasks in range for {agent_name}: {e}")
+        
+        return tasks
+    
+    async def _get_agent_performance_data(
+        self,
+        agent_name: str,
+        start_time: datetime,
+        end_time: datetime
+    ) -> Dict[str, float]:
+        """Get performance metrics for agent in time range"""
+        perf_data = {
+            "avg_response_time_ms": 0.0,
+            "avg_cpu_usage": 0.0,
+            "avg_memory_usage": 0.0
+        }
+        
+        try:
+            # Get performance history from Redis
+            perf_keys = self.redis_client.keys(f"perf:{agent_name}:*")
+            
+            response_times = []
+            cpu_usages = []
+            memory_usages = []
+            
+            for key in perf_keys:
+                perf_record = self.redis_client.get(key)
+                if perf_record:
+                    try:
+                        data = json.loads(perf_record)
+                        timestamp = datetime.fromisoformat(data.get("timestamp", ""))
+                        
+                        if start_time <= timestamp <= end_time:
+                            if "response_time_ms" in data:
+                                response_times.append(data["response_time_ms"])
+                            if "cpu_usage" in data:
+                                cpu_usages.append(data["cpu_usage"])
+                            if "memory_usage" in data:
+                                memory_usages.append(data["memory_usage"])
+                    
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            
+            # Calculate averages
+            if response_times:
+                perf_data["avg_response_time_ms"] = sum(response_times) / len(response_times)
+            if cpu_usages:
+                perf_data["avg_cpu_usage"] = sum(cpu_usages) / len(cpu_usages)
+            if memory_usages:
+                perf_data["avg_memory_usage"] = sum(memory_usages) / len(memory_usages)
+            
+        except Exception as e:
+            logger.error(f"Error getting performance data for {agent_name}: {e}")
+        
+        return perf_data
+
+# Singleton instance
+agent_monitor = AgentMonitor()

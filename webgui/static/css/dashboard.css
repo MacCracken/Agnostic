@@ -1,0 +1,77 @@
+/* Dashboard Styles */
+.dashboard-container {
+    padding: 20px;
+    background-color: #f8f9fa;
+}
+
+.session-card {
+    background: white;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+}
+
+.session-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 8px;
+}
+
+.status-created { background-color: #6c757d; }
+.status-planning { background-color: #007bff; }
+.status-testing { background-color: #ffc107; }
+.status-analysis { background-color: #fd7e14; }
+.status-completed { background-color: #28a745; }
+.status-failed { background-color: #dc3545; }
+.status-cancelled { background-color: #6c757d; }
+
+.progress-bar {
+    width: 100%;
+    height: 8px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 8px 0;
+}
+
+.progress-fill {
+    height: 100%;
+    background-color: #007bff;
+    transition: width 0.3s ease;
+}
+
+.metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.metric-card {
+    background: white;
+    padding: 16px;
+    border-radius: 8px;
+    text-align: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.metric-value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #007bff;
+}
+
+.metric-label {
+    font-size: 14px;
+    color: #6c757d;
+    margin-top: 4px;
+}
