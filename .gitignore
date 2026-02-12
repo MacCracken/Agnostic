@@ -70,6 +70,8 @@ celerybeat.pid
 .env
 .env.*
 .venv
+.venv*
+.chainlit
 env/
 venv/
 ENV/
