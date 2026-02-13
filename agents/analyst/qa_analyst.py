@@ -739,6 +739,288 @@ class PerformanceProfilingTool(BaseTool):
         }
 
 
+class TestTraceabilityTool(BaseTool):
+    name: str = "Test Traceability & Coverage"
+    description: str = "Maps requirements to tests, links defects, generates coverage matrices, and identifies testing gaps"
+
+    def _run(
+        self,
+        requirements: List[Dict[str, Any]],
+        test_cases: List[Dict[str, Any]],
+        defects: Optional[List[Dict[str, Any]]] = None,
+        coverage_threshold: float = 0.8
+    ) -> Dict[str, Any]:
+        """Generate traceability matrix and coverage analysis"""
+        
+        if defects is None:
+            defects = []
+        
+        traceability_matrix = self._build_traceability_matrix(requirements, test_cases)
+        
+        coverage_analysis = self._analyze_coverage(
+            traceability_matrix, 
+            requirements, 
+            test_cases,
+            coverage_threshold
+        )
+        
+        defect_links = self._link_defects_to_tests(defects, test_cases)
+        
+        gap_analysis = self._identify_coverage_gaps(
+            requirements, 
+            test_cases, 
+            traceability_matrix
+        )
+        
+        recommendations = self._generate_recommendations(
+            coverage_analysis, 
+            gap_analysis,
+            defect_links
+        )
+        
+        return {
+            "traceability_matrix": traceability_matrix,
+            "coverage_analysis": coverage_analysis,
+            "defect_links": defect_links,
+            "gap_analysis": gap_analysis,
+            "recommendations": recommendations,
+            "summary": {
+                "total_requirements": len(requirements),
+                "total_test_cases": len(test_cases),
+                "total_defects": len(defects),
+                "coverage_percentage": coverage_analysis["overall_coverage"],
+                "gaps_identified": len(gap_analysis["gaps"]),
+                "high_priority_gaps": len([g for g in gap_analysis["gaps"] if g.get("priority") == "high"])
+            }
+        }
+
+    def _build_traceability_matrix(
+        self, 
+        requirements: List[Dict], 
+        test_cases: List[Dict]
+    ) -> List[Dict[str, Any]]:
+        """Build requirement-to-test mapping matrix"""
+        matrix = []
+        
+        for req in requirements:
+            req_id = req.get("id", req.get("requirement_id", "unknown"))
+            req_title = req.get("title", req.get("description", ""))
+            
+            linked_tests = []
+            for tc in test_cases:
+                tc_id = tc.get("id", tc.get("test_id", ""))
+                tc_name = tc.get("name", tc.get("test_name", ""))
+                
+                if self._is_test_linked_to_requirement(tc, req):
+                    linked_tests.append({
+                        "test_id": tc_id,
+                        "test_name": tc_name,
+                        "test_type": tc.get("type", "unknown"),
+                        "status": tc.get("status", "not_run"),
+                        "last_result": tc.get("last_result", {})
+                    })
+            
+            matrix.append({
+                "requirement_id": req_id,
+                "requirement_title": req_title,
+                "requirement_type": req.get("type", "functional"),
+                "priority": req.get("priority", "medium"),
+                "linked_tests": linked_tests,
+                "test_count": len(linked_tests),
+                "coverage_status": "covered" if linked_tests else "not_covered"
+            })
+        
+        return matrix
+
+    def _is_test_linked_to_requirement(self, test_case: Dict, requirement: Dict) -> bool:
+        """Determine if a test case maps to a requirement"""
+        req_id = requirement.get("id", requirement.get("requirement_id", "")).lower()
+        req_keywords = requirement.get("keywords", [])
+        
+        tc_text = f"{test_case.get('name', '')} {test_case.get('description', '')} {test_case.get('tags', '')}".lower()
+        tc_id = test_case.get("id", test_case.get("test_id", "")).lower()
+        
+        if req_id in tc_text or req_id in tc_id:
+            return True
+        
+        for keyword in req_keywords:
+            if keyword.lower() in tc_text:
+                return True
+        
+        return False
+
+    def _analyze_coverage(
+        self,
+        matrix: List[Dict],
+        requirements: List[Dict],
+        test_cases: List[Dict],
+        threshold: float
+    ) -> Dict[str, Any]:
+        """Analyze test coverage across requirements"""
+        total_req = len(requirements)
+        covered_req = len([r for r in matrix if r["coverage_status"] == "covered"])
+        
+        overall_coverage = covered_req / total_req if total_req > 0 else 0
+        
+        by_priority = {}
+        for priority in ["critical", "high", "medium", "low"]:
+            reqs = [r for r in matrix if r.get("priority") == priority]
+            covered = len([r for r in reqs if r["coverage_status"] == "covered"])
+            count = len(reqs)
+            by_priority[priority] = {
+                "total": count,
+                "covered": covered,
+                "coverage_pct": (covered / count * 100) if count > 0 else 0
+            }
+        
+        by_type = {}
+        for req_type in ["functional", "non_functional", "security", "performance"]:
+            reqs = [r for r in matrix if r.get("requirement_type") == req_type]
+            covered = len([r for r in reqs if r["coverage_status"] == "covered"])
+            count = len(reqs)
+            by_type[req_type] = {
+                "total": count,
+                "covered": covered,
+                "coverage_pct": (covered / count * 100) if count > 0 else 0
+            }
+        
+        return {
+            "overall_coverage": round(overall_coverage * 100, 1),
+            "covered_requirements": covered_req,
+            "total_requirements": total_req,
+            "meets_threshold": overall_coverage >= threshold,
+            "threshold": threshold,
+            "coverage_by_priority": by_priority,
+            "coverage_by_type": by_type
+        }
+
+    def _link_defects_to_tests(
+        self,
+        defects: List[Dict],
+        test_cases: List[Dict]
+    ) -> List[Dict[str, Any]]:
+        """Link defects to their covering tests"""
+        linked = []
+        
+        for defect in defects:
+            defect_id = defect.get("id", defect.get("defect_id", ""))
+            related_tests = []
+            
+            defect_keywords = f"{defect.get('title', '')} {defect.get('description', '')}".lower()
+            
+            for tc in test_cases:
+                tc_text = f"{tc.get('name', '')} {tc.get('description', '')}".lower()
+                
+                if any(kw in tc_text for kw in defect_keywords.split() if len(kw) > 3):
+                    related_tests.append({
+                        "test_id": tc.get("id", tc.get("test_id", "")),
+                        "test_name": tc.get("name", tc.get("test_name", "")),
+                        "can_detect": True
+                    })
+            
+            linked.append({
+                "defect_id": defect_id,
+                "title": defect.get("title", ""),
+                "severity": defect.get("severity", "medium"),
+                "status": defect.get("status", "open"),
+                "related_tests": related_tests,
+                "test_coverage": len(related_tests),
+                "has_test_coverage": len(related_tests) > 0
+            })
+        
+        return linked
+
+    def _identify_coverage_gaps(
+        self,
+        requirements: List[Dict],
+        test_cases: List[Dict],
+        matrix: List[Dict]
+    ) -> Dict[str, Any]:
+        """Identify gaps in test coverage"""
+        gaps = []
+        
+        uncovered = [r for r in matrix if r["coverage_status"] == "not_covered"]
+        
+        for req in uncovered:
+            priority = req.get("priority", "medium")
+            priority_score = {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(priority, 2)
+            
+            gaps.append({
+                "requirement_id": req["requirement_id"],
+                "requirement_title": req["requirement_title"],
+                "priority": priority,
+                "priority_score": priority_score,
+                "gap_type": "no_test_coverage",
+                "recommendation": f"Add test cases for requirement: {req['requirement_title']}"
+            })
+        
+        low_coverage = []
+        for req in matrix:
+            if req["coverage_status"] == "covered" and req["test_count"] < 2:
+                priority = req.get("priority", "medium")
+                priority_score = {"critical": 4, "high": 3, "medium": 2, "low": 1}.get(priority, 2)
+                
+                low_coverage.append({
+                    "requirement_id": req["requirement_id"],
+                    "requirement_title": req["requirement_title"],
+                    "priority": priority,
+                    "priority_score": priority_score,
+                    "gap_type": "insufficient_test_count",
+                    "current_tests": req["test_count"],
+                    "recommendation": f"Add more test cases for {req['requirement_title']} (currently {req['test_count']})"
+                })
+        
+        gaps.extend(low_coverage)
+        
+        gaps.sort(key=lambda x: x.get("priority_score", 0), reverse=True)
+        
+        return {
+            "gaps": gaps,
+            "total_gaps": len(gaps),
+            "high_priority_gaps": len([g for g in gaps if g.get("priority") in ("critical", "high")])
+        }
+
+    def _generate_recommendations(
+        self,
+        coverage_analysis: Dict,
+        gap_analysis: Dict,
+        defect_links: List[Dict]
+    ) -> List[str]:
+        """Generate actionable recommendations"""
+        recommendations = []
+        
+        if not coverage_analysis.get("meets_threshold", False):
+            coverage = coverage_analysis.get("overall_coverage", 0)
+            threshold = coverage_analysis.get("threshold", 80)
+            recommendations.append(
+                f"Coverage ({coverage}%) is below threshold ({threshold}%). "
+                f"Add tests for {coverage_analysis.get('total_requirements', 0) - coverage_analysis.get('covered_requirements', 0)} uncovered requirements."
+            )
+        
+        high_priority = gap_analysis.get("high_priority_gaps", 0)
+        if high_priority > 0:
+            recommendations.append(
+                f"Address {high_priority} high-priority coverage gaps before release."
+            )
+        
+        uncovered_defects = [d for d in defect_links if not d.get("has_test_coverage", False)]
+        if uncovered_defects:
+            recommendations.append(
+                f"{len(uncovered_defects)} defects lack test coverage. Add regression tests."
+            )
+        
+        for priority, data in coverage_analysis.get("coverage_by_priority", {}).items():
+            if data.get("coverage_pct", 0) < 50 and data.get("total", 0) > 0:
+                recommendations.append(
+                    f"Low coverage ({data['coverage_pct']:.0f}%) for {priority} priority requirements."
+                )
+        
+        if not recommendations:
+            recommendations.append("Test coverage is adequate. Continue monitoring for new requirements.")
+        
+        return recommendations
+
+
 class QAAnalystAgent:
     def __init__(self):
         # Validate environment variables
@@ -769,7 +1051,8 @@ class QAAnalystAgent:
             tools=[
                 DataOrganizationReportingTool(),
                 SecurityAssessmentTool(),
-                PerformanceProfilingTool()
+                PerformanceProfilingTool(),
+                TestTraceabilityTool()
             ]
         )
 

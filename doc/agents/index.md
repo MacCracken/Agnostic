@@ -33,20 +33,25 @@
 - EdgeCaseAnalysisTool
 
 ### Junior QA Worker
-**Focus**: Regression execution, synthetic data, test ordering optimization.
+**Focus**: Regression execution, synthetic data, test ordering optimization, UX testing, localization.
 
 **Key tools**:
 - RegressionTestingTool
 - SyntheticDataGeneratorTool
 - TestExecutionOptimizerTool
+- VisualRegressionTool
+- FlakyTestDetectionTool
+- UXUsabilityTestingTool
+- LocalizationTestingTool
 
 ### QA Analyst
-**Focus**: Aggregation, reporting, security and performance analysis.
+**Focus**: Aggregation, reporting, security and performance analysis, traceability.
 
 **Key tools**:
 - DataOrganizationReportingTool
 - SecurityAssessmentTool
 - PerformanceProfilingTool
+- TestTraceabilityTool
 
 ### Security & Compliance Agent
 **Focus**: OWASP, GDPR, PCI DSS.
@@ -57,12 +62,13 @@
 - PCIDSSComplianceTool
 
 ### Performance & Resilience Agent
-**Focus**: Performance monitoring, load testing, resilience validation.
+**Focus**: Performance monitoring, load testing, resilience validation, advanced profiling.
 
 **Key tools**:
 - PerformanceMonitoringTool
 - LoadTestingTool
 - ResilienceValidationTool
+- AdvancedProfilingTool
 
 ---
 
@@ -96,5 +102,5 @@ RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
 
 ---
 
-*Last Updated: 2026-02-11*
-*Architecture: 6-Agent Optimized*
+*Last Updated: 2026-02-13*
+*Architecture: 6-Agent with Extended Testing Tools*

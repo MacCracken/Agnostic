@@ -16,6 +16,7 @@ This directory contains Architecture Decision Records (ADRs) for the Agentic QA 
 | [ADR-008](008-deployment-strategy.md) | Deployment Strategy | Accepted |
 | [ADR-009](009-webgui-architecture.md) | WebGUI Architecture | Accepted |
 | [ADR-010](010-security-strategy.md) | Security Strategy | Accepted |
+| [ADR-011](011-scalable-team-architecture.md) | Scalable Team Architecture | Accepted |
 
 ## ADR Template
 

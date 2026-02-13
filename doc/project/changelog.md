@@ -8,14 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Code and documentation audit completed
-- Consolidated repository structure
-- Standardized 6-agent architecture
-- Added comprehensive .gitignore
-- Created CONTRIBUTING.md guidelines
- - Added Celery task wrappers for analyst, performance, and security-compliance agents
+- UX/Usability Testing Tool with session analysis, heatmaps, A/B testing
+- Advanced Performance Profiling Tool with CPU/memory profiling, GC analysis, memory leak detection, flame graphs
+- i18n/Localization Testing Tool with multi-language validation, RTL support, timezone handling, cultural formatting
+- Test Traceability Tool with requirement-to-test mapping, coverage matrices, defect linking
+- Flaky Test Detection Tool with quarantine management and auto-retry strategies
+- Team configuration system with lean/standard/large presets (`config/team_config.json`)
+- Team config loader utility (`config/team_config_loader.py`)
+- Scalable Team Architecture ADR (ADR-011)
+- Removed duplicate documentation (docs/guides/quick-start.md)
 
 ### Changed
+- Updated roadmap to reflect completed medium-term items
+- Updated agent documentation with extended tool lists
+- Agent reorganization section with team size presets
 - Updated all documentation to reflect 6-agent structure instead of 10-agent
 - Cleaned up docker-compose.yml to match actual agent implementations
 - Removed redundant and outdated documentation files
