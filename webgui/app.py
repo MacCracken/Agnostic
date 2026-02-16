@@ -12,6 +12,7 @@ from fastapi import FastAPI
 # Add config path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config.agent_registry import AgentRegistry
 from config.environment import config
 
 # Configure logging
@@ -112,22 +113,20 @@ class AgenticQAGUI:
             return []
 
 
-# Initialize GUI
+# Initialize GUI and agent registry
 gui = AgenticQAGUI()
+_agent_registry = AgentRegistry()
 
 
 @cl.on_chat_start
 async def on_chat_start() -> dict[str, Any]:
     """Initialize chat session"""
+    agents = _agent_registry.get_agents_for_team()
+    agent_lines = "\n".join(f"• **{a.name}**: {a.focus}" for a in agents)
     await cl.Message(
         content="🤖 Welcome to the Agentic QA Team System!\n\n"
         "I'm your interface to a team of AI-powered QA agents:\n"
-        "• **QA Manager**: Orchestrates test planning and verification\n"
-        "• **Senior QA Engineer**: Handles complex testing and self-healing\n"
-        "• **Junior QA Worker**: Executes regression tests and data generation\n"
-        "• **QA Analyst**: Data reporting, security & performance analysis\n"
-        "• **Security & Compliance Agent**: OWASP, GDPR, PCI DSS\n"
-        "• **Performance & Resilience Agent**: Load testing, monitoring, resilience validation\n\n"
+        f"{agent_lines}\n\n"
         "To get started, please:\n"
         "1. Upload a PR/feature document, or\n"
         "2. Describe your testing requirements\n\n"
@@ -763,8 +762,12 @@ async def on_chat_end() -> dict[str, Any]:
         logger.info(f"Ending session: {session_id}")
 
 
-# Health check endpoint
+# FastAPI application with health check and REST API
 app = FastAPI()
+
+from webgui.api import api_router  # noqa: E402
+
+app.include_router(api_router)
 
 
 @app.get("/health")

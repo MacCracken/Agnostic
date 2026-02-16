@@ -2,10 +2,48 @@
 
 All notable changes to the Agentic QA Team System will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/2026.2.16/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Added
+- **Plugin Architecture** (`config/agent_registry.py`): Config-driven `AgentRegistry` + `AgentDefinition` dataclass. Replaces hardcoded if/elif task routing in `qa_manager.py` with `registry.route_task()`. Adding new agents no longer requires editing manager or WebGUI code. (ADR-013)
+- **WebGUI REST API** (`webgui/api.py`): 18 FastAPI endpoints wrapping existing manager singletons — dashboard (4), sessions (4), reports (3), agents (3), auth (4). JWT auth on all endpoints. (ADR-014)
+- **CI/CD Bandit security scan**: New `security-code-scan` job runs Bandit static analysis on all Python source
+- **CI/CD Helm lint**: New `helm-lint` job validates Helm chart syntax and template rendering
+- **Test coverage expansion**: 48 new unit tests across 5 test files — agent_registry (16), webgui auth (10), webgui exports (7), webgui API (9), config environment (6)
+- **ADR-013**: Plugin Architecture for Agent Registration
+- **ADR-014**: WebGUI REST API
+
+### Changed
+- **`config/team_config.json`**: Added explicit `role`, `celery_task`, `celery_queue`, `redis_prefix` fields to all standard agents
+- **`agents/manager/qa_manager.py`**: `_delegate_to_specialists` now uses `AgentRegistry.route_task()` instead of if/elif chain
+- **`webgui/app.py`**: Welcome message dynamically generated from `AgentRegistry.get_agents_for_team()`; REST API router mounted
+- **CI/CD `pip install`**: Fixed broken `pip install -r requirements.txt` to use `pip install -e ".[dev,test,web,ml]"`
+- **CI/CD `container-build`**: Now depends on `security-code-scan` and `helm-lint` jobs
+
+### Security
+- **OAuth2 JWT verification**: Replaced `verify_signature: False` with JWKS-based verification for Google, GitHub, and Azure AD providers (`webgui/auth.py`)
+- **GitHub OAuth flow**: Implemented full code→token exchange via GitHub API with email fallback
+- **Azure AD OAuth flow**: Implemented JWKS-based ID token verification via Microsoft's public keys
+- **SAML guard**: Added explicit handler returning None with warning log instead of potential AttributeError
+- **Secret key validation**: `WEBGUI_SECRET_KEY` is now required when `ENVIRONMENT=production`
+- **Hardcoded credentials removed**: RabbitMQ credentials in `docker-compose.yml` now reference `${RABBITMQ_USER}` / `${RABBITMQ_PASSWORD}` environment variables
+
+### Fixed
+- **Docker health checks**: Agent health checks now perform actual Redis ping (`r.ping()`) instead of always-passing `print('healthy')`
+- **PDF export**: Implemented real PDF generation with ReportLab (`SimpleDocTemplate`, `Paragraph`, `Table`) with HTML fallback when ReportLab is missing
+- **WebGUI RABBITMQ_URL**: Added missing `RABBITMQ_URL` environment variable to webgui service in docker-compose
+- **CLAUDE.md tool inventory**: Fixed 3 wrong tool names (Security agent), added 4 missing tools (Junior: `FlakyTestDetectionTool`, `UXUsabilityTestingTool`, `LocalizationTestingTool`; Performance: `AdvancedProfilingTool`)
+- **CLAUDE.md API endpoints**: Separated implemented (`/health`) from planned endpoints
+- **`.env.example`**: Removed duplicate `REDIS_PASSWORD`/`RABBITMQ_PASSWORD` keys, added 11 missing variables
+- **Missing dependencies**: Added `PyJWT[crypto]>=2.8.0`, `reportlab>=4.0`, `requests>=2.31.0` to web deps; `faker>=28.0.0` to ml deps in `pyproject.toml`
+- **Agent READMEs**: Added missing tools to junior, security_compliance, and performance documentation
+
+### Changed
+- **Roadmap rewrite**: Removed verbose "Current Gaps" section (items now fixed), added "Recently Completed" section, streamlined completed items
+- **CLAUDE.md**: Added undocumented modules (`config/environment.py`, `config/team_config_loader.py`, `shared/crewai_compat.py`, `shared/data_generation_service.py`)
 
 ### Added
 - UX/Usability Testing Tool with session analysis, heatmaps, A/B testing
@@ -32,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed duplicate documentation (docs/guides/quick-start.md)
 
 ### Changed
+- **Roadmap updated with forward-looking priorities**: Added 10 new roadmap items from code audit — security fixes (critical: OAuth2 JWT verification disabled, hardcoded credentials), WebGUI API implementation, test coverage expansion, CI/CD hardening, K8s production readiness, observability, agent communication, multi-tenant, plugin architecture, test persistence. Added "Current Gaps" section documenting 11 issues across documentation accuracy, security vulnerabilities, and implementation completeness
+- **Kubernetes hardened security**: All pods now run with `readOnlyRootFilesystem: true`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`, and `runAsNonRoot: true`
+- **K8s resource alignment**: Resource limits across Helm chart, raw manifests, and docker-compose are now consistent
+- **K8s manifest cleanup**: Consolidated from 3 agent manifest files to 1 (`qa-agents-1.yaml` contains all 5 non-manager agents); removed stale `qa-agents-2.yaml` and `qa-agents-3.yaml` that referenced non-existent agents
+- **Kustomization.yaml rewrite**: Removed stale resource refs, broken annotations, and NODE_ENV patches
+- **Helm RABBITMQ_URL fix**: Added `rabbitmqPasswordPlain` for URL construction (separate from base64-encoded K8s Secret value)
+- **Helm WebGUI fix**: Fixed broken `$(REDIS_HOST)` env var expansion, added missing RABBITMQ_URL, fixed double-tagged image reference
+- **Ingress security**: Removed RabbitMQ management exposure from Ingress; added rate-limiting annotations
+- Added missing Helm templates: `rabbitmq.yaml`, `serviceaccount.yaml`, `ingress.yaml`
+- Added emptyDir volumes (`/tmp`, `/app/logs`) to all pods to support read-only root filesystem
 - Updated roadmap to reflect completed medium-term items
 - Updated agent documentation with extended tool lists
 - Agent reorganization section with team size presets
@@ -54,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated architecture diagrams to match current implementation
  - Fixed agent task routing names to match Celery task registration
 
-## [1.0.0] - 2026-02-10
+## [2026.2.16] - 2026-02-16
 
 ### Added
 - Complete 6-agent QA system implementation

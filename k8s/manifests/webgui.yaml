@@ -17,13 +17,21 @@ spec:
         app: webgui
         component: frontend
     spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
       containers:
       - name: webgui
         image: agentic-qa/webgui:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         env:
-        - name: REDIS_URL
-          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -37,18 +45,14 @@ spec:
           name: http
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
-          limits:
             memory: "512Mi"
             cpu: "500m"
+          limits:
+            memory: "1.5Gi"
+            cpu: "1"
         volumeMounts:
-        - name: webgui-code
-          mountPath: /app/webgui
-          readOnly: true
-        - name: agents-code
-          mountPath: /app/agents
-          readOnly: true
+        - name: tmp
+          mountPath: /tmp
         - name: logs
           mountPath: /app/logs
         livenessProbe:
@@ -64,12 +68,8 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: webgui-code
-        configMap:
-          name: webgui-source-code
-      - name: agents-code
-        configMap:
-          name: agents-source-code
+      - name: tmp
+        emptyDir: {}
       - name: logs
         emptyDir: {}
 ---

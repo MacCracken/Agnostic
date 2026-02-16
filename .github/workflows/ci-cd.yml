@@ -1,4 +1,4 @@
-name: CI/CD Pipeline for QA System v1.0
+name: CI/CD Pipeline for QA System 2026.2.16
 on:
   push:
     branches: [main, develop]
@@ -76,8 +76,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt || echo "No dev requirements file"
+          pip install -e ".[dev,test,web,ml]"
 
       - name: Set up test environment
         run: |
@@ -107,10 +106,54 @@ jobs:
         run: |
           docker compose -f docker-compose.test.yml down -v || true
 
+  # Bandit Security Code Scan
+  security-code-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit (JSON report)
+        run: bandit -r agents/ config/ shared/ webgui/ -f json -o bandit-report.json || true
+
+      - name: Run Bandit (console output)
+        run: bandit -r agents/ config/ shared/ webgui/
+
+      - name: Upload Bandit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  # Helm Chart Lint
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+
+      - name: Lint Helm chart
+        run: helm lint k8s/helm/agentic-qa/
+
+      - name: Template Helm chart
+        run: helm template agentic-qa k8s/helm/agentic-qa/ --debug
+
   # Container Build
   container-build:
     runs-on: ubuntu-latest
-    needs: [code-quality, build-and-test]
+    needs: [code-quality, build-and-test, security-code-scan, helm-lint]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

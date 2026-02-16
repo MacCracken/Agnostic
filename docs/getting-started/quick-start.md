@@ -73,27 +73,9 @@ docker-compose logs -f webgui
 open http://localhost:8000
 ```
 
-## 🏗️ 6-Agent Architecture
+## 🏗️ Architecture
 
-The system uses a **6-agent architecture**:
-
-```
-QA Manager (Orchestrator)          ──┐
-Senior QA Engineer (Expert)         ─┤
-Junior QA Worker (Executor)         ─┤
-QA Analyst (Analyst)                ─┼── Redis + RabbitMQ ── Chainlit WebGUI (:8000)
-Security & Compliance Agent         ─┤
-Performance & Resilience Agent      ─┘
-```
-
-| Agent | Role | Primary Focus |
-|-------|------|---------------|
-| **QA Manager** | Orchestrator | Test planning, delegation, fuzzy verification |
-| **Senior QA Engineer** | Expert | Complex scenarios, self-healing, model-based testing |
-| **Junior QA Worker** | Executor | Regression testing, data generation, visual testing |
-| **QA Analyst** | Analyst | Data organization, security assessment, performance profiling |
-| **Security & Compliance Agent** | Security Specialist | OWASP testing, GDPR/PCI DSS validation |
-| **Performance & Resilience Agent** | Performance Specialist | Load testing, stress testing, SRE monitoring |
+The system uses a 6-agent architecture. For full details, see the [Development Setup Guide](../development/setup.md#architecture).
 
 ## 📋 First Test Task
 
@@ -121,46 +103,7 @@ Results are displayed in the WebGUI with comprehensive reports.
 
 ## 🛠️ Development Setup
 
-### Local Development (without Docker)
-
-```bash
-# Install dependencies
-pip install -e ".[dev,test,web,ml,browser]"
-
-# Start infrastructure services
-docker-compose up -d redis rabbitmq
-
-# Run agents in separate terminals
-python -m agents.manager.qa_manager
-python -m agents.senior.senior_qa
-python -m agents.junior.junior_qa
-python -m agents.analyst.qa_analyst
-python -m agents.security_compliance.qa_security_compliance
-python -m agents.performance.qa_performance
-
-# Start WebGUI
-python -m webgui.app
-```
-
-### Environment Variables Reference
-
-```bash
-# Required
-OPENAI_API_KEY=your_key_here
-PRIMARY_MODEL_PROVIDER=openai
-
-# Infrastructure (for local development)
-REDIS_HOST=localhost
-REDIS_PORT=6379
-RABBITMQ_HOST=localhost
-RABBITMQ_PORT=5672
-
-# Feature Flags
-ENABLE_SELF_HEALING=true
-ENABLE_FUZZY_VERIFICATION=true
-ENABLE_RISK_BASED_PRIORITIZATION=true
-ENABLE_CONTEXT_AWARE_TESTING=true
-```
+For full local development setup (without Docker), environment variables, and advanced configuration, see the [Development Setup Guide](../development/setup.md).
 
 ## 🧪 Running Tests
 

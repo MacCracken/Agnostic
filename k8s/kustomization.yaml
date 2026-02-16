@@ -1,6 +1,3 @@
-# Apply all Kubernetes manifests in order
-# Usage: kubectl apply -f kustomization.yaml
-
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -8,52 +5,23 @@ namespace: agentic-qa
 
 resources:
   # Infrastructure
-  - namespace.yaml
-  - config.yaml
-  - redis.yaml
-  - rabbitmq.yaml
-  
-  # QA Manager
-  - qa-manager.yaml
-  
-  # QA Agents (Group 1)
-  - qa-agents-1.yaml
-  
-  # QA Agents (Group 2)
-  - qa-agents-2.yaml
-  
-  # QA Agents (Group 3)
-  - qa-agents-3.yaml
-  
-  # WebGUI
-  - webgui.yaml
-  
-  # Optional: Ingress for external access
-  - ingress.yaml
+  - manifests/namespace.yaml
+  - manifests/config.yaml
+  - manifests/redis.yaml
+  - manifests/rabbitmq.yaml
 
-# Common annotations for all resources
-commonAnnotations:
-  deployment-date: "{{ date }}"
-  managed-by: "kustomize"
+  # Agents
+  - manifests/qa-manager.yaml
+  - manifests/qa-agents-1.yaml
+
+  # Frontend
+  - manifests/webgui.yaml
+
+  # Optional: Ingress for external access
+  - manifests/ingress.yaml
 
 # Common labels for all resources
 commonLabels:
   app.kubernetes.io/name: "agentic-qa"
   app.kubernetes.io/component: "qa-system"
   app.kubernetes.io/managed-by: "kustomize"
-
-# Patches for specific configurations
-patchesStrategicMerge:
-  - |-
-    apiVersion: apps/v1
-    kind: Deployment
-    metadata:
-      name: webgui
-    spec:
-      template:
-        spec:
-          containers:
-          - name: webgui
-            env:
-            - name: NODE_ENV
-              value: "production"

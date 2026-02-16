@@ -46,6 +46,25 @@ This directory contains the Helm chart for deploying the Agentic QA Team System 
    kubectl port-forward service/webgui-service 8000:8000 -n agentic-qa
    ```
 
+## Chart Templates
+
+The chart includes templates for all system components:
+
+| Template | Description |
+|---|---|
+| `qa-manager.yaml` | QA Manager orchestrator deployment + service |
+| `senior-qa.yaml` | Senior QA Engineer agent deployment + service |
+| `junior-qa.yaml` | Junior QA Worker agent deployment + service |
+| `qa-analyst.yaml` | QA Analyst agent deployment + service |
+| `security-compliance.yaml` | Security & Compliance agent deployment + service |
+| `performance.yaml` | Performance & Resilience agent deployment + service |
+| `webgui.yaml` | Chainlit WebGUI deployment + service |
+| `rabbitmq.yaml` | RabbitMQ deployment + PVC + service |
+| `serviceaccount.yaml` | ServiceAccount for pod identity |
+| `ingress.yaml` | Ingress for external WebGUI access |
+| `configmap.yaml` | Shared environment configuration |
+| `secrets.yaml` | OpenAI API key and RabbitMQ password |
+
 ## Configuration
 
 Key configuration options in `values.yaml`:
@@ -53,8 +72,9 @@ Key configuration options in `values.yaml`:
 - **Infrastructure**: Enable/disable Redis and RabbitMQ
 - **Agents**: Configure which QA agents to deploy and their resource limits
 - **WebGUI**: Frontend service configuration
-- **Ingress**: External access configuration
-- **Resources**: CPU and memory limits for each component
+- **Ingress**: External access configuration (WebGUI only; RabbitMQ management is not exposed)
+- **Security**: Hardened by default — read-only root filesystem, drop all capabilities, seccomp RuntimeDefault
+- **Resources**: CPU and memory limits for each component (aligned with docker-compose)
 - **Autoscaling**: Horizontal pod autoscaling settings
 
 ## Scaling

@@ -38,7 +38,7 @@ build_base() {
     # Build base image with BuildKit
     docker build \
         --tag agnostic-qa-base:latest \
-        --tag agnostic-qa-base:1.0.0 \
+        --tag agnostic-qa-base:2026.2.16 \
         --file docker/Dockerfile.base \
         --progress=plain \
         .

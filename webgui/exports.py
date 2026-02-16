@@ -636,12 +636,123 @@ class ReportGenerator:
                     f.write(html_content)
 
             elif format == ReportFormat.PDF:
-                # PDF generation (placeholder - would need ReportLab)
-                html_content = self._generate_html_report(content, request)
-                # Convert HTML to PDF using ReportLab or similar
-                # For now, save as HTML with .pdf extension
-                with open(file_path, "w") as f:
-                    f.write(html_content)
+                try:
+                    from reportlab.lib import colors
+                    from reportlab.lib.pagesizes import letter
+                    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+                    from reportlab.lib.units import inch
+                    from reportlab.platypus import (
+                        Paragraph,
+                        SimpleDocTemplate,
+                        Spacer,
+                        Table,
+                        TableStyle,
+                    )
+
+                    doc = SimpleDocTemplate(str(file_path), pagesize=letter)
+                    styles = getSampleStyleSheet()
+                    story = []
+
+                    # Title
+                    title_style = ParagraphStyle(
+                        "ReportTitle", parent=styles["Heading1"], fontSize=18, spaceAfter=12
+                    )
+                    story.append(Paragraph(content.get("title", "Report"), title_style))
+                    story.append(Spacer(1, 0.2 * inch))
+
+                    # Session info
+                    story.append(
+                        Paragraph(
+                            f"Session: {content.get('session_id', 'N/A')}", styles["Normal"]
+                        )
+                    )
+                    story.append(
+                        Paragraph(
+                            f"Generated: {content.get('generated_at', 'N/A')}",
+                            styles["Normal"],
+                        )
+                    )
+                    story.append(Spacer(1, 0.3 * inch))
+
+                    # Overview section
+                    if "overview" in content:
+                        story.append(Paragraph("Overview", styles["Heading2"]))
+                        table_data = [["Metric", "Value"]]
+                        for key, value in content["overview"].items():
+                            table_data.append(
+                                [key.replace("_", " ").title(), str(value)]
+                            )
+                        table = Table(table_data, colWidths=[3 * inch, 4 * inch])
+                        table.setStyle(
+                            TableStyle(
+                                [
+                                    ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                                    ("GRID", (0, 0), (-1, -1), 1, colors.black),
+                                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                                ]
+                            )
+                        )
+                        story.append(table)
+                        story.append(Spacer(1, 0.2 * inch))
+
+                    # Key findings
+                    if "key_findings" in content:
+                        story.append(Paragraph("Key Findings", styles["Heading2"]))
+                        for finding in content["key_findings"]:
+                            story.append(
+                                Paragraph(f"\u2022 {finding}", styles["Normal"])
+                            )
+                        story.append(Spacer(1, 0.2 * inch))
+
+                    # Recommendations
+                    if "recommendations" in content:
+                        story.append(Paragraph("Recommendations", styles["Heading2"]))
+                        for rec in content["recommendations"]:
+                            story.append(
+                                Paragraph(f"\u2022 {rec}", styles["Normal"])
+                            )
+                        story.append(Spacer(1, 0.2 * inch))
+
+                    # Metrics table
+                    if "metrics" in content and isinstance(content["metrics"], dict):
+                        story.append(Paragraph("Metrics", styles["Heading2"]))
+                        table_data = [["Metric", "Value"]]
+                        for key, value in content["metrics"].items():
+                            if not isinstance(value, dict):
+                                table_data.append(
+                                    [key.replace("_", " ").title(), str(value)]
+                                )
+                        if len(table_data) > 1:
+                            table = Table(
+                                table_data, colWidths=[3 * inch, 4 * inch]
+                            )
+                            table.setStyle(
+                                TableStyle(
+                                    [
+                                        ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+                                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+                                        ("GRID", (0, 0), (-1, -1), 1, colors.black),
+                                        ("FONTSIZE", (0, 0), (-1, -1), 9),
+                                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                                    ]
+                                )
+                            )
+                            story.append(table)
+
+                    doc.build(story)
+
+                except ImportError:
+                    logger.warning(
+                        "reportlab not installed — falling back to HTML format for PDF. "
+                        "Install with: pip install reportlab>=4.0"
+                    )
+                    html_content = self._generate_html_report(content, request)
+                    with open(file_path, "w") as f:
+                        f.write(html_content)
 
             # Get file size
             file_size = file_path.stat().st_size

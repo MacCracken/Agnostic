@@ -15,6 +15,8 @@ from enum import Enum
 from typing import Any
 
 import jwt
+import requests
+from jwt import PyJWKClient
 
 # Add config path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -82,7 +84,16 @@ class AuthManager:
 
     def __init__(self):
         self.redis_client = config.get_redis_client()
-        self.secret_key = os.getenv("WEBGUI_SECRET_KEY", secrets.token_urlsafe(32))
+
+        environment = os.getenv("ENVIRONMENT", "development")
+        secret_key = os.getenv("WEBGUI_SECRET_KEY")
+        if environment == "production" and not secret_key:
+            raise ValueError(
+                "WEBGUI_SECRET_KEY must be set in production. "
+                "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+        self.secret_key = secret_key or secrets.token_urlsafe(32)
+
         self.access_token_expire_minutes = 15
         self.refresh_token_expire_days = 7
 
@@ -148,6 +159,9 @@ class AuthManager:
                 return await self._authenticate_github(auth_code)
             elif provider == AuthProvider.AZURE_AD:
                 return await self._authenticate_azure_ad(auth_code, id_token)
+            elif provider == AuthProvider.SAML:
+                logger.warning("SAML authentication is not yet implemented")
+                return None
             else:
                 logger.error(f"Unsupported auth provider: {provider}")
                 return None
@@ -205,49 +219,190 @@ class AuthManager:
     async def _authenticate_google(
         self, auth_code: str | None, id_token: str | None
     ) -> User | None:
-        """Google OAuth2 authentication"""
+        """Google OAuth2 authentication with JWKS signature verification"""
         try:
-            # For now, placeholder implementation
-            # In production, would verify ID token with Google's public keys
+            if not id_token:
+                return None
 
-            if id_token:
-                # Decode and verify ID token
-                payload = jwt.decode(
-                    id_token, options={"verify_signature": False}
-                )  # Skip verification for demo
+            google_client_id = os.getenv("OAUTH2_GOOGLE_CLIENT_ID")
+            if not google_client_id:
+                logger.error("OAUTH2_GOOGLE_CLIENT_ID not configured")
+                return None
 
-                email = payload.get("email")
-                name = payload.get("name", email)
+            # Fetch Google's public keys and verify signature
+            jwks_client = PyJWKClient(
+                "https://www.googleapis.com/oauth2/v3/certs"
+            )
+            signing_key = jwks_client.get_signing_key_from_jwt(id_token)
 
-                # Get or create user
-                user = await self._get_or_create_oauth_user(
-                    email=email,
-                    name=name,
-                    provider=AuthProvider.GOOGLE,
-                    provider_id=payload.get("sub"),
-                )
+            payload = jwt.decode(
+                id_token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=google_client_id,
+                issuer=["https://accounts.google.com", "accounts.google.com"],
+            )
 
-                return user
+            email = payload.get("email")
+            if not email:
+                logger.error("Google ID token missing email claim")
+                return None
 
+            name = payload.get("name", email)
+
+            user = await self._get_or_create_oauth_user(
+                email=email,
+                name=name,
+                provider=AuthProvider.GOOGLE,
+                provider_id=payload.get("sub"),
+            )
+
+            return user
+
+        except jwt.ExpiredSignatureError:
+            logger.warning("Google ID token expired")
             return None
-
+        except jwt.InvalidTokenError as e:
+            logger.error(f"Google ID token validation failed: {e}")
+            return None
         except Exception as e:
             logger.error(f"Google authentication error: {e}")
             return None
 
     async def _authenticate_github(self, auth_code: str | None) -> User | None:
-        """GitHub OAuth2 authentication"""
-        # Placeholder implementation
-        logger.warning("GitHub authentication not implemented yet")
-        return None
+        """GitHub OAuth2 authentication via code→token exchange"""
+        try:
+            if not auth_code:
+                return None
+
+            client_id = os.getenv("OAUTH2_GITHUB_CLIENT_ID")
+            client_secret = os.getenv("OAUTH2_GITHUB_CLIENT_SECRET")
+            if not client_id or not client_secret:
+                logger.error("OAUTH2_GITHUB_CLIENT_ID/SECRET not configured")
+                return None
+
+            # Exchange authorization code for access token
+            token_resp = requests.post(
+                "https://github.com/login/oauth/access_token",
+                json={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": auth_code,
+                },
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+            token_resp.raise_for_status()
+            token_data = token_resp.json()
+
+            access_token = token_data.get("access_token")
+            if not access_token:
+                logger.error(f"GitHub token exchange failed: {token_data.get('error_description', 'unknown error')}")
+                return None
+
+            # Fetch user profile
+            user_resp = requests.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=10,
+            )
+            user_resp.raise_for_status()
+            github_user = user_resp.json()
+
+            email = github_user.get("email")
+            if not email:
+                # Email may be private; fetch from emails endpoint
+                emails_resp = requests.get(
+                    "https://api.github.com/user/emails",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                    timeout=10,
+                )
+                emails_resp.raise_for_status()
+                for email_obj in emails_resp.json():
+                    if email_obj.get("primary") and email_obj.get("verified"):
+                        email = email_obj["email"]
+                        break
+
+            if not email:
+                logger.error("Could not retrieve verified email from GitHub")
+                return None
+
+            name = github_user.get("name") or github_user.get("login", email)
+
+            user = await self._get_or_create_oauth_user(
+                email=email,
+                name=name,
+                provider=AuthProvider.GITHUB,
+                provider_id=str(github_user["id"]),
+            )
+
+            return user
+
+        except requests.RequestException as e:
+            logger.error(f"GitHub API request failed: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"GitHub authentication error: {e}")
+            return None
 
     async def _authenticate_azure_ad(
         self, auth_code: str | None, id_token: str | None
     ) -> User | None:
-        """Azure AD authentication"""
-        # Placeholder implementation
-        logger.warning("Azure AD authentication not implemented yet")
-        return None
+        """Azure AD authentication with JWKS signature verification"""
+        try:
+            if not id_token:
+                return None
+
+            azure_client_id = os.getenv("OAUTH2_AZURE_CLIENT_ID")
+            if not azure_client_id:
+                logger.error("OAUTH2_AZURE_CLIENT_ID not configured")
+                return None
+
+            # Fetch Azure AD public keys and verify signature
+            jwks_client = PyJWKClient(
+                "https://login.microsoftonline.com/common/discovery/v2.0/keys"
+            )
+            signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+
+            payload = jwt.decode(
+                id_token,
+                signing_key.key,
+                algorithms=["RS256"],
+                audience=azure_client_id,
+                options={"verify_iss": False},  # issuer varies by tenant
+            )
+
+            email = payload.get("preferred_username") or payload.get("email")
+            if not email:
+                logger.error("Azure AD ID token missing email claim")
+                return None
+
+            name = payload.get("name", email)
+
+            user = await self._get_or_create_oauth_user(
+                email=email,
+                name=name,
+                provider=AuthProvider.AZURE_AD,
+                provider_id=payload.get("oid") or payload.get("sub"),
+            )
+
+            return user
+
+        except jwt.ExpiredSignatureError:
+            logger.warning("Azure AD ID token expired")
+            return None
+        except jwt.InvalidTokenError as e:
+            logger.error(f"Azure AD ID token validation failed: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Azure AD authentication error: {e}")
+            return None
 
     async def _get_or_create_oauth_user(
         self, email: str, name: str, provider: AuthProvider, provider_id: str

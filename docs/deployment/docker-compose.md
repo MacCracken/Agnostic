@@ -290,7 +290,6 @@ services:
     image: agentic/performance-agent:latest
     restart: unless-stopped
     environment:
-      - NODE_ENV=production
       - ENABLE_RATE_LIMITING=true
     cap_drop:
       - ALL
@@ -298,12 +297,11 @@ services:
       - CHOWN
       - SETGID
       - SETUID
-    
+
   webgui:
     image: agentic/webgui:latest
     restart: unless-stopped
     environment:
-      - NODE_ENV=production
       - ENABLE_AUTHENTICATION=true
       - OAUTH2_CLIENT_ID=${OAUTH2_CLIENT_ID}
       - OAUTH2_CLIENT_SECRET=${OAUTH2_CLIENT_SECRET}

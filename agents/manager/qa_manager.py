@@ -13,6 +13,7 @@ from shared.crewai_compat import BaseTool
 
 # Add config path for imports
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
+from config.agent_registry import AgentRegistry
 from config.environment import config
 from config.llm_integration import llm_service
 
@@ -164,6 +165,7 @@ class QAManagerAgent:
         connection_info = config.get_connection_info()
         logger.info(f"Redis connection: {connection_info['redis']['url']}")
         logger.info(f"RabbitMQ connection: {connection_info['rabbitmq']['url']}")
+        self.agent_registry = AgentRegistry()
         self.llm = ChatOpenAI(
             model=os.getenv("OPENAI_MODEL", "gpt-4o"), temperature=0.1
         )
@@ -310,7 +312,7 @@ class QAManagerAgent:
     async def _delegate_to_specialists(
         self, test_plan: dict[str, Any], session_id: str
     ):
-        """Delegate tasks to Senior and Junior QA agents via message queue"""
+        """Delegate tasks to specialist agents via message queue using AgentRegistry"""
         for scenario in test_plan.get("scenarios", []):
             task_data = {
                 "session_id": session_id,
@@ -318,35 +320,16 @@ class QAManagerAgent:
                 "timestamp": datetime.now().isoformat(),
             }
 
-            if scenario.get("assigned_to") == "senior":
+            agent = self.agent_registry.route_task(scenario)
+            if agent:
                 self.celery_app.send_task(
-                    "senior_qa.handle_complex_scenario",
+                    agent.celery_task,
                     args=[task_data],
-                    queue="senior_qa",
+                    queue=agent.celery_queue,
                 )
-            elif scenario.get("assigned_to") == "junior":
-                self.celery_app.send_task(
-                    "junior_qa.execute_regression_test",
-                    args=[task_data],
-                    queue="junior_qa",
-                )
-            elif scenario.get("assigned_to") == "analyst":
-                self.celery_app.send_task(
-                    "qa_analyst.analyze_and_report",
-                    args=[task_data],
-                    queue="qa_analyst",
-                )
-            elif scenario.get("assigned_to") == "security_compliance":
-                self.celery_app.send_task(
-                    "security_compliance_agent.run_security_compliance_audit",
-                    args=[task_data],
-                    queue="security_compliance",
-                )
-            elif scenario.get("assigned_to") == "performance":
-                self.celery_app.send_task(
-                    "performance_agent.run_performance_suite",
-                    args=[task_data],
-                    queue="performance",
+            else:
+                logger.warning(
+                    f"No agent found for scenario: {scenario.get('assigned_to')}"
                 )
 
     async def perform_fuzzy_verification(

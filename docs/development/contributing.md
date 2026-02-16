@@ -60,7 +60,6 @@ pytest --cov=agents --cov=webgui --cov=config
 ### Test Structure
 - `tests/unit/` - Unit tests for individual components
 - `tests/integration/` - Integration tests for agent communication
-- `tests/end-to-end/` - Full workflow tests
 
 ## Pull Request Process
 
@@ -111,15 +110,14 @@ pytest --cov=agents --cov=webgui --cov=config
 4. **Add Tests**
    - Unit tests for agent tools
    - Integration tests for communication
-   - End-to-end tests for workflows
 
 ## Documentation Updates
 
 When adding features:
 - Update relevant sections in `README.md`
-- Update `doc/development/setup.md` if architecture changes
+- Update `docs/development/setup.md` if architecture changes
 - Add API documentation to `docs/api/`
-- Update agent index in `doc/agents/index.md`
+- Update agent index in `docs/agents/index.md`
 
 ## Security Considerations
 
@@ -130,9 +128,9 @@ When adding features:
 
 ## Getting Help
 
-- Check `doc/getting-started/quick-start.md` for common issues
+- Check `docs/getting-started/quick-start.md` for common issues
 - Review existing issues and discussions
 - Ask questions in GitHub discussions
-- Check `doc/development/setup.md` for development guidance
+- Check `docs/development/setup.md` for development guidance
 
 Thank you for contributing! 🚀

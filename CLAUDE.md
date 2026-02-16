@@ -134,19 +134,25 @@ Performance & Resilience Agent      ─┘
 **Agent roles and delegation flow:**
 1. **QA Manager** (`agents/manager/qa_manager.py`) — decomposes requirements into test plans, delegates tasks by complexity, performs fuzzy verification (LLM-based 0-1 quality scoring), synthesizes reports. Tools: `TestPlanDecompositionTool`, `FuzzyVerificationTool`.
 2. **Senior QA Engineer** (`agents/senior/senior_qa.py`) — handles complex scenarios: self-healing UI selectors (CV + semantic analysis), model-based testing (FSM), edge-case/boundary analysis, AI-driven test generation. Tools: `SelfHealingTool`, `ModelBasedTestingTool`, `EdgeCaseAnalysisTool`, `AITestGenerationTool`, `CodeAnalysisTestGeneratorTool`, `AutonomousTestDataGeneratorTool`.
-3. **Junior QA Worker** (`agents/junior/junior_qa.py`) — executes regression suites, root cause detection, synthetic data generation, risk-based test ordering, visual regression testing, cross-platform testing (mobile, desktop). Tools: `RegressionTestingTool`, `SyntheticDataGeneratorTool`, `TestExecutionOptimizerTool`, `VisualRegressionTool`, `MobileAppTestingTool`, `DesktopAppTestingTool`, `CrossPlatformTestingTool`.
+3. **Junior QA Worker** (`agents/junior/junior_qa.py`) — executes regression suites, root cause detection, synthetic data generation, risk-based test ordering, visual regression testing, cross-platform testing (mobile, desktop), flaky test detection, UX/usability testing, localization testing. Tools: `RegressionTestingTool`, `SyntheticDataGeneratorTool`, `TestExecutionOptimizerTool`, `FlakyTestDetectionTool`, `VisualRegressionTool`, `UXUsabilityTestingTool`, `LocalizationTestingTool`, `MobileAppTestingTool`, `DesktopAppTestingTool`, `CrossPlatformTestingTool`.
 4. **QA Analyst** (`agents/analyst/qa_analyst.py`) — aggregates test data into structured reports, runs security assessments, profiles performance, predicts defects, analyzes quality trends, scores risks, and evaluates release readiness. Tools: `DataOrganizationReportingTool`, `SecurityAssessmentTool`, `PerformanceProfilingTool`, `TestTraceabilityTool`, `DefectPredictionTool`, `QualityTrendAnalysisTool`, `RiskScoringTool`, `ReleaseReadinessTool`.
-5. **Security & Compliance Agent** (`agents/security_compliance/qa_security_compliance.py`) — handles security testing (OWASP, penetration testing), compliance validation (GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA), and audit trail management. Tools: `SecurityTestingTool`, `ComplianceValidationTool`, `AuditTrailTool`, `SOC2ComplianceTool`, `ISO27001ComplianceTool`, `HIPAAComplianceTool`.
-6. **Performance & Resilience Agent** (`agents/performance/qa_performance.py`) — monitors system performance, load testing, stress testing, and infrastructure resilience. Tools: `PerformanceMonitoringTool`, `LoadTestingTool`, `ResilienceValidationTool`.
+5. **Security & Compliance Agent** (`agents/security_compliance/qa_security_compliance.py`) — handles security testing (OWASP, penetration testing), compliance validation (GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA). Tools: `ComprehensiveSecurityAssessmentTool`, `GDPRComplianceTool`, `PCIDSSComplianceTool`, `SOC2ComplianceTool`, `ISO27001ComplianceTool`, `HIPAAComplianceTool`.
+6. **Performance & Resilience Agent** (`agents/performance/qa_performance.py`) — monitors system performance, load testing, stress testing, infrastructure resilience, and advanced profiling. Tools: `PerformanceMonitoringTool`, `LoadTestingTool`, `ResilienceValidationTool`, `AdvancedProfilingTool`.
 
 **Key modules:**
+- `config/agent_registry.py` — Config-driven AgentRegistry + AgentDefinition; replaces hardcoded if/elif routing in qa_manager.py; reads from team_config.json
 - `config/model_manager.py` — multi-provider LLM manager (OpenAI, Anthropic, Google, Ollama, LM Studio) with fallback chains
 - `config/universal_llm_adapter.py` — bridge between model_manager and CrewAI's LLM interface
 - `config/models.json` — provider configuration (routing strategy, retries, timeouts)
 - `config/llm_integration.py` — comprehensive LLM service for intelligent tool implementations (scenario generation, risk identification, fuzzy verification, security analysis, performance profiling)
 - `advanced_testing/self_healing_fuzzy_verification.py` — CV-based element detection, semantic selector repair, fuzzy matching
 - `advanced_testing/risk_prioritization_exploratory.py` — ML-driven risk scoring, code change analysis, exploratory test generation
+- `config/environment.py` — Config class for environment variables, Redis client factory, Celery app factory
+- `config/team_config_loader.py` — Team configuration loading (lean/standard/large presets)
+- `shared/crewai_compat.py` — CrewAI BaseTool compatibility layer
+- `shared/data_generation_service.py` — Synthetic data generation service
 - `webgui/` — Enhanced Chainlit-based WebGUI with comprehensive monitoring and reporting
+  - `api.py` — FastAPI REST API router (18 endpoints: dashboard, sessions, reports, agents, auth)
   - `app.py` — Main Chainlit application with chat interface and agent interaction
   - `dashboard.py` — Real-time dashboard showing active sessions and resource utilization
   - `realtime.py` — WebSocket infrastructure for live updates and notifications
@@ -171,12 +177,14 @@ Performance & Resilience Agent      ─┘
 - Namespace `agentic-qa`
 - Infrastructure services (Redis, RabbitMQ) with persistent volumes
 - Agent deployments with health checks, resource limits, and scaling
+- Hardened security contexts (readOnlyRootFilesystem, drop ALL capabilities, seccomp RuntimeDefault)
 - ConfigMaps/Secrets for configuration management
 - Service discovery and networking
-- Optional Ingress for external access
+- Optional Ingress for external access (WebGUI only, rate-limited)
 
 **Helm chart** in `k8s/helm/agentic-qa/` with:
 - Configurable agent enablement and resource allocation
+- RabbitMQ, ServiceAccount, and Ingress templates
 - Autoscaling support
 - Custom values for different environments
 - Integrated secrets management
@@ -184,23 +192,25 @@ Performance & Resilience Agent      ─┘
 
 ## Key Technology Stack
 
-- **Agent framework:** CrewAI 0.75.0 + LangChain 0.2.16
+- **Agent framework:** CrewAI >=0.11.0,<1.0.0 + LangChain >=0.1.0,<0.2.0
 - **LLM providers:** OpenAI (primary), Anthropic, Google Gemini, Ollama, LM Studio
-- **Web UI:** Chainlit 1.1.304 + FastAPI
-- **Messaging:** Redis 5.0.8 + Celery 5.4.0 + RabbitMQ
-- **Browser automation:** Playwright 1.45.0
-- **ML/CV:** scikit-learn 1.5.1, OpenCV 4.10.0, NumPy, Pandas
-- **Testing:** pytest 8.3.2
+- **Web UI:** Chainlit >=1.1.304,<2.0.0 + FastAPI >=0.115.0
+- **Messaging:** Redis >=5.0.8 + Celery >=5.4.0 + RabbitMQ
+- **Browser automation:** Playwright >=1.45.0
+- **ML/CV:** scikit-learn >=1.5.1, OpenCV >=4.10.0, NumPy, Pandas
+- **Testing:** pytest >=8.3.2
 
 ## Adding New Agents
 
-1. Create directory under `agents/`
-2. Implement agent class using CrewAI; extend `BaseTool` for custom tools
-3. Add a Dockerfile (follow existing pattern: Python 3.11-slim, PYTHONPATH=/app)
+With the Plugin Architecture (ADR-013), adding a new agent requires **no code changes** to the manager or WebGUI:
+
+1. Create directory under `agents/` — implement agent class using CrewAI; extend `BaseTool` for custom tools
+2. Add a Dockerfile (follow existing pattern: Python 3.11-slim, PYTHONPATH=/app)
+3. Add agent entry to `config/team_config.json` with `role`, `celery_task`, `celery_queue`, `redis_prefix` fields
 4. Add service to `docker-compose.yml`
 5. Add Kubernetes manifest in `k8s/manifests/` or update Helm chart template
-6. Add scenario + routing in `agents/manager/qa_manager.py`
-7. Integrate with WebGUI in `webgui/app.py`
+
+The `AgentRegistry` in `config/agent_registry.py` automatically picks up the new agent from `team_config.json`. The QA Manager routes tasks via `registry.route_task()`, and the WebGUI welcome message is generated dynamically from `registry.get_agents_for_team()`.
 
 ## Environment Configuration
 
@@ -225,6 +235,8 @@ See `docs/adr/` for detailed Architecture Decision Records:
 - **ADR-003**: Session Management Architecture (Hybrid Redis + File-based)
 - **ADR-004**: Report Generation Strategy (Template-based with multiple formats)
 - **ADR-005**: Authentication and Authorization Design (JWT + RBAC)
+- **ADR-013**: Plugin Architecture for Agent Registration (config-driven AgentRegistry)
+- **ADR-014**: WebGUI REST API (FastAPI router wrapping existing managers)
 
 ### Real-time Features
 - **Dashboard**: Live session monitoring with status indicators, resource metrics, compliance scores, predictive analytics, and cross-platform testing results
@@ -268,12 +280,29 @@ PDF_GENERATOR_ENGINE=reportlab
 ```
 
 ### WebGUI API Endpoints
-The enhanced WebGUI includes FastAPI endpoints for:
-- `/api/dashboard` - Dashboard data and metrics
-- `/api/sessions` - Session management and history
-- `/api/reports` - Report generation and download
-- `/api/agents` - Agent monitoring and status
-- `/api/auth` - Authentication and authorization
+
+**Implemented** (see `webgui/api.py`, ADR-014):
+- `/health` - Health check endpoint
+- `GET /api/dashboard` - Aggregate dashboard data
+- `GET /api/dashboard/sessions` - Active sessions
+- `GET /api/dashboard/agents` - Agent status
+- `GET /api/dashboard/metrics` - Resource metrics
+- `GET /api/sessions` - Session history (with pagination)
+- `GET /api/sessions/search` - Search sessions
+- `GET /api/sessions/{id}` - Session details
+- `POST /api/sessions/compare` - Compare two sessions
+- `GET /api/reports` - List user's reports
+- `POST /api/reports/generate` - Generate a report
+- `GET /api/reports/{id}/download` - Download report file
+- `GET /api/agents` - All agent statuses
+- `GET /api/agents/queues` - Queue depths
+- `GET /api/agents/{name}` - Agent metrics
+- `POST /api/auth/login` - Authenticate and get tokens
+- `POST /api/auth/refresh` - Refresh access token
+- `POST /api/auth/logout` - Invalidate tokens
+- `GET /api/auth/me` - Current user info
+
+**Planned (not yet implemented):**
 - `/ws/realtime` - WebSocket real-time updates
 
 ### Static Assets

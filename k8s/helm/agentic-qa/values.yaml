@@ -13,7 +13,7 @@ image:
   registry: docker.io
   repository: agentic-qa
   pullPolicy: IfNotPresent
-  tag: "latest"
+  tag: "2026.2.16"
 
 # Common annotations and labels
 commonLabels: {}
@@ -24,10 +24,13 @@ namespace:
   create: true
   name: "agentic-qa"
 
-# Secrets configuration
+# Secrets configuration (base64 encoded values)
 secrets:
-  openaiApiKey: ""  # Set this to your OpenAI API key (base64 encoded)
+  openaiApiKey: ""  # Set via --set secrets.openaiApiKey=$(echo -n "your-key" | base64)
   rabbitmqPassword: "Z3Vlc3Q="  # "guest" in base64
+  # Plain text password used in RABBITMQ_URL construction at template render time.
+  # Must match the base64-decoded value of rabbitmqPassword above.
+  rabbitmqPasswordPlain: "guest"
 
 # Infrastructure services
 redis:
@@ -40,11 +43,11 @@ redis:
     port: 6379
   resources:
     requests:
-      memory: "128Mi"
-      cpu: "100m"
-    limits:
       memory: "256Mi"
-      cpu: "200m"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
   persistence:
     enabled: true
     size: 1Gi
@@ -62,27 +65,27 @@ rabbitmq:
     managementPort: 15672
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "200m"
-    limits:
       memory: "512Mi"
       cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
   persistence:
     enabled: true
     size: 2Gi
 
-# QA Agents configuration
+# QA Agents configuration (6 agents)
 agents:
   qaManager:
     enabled: true
     replicaCount: 1
     resources:
       requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
         memory: "1Gi"
-        cpu: "800m"
+        cpu: "1"
+      limits:
+        memory: "2Gi"
+        cpu: "2"
     healthPort: 8001
 
   seniorQa:
@@ -90,11 +93,11 @@ agents:
     replicaCount: 1
     resources:
       requests:
-        memory: "512Mi"
-        cpu: "300m"
+        memory: "1.5Gi"
+        cpu: "1"
       limits:
-        memory: "1Gi"
-        cpu: "800m"
+        memory: "3Gi"
+        cpu: "2"
     healthPort: 8002
 
   juniorQa:
@@ -102,11 +105,11 @@ agents:
     replicaCount: 1
     resources:
       requests:
-        memory: "256Mi"
-        cpu: "200m"
+        memory: "1Gi"
+        cpu: "750m"
       limits:
-        memory: "512Mi"
-        cpu: "500m"
+        memory: "2Gi"
+        cpu: "1500m"
     healthPort: 8003
 
   qaAnalyst:
@@ -114,84 +117,36 @@ agents:
     replicaCount: 1
     resources:
       requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
         memory: "1Gi"
-        cpu: "800m"
+        cpu: "750m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
     healthPort: 8004
 
-  sreAgent:
+  securityCompliance:
     enabled: true
     replicaCount: 1
     resources:
       requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
         memory: "1Gi"
-        cpu: "800m"
+        cpu: "750m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
     healthPort: 8005
 
-  accessibilityAgent:
+  performance:
     enabled: true
     replicaCount: 1
     resources:
       requests:
-        memory: "512Mi"
-        cpu: "300m"
+        memory: "1.5Gi"
+        cpu: "1"
       limits:
-        memory: "1Gi"
-        cpu: "800m"
+        memory: "3Gi"
+        cpu: "2"
     healthPort: 8006
-
-  apiAgent:
-    enabled: true
-    replicaCount: 1
-    resources:
-      requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
-        memory: "1Gi"
-        cpu: "800m"
-    healthPort: 8007
-
-  mobileAgent:
-    enabled: true
-    replicaCount: 1
-    resources:
-      requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
-        memory: "1Gi"
-        cpu: "800m"
-    healthPort: 8008
-
-  complianceAgent:
-    enabled: true
-    replicaCount: 1
-    resources:
-      requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
-        memory: "1Gi"
-        cpu: "800m"
-    healthPort: 8009
-
-  chaosAgent:
-    enabled: true
-    replicaCount: 1
-    resources:
-      requests:
-        memory: "512Mi"
-        cpu: "300m"
-      limits:
-        memory: "1Gi"
-        cpu: "800m"
-    healthPort: 8010
 
 # WebGUI configuration
 webgui:
@@ -199,11 +154,11 @@ webgui:
   replicaCount: 1
   resources:
     requests:
-      memory: "256Mi"
-      cpu: "200m"
-    limits:
       memory: "512Mi"
       cpu: "500m"
+    limits:
+        memory: "1Gi"
+        cpu: "1"
   service:
     type: LoadBalancer
     port: 8000
@@ -249,7 +204,12 @@ securityContext:
   allowPrivilegeEscalation: false
   runAsNonRoot: true
   runAsUser: 1000
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+    - ALL
+  seccompProfile:
+    type: RuntimeDefault
 
 # Service account configuration
 serviceAccount:

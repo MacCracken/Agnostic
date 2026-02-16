@@ -17,6 +17,9 @@ This directory contains Architecture Decision Records (ADRs) for the Agentic QA 
 | [ADR-009](009-webgui-architecture.md) | WebGUI Architecture | Accepted |
 | [ADR-010](010-security-strategy.md) | Security Strategy | Accepted |
 | [ADR-011](011-scalable-team-architecture.md) | Scalable Team Architecture | Accepted |
+| [ADR-012](012-testing-strategy.md) | Testing Strategy | Accepted |
+| [ADR-013](013-plugin-architecture.md) | Plugin Architecture for Agent Registration | Accepted |
+| [ADR-014](014-webgui-rest-api.md) | WebGUI REST API | Accepted |
 
 ## ADR Template
 

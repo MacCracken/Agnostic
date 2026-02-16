@@ -78,7 +78,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Metadata
 LABEL maintainer="Agentic QA Team"
 LABEL description="Base image for all QA agent containers"
-LABEL version="1.0.0"
+LABEL version="2026.2.16"
 
 # Default command
 CMD ["python", "--version"]

@@ -51,9 +51,7 @@ kubectl apply -f k8s/manifests/rabbitmq.yaml
 ```bash
 # Deploy all agents and web interface
 kubectl apply -f k8s/manifests/qa-manager.yaml
-kubectl apply -f k8s/manifests/qa-agents-1.yaml
-kubectl apply -f k8s/manifests/qa-agents-2.yaml
-kubectl apply -f k8s/manifests/qa-agents-3.yaml
+kubectl apply -f k8s/manifests/qa-agents-1.yaml  # All 5 non-manager agents
 kubectl apply -f k8s/manifests/webgui.yaml
 
 # Optional: Add ingress for external access
@@ -233,13 +231,30 @@ kubectl get secret qa-secrets -n agentic-qa -o yaml
 ## Production Best Practices
 
 ### Security
+
+All pods run with hardened security contexts by default:
+
 ```yaml
-# Enable security context
-securityContext:
+# Pod-level security context
+podSecurityContext:
+  fsGroup: 1000
   runAsNonRoot: true
   runAsUser: 1000
-  fsGroup: 1000
 
+# Container-level security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+
+# Writable directories use emptyDir volumes:
+# /tmp and /app/logs are mounted as emptyDir for each pod
+```
+
+```yaml
 # Network policies (if supported)
 networkPolicy:
   enabled: true

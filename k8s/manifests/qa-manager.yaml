@@ -19,17 +19,23 @@ spec:
         component: qa-agent
         role: manager
     spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
       containers:
       - name: qa-manager
         image: agentic-qa/qa-manager:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         env:
         - name: AGENT_ROLE
           value: "manager"
-        - name: REDIS_URL
-          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
-        - name: RABBITMQ_URL
-          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -43,18 +49,14 @@ spec:
           name: health
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "300m"
-          limits:
             memory: "1Gi"
-            cpu: "800m"
+            cpu: "1"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
         volumeMounts:
-        - name: agents-code
-          mountPath: /app/agents
-          readOnly: true
-        - name: config-code
-          mountPath: /app/config
-          readOnly: true
+        - name: tmp
+          mountPath: /tmp
         - name: logs
           mountPath: /app/logs
         livenessProbe:
@@ -72,12 +74,8 @@ spec:
           periodSeconds: 5
           timeoutSeconds: 3
       volumes:
-      - name: agents-code
-        configMap:
-          name: agents-source-code
-      - name: config-code
-        configMap:
-          name: config-source-code
+      - name: tmp
+        emptyDir: {}
       - name: logs
         emptyDir: {}
 ---

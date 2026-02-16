@@ -1,0 +1,110 @@
+{{- if .Values.rabbitmq.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rabbitmq-pvc
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+    component: infrastructure
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.rabbitmq.persistence.size }}
+  {{- if .Values.rabbitmq.persistence.storageClass }}
+  storageClassName: {{ .Values.rabbitmq.persistence.storageClass }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+    app: rabbitmq
+    component: infrastructure
+spec:
+  replicas: {{ .Values.rabbitmq.replicaCount }}
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        {{- include "agentic-qa.selectorLabels" . | nindent 8 }}
+        app: rabbitmq
+        component: infrastructure
+    spec:
+      containers:
+      - name: rabbitmq
+        image: "{{ .Values.rabbitmq.image.repository }}:{{ .Values.rabbitmq.image.tag }}"
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: {{ .Values.rabbitmq.auth.username | quote }}
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: rabbitmq-password
+        ports:
+        - name: amqp
+          containerPort: {{ .Values.rabbitmq.service.amqpPort }}
+        - name: management
+          containerPort: {{ .Values.rabbitmq.service.managementPort }}
+        resources:
+          {{- toYaml .Values.rabbitmq.resources | nindent 10 }}
+        {{- if .Values.rabbitmq.persistence.enabled }}
+        volumeMounts:
+        - name: rabbitmq-storage
+          mountPath: /var/lib/rabbitmq
+        {{- end }}
+        livenessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - -q
+            - ping
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - -q
+            - check_port_connectivity
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+      {{- if .Values.rabbitmq.persistence.enabled }}
+      volumes:
+      - name: rabbitmq-storage
+        persistentVolumeClaim:
+          claimName: rabbitmq-pvc
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-service
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+    app: rabbitmq
+    component: infrastructure
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+  - name: amqp
+    port: {{ .Values.rabbitmq.service.amqpPort }}
+    targetPort: {{ .Values.rabbitmq.service.amqpPort }}
+  - name: management
+    port: {{ .Values.rabbitmq.service.managementPort }}
+    targetPort: {{ .Values.rabbitmq.service.managementPort }}
+  type: ClusterIP
+{{- end }}

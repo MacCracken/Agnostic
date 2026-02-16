@@ -21,17 +21,23 @@ spec:
         component: qa-agent
         role: senior
     spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
       containers:
       - name: senior-qa
         image: agentic-qa/senior-qa:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         env:
         - name: AGENT_ROLE
           value: "senior"
-        - name: REDIS_URL
-          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
-        - name: RABBITMQ_URL
-          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -45,21 +51,14 @@ spec:
           name: health
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "300m"
+            memory: "1.5Gi"
+            cpu: "1"
           limits:
-            memory: "1Gi"
-            cpu: "800m"
+            memory: "3Gi"
+            cpu: "2"
         volumeMounts:
-        - name: agents-code
-          mountPath: /app/agents
-          readOnly: true
-        - name: config-code
-          mountPath: /app/config
-          readOnly: true
-        - name: advanced-testing
-          mountPath: /app/advanced_testing
-          readOnly: true
+        - name: tmp
+          mountPath: /tmp
         - name: logs
           mountPath: /app/logs
         livenessProbe:
@@ -75,15 +74,8 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: agents-code
-        configMap:
-          name: agents-source-code
-      - name: config-code
-        configMap:
-          name: config-source-code
-      - name: advanced-testing
-        configMap:
-          name: advanced-testing-source-code
+      - name: tmp
+        emptyDir: {}
       - name: logs
         emptyDir: {}
 
@@ -110,17 +102,23 @@ spec:
         component: qa-agent
         role: junior
     spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
       containers:
       - name: junior-qa
         image: agentic-qa/junior-qa:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         env:
         - name: AGENT_ROLE
           value: "junior"
-        - name: REDIS_URL
-          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
-        - name: RABBITMQ_URL
-          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -134,21 +132,14 @@ spec:
           name: health
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "200m"
+            memory: "1Gi"
+            cpu: "750m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "2Gi"
+            cpu: "1500m"
         volumeMounts:
-        - name: agents-code
-          mountPath: /app/agents
-          readOnly: true
-        - name: config-code
-          mountPath: /app/config
-          readOnly: true
-        - name: examples
-          mountPath: /app/examples
-          readOnly: true
+        - name: tmp
+          mountPath: /tmp
         - name: logs
           mountPath: /app/logs
         livenessProbe:
@@ -164,15 +155,8 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: agents-code
-        configMap:
-          name: agents-source-code
-      - name: config-code
-        configMap:
-          name: config-source-code
-      - name: examples
-        configMap:
-          name: examples-source-code
+      - name: tmp
+        emptyDir: {}
       - name: logs
         emptyDir: {}
 
@@ -199,17 +183,23 @@ spec:
         component: qa-agent
         role: analyst
     spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
       containers:
       - name: qa-analyst
         image: agentic-qa/qa-analyst:latest
         imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
         env:
         - name: AGENT_ROLE
           value: "analyst"
-        - name: REDIS_URL
-          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
-        - name: RABBITMQ_URL
-          value: "amqp://$(RABBITMQ_USER):$(RABBITMQ_PASSWORD)@$(RABBITMQ_HOST):$(RABBITMQ_PORT)/$(RABBITMQ_VHOST)"
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -223,18 +213,14 @@ spec:
           name: health
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "300m"
-          limits:
             memory: "1Gi"
-            cpu: "800m"
+            cpu: "750m"
+          limits:
+            memory: "2Gi"
+            cpu: "1500m"
         volumeMounts:
-        - name: agents-code
-          mountPath: /app/agents
-          readOnly: true
-        - name: config-code
-          mountPath: /app/config
-          readOnly: true
+        - name: tmp
+          mountPath: /tmp
         - name: logs
           mountPath: /app/logs
         livenessProbe:
@@ -250,11 +236,169 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
-      - name: agents-code
-        configMap:
-          name: agents-source-code
-      - name: config-code
-        configMap:
-          name: config-source-code
+      - name: tmp
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+
+# Security & Compliance Agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-compliance
+  namespace: agentic-qa
+  labels:
+    app: security-compliance
+    component: qa-agent
+    role: security
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: security-compliance
+  template:
+    metadata:
+      labels:
+        app: security-compliance
+        component: qa-agent
+        role: security
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+      - name: security-compliance
+        image: agentic-qa/security-compliance:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: AGENT_ROLE
+          value: "security-compliance"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8005
+          name: health
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "750m"
+          limits:
+            memory: "2Gi"
+            cpu: "1500m"
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8005
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8005
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+
+# Performance & Resilience Agent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: performance-agent
+  namespace: agentic-qa
+  labels:
+    app: performance-agent
+    component: qa-agent
+    role: performance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: performance-agent
+  template:
+    metadata:
+      labels:
+        app: performance-agent
+        component: qa-agent
+        role: performance
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+      - name: performance-agent
+        image: agentic-qa/performance-agent:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: AGENT_ROLE
+          value: "performance"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - containerPort: 8006
+          name: health
+        resources:
+          requests:
+            memory: "1.5Gi"
+            cpu: "1"
+          limits:
+            memory: "3Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8006
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8006
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir: {}
       - name: logs
         emptyDir: {}

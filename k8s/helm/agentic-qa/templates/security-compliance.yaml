@@ -1,0 +1,104 @@
+{{- if .Values.agents.securityCompliance.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-compliance
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+    app: security-compliance
+    component: agent
+spec:
+  replicas: {{ .Values.agents.securityCompliance.replicaCount }}
+  selector:
+    matchLabels:
+      app: security-compliance
+  template:
+    metadata:
+      labels:
+        {{- include "agentic-qa.selectorLabels" . | nindent 8 }}
+        app: security-compliance
+        component: agent
+    spec:
+      serviceAccountName: {{ include "agentic-qa.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: security-compliance
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}-security-compliance:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - name: REDIS_URL
+          value: "redis://{{ .Values.env.REDIS_HOST }}:{{ .Values.env.REDIS_PORT }}/{{ .Values.env.REDIS_DB }}"
+        - name: RABBITMQ_URL
+          value: "amqp://{{ .Values.env.RABBITMQ_USER }}:{{ .Values.secrets.rabbitmqPasswordPlain }}@{{ .Values.env.RABBITMQ_HOST }}:{{ .Values.env.RABBITMQ_PORT }}{{ .Values.env.RABBITMQ_VHOST }}"
+        - name: AGENT_ROLE
+          value: "security-compliance"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: qa-secrets
+              key: openai-api-key
+        envFrom:
+        - configMapRef:
+            name: qa-config
+        ports:
+        - name: http
+          containerPort: {{ .Values.agents.securityCompliance.healthPort }}
+          protocol: TCP
+        resources:
+          {{- toYaml .Values.agents.securityCompliance.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: logs
+          mountPath: /app/logs
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: security-compliance-service
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+    app: security-compliance
+spec:
+  ports:
+  - name: http
+    port: {{ .Values.agents.securityCompliance.healthPort }}
+    targetPort: {{ .Values.agents.securityCompliance.healthPort }}
+    protocol: TCP
+  selector:
+    app: security-compliance
+{{- end }}

@@ -28,11 +28,13 @@ spec:
       - name: webgui
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
-        image: "{{ include "agentic-qa.image" . }}-webgui:{{ .Values.image.tag }}"
+        image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}-webgui:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         env:
         - name: REDIS_URL
-          value: "redis://$(REDIS_HOST):$(REDIS_PORT)/$(REDIS_DB)"
+          value: "redis://{{ .Values.env.REDIS_HOST }}:{{ .Values.env.REDIS_PORT }}/{{ .Values.env.REDIS_DB }}"
+        - name: RABBITMQ_URL
+          value: "amqp://{{ .Values.env.RABBITMQ_USER }}:{{ .Values.secrets.rabbitmqPasswordPlain }}@{{ .Values.env.RABBITMQ_HOST }}:{{ .Values.env.RABBITMQ_PORT }}{{ .Values.env.RABBITMQ_VHOST }}"
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -48,6 +50,8 @@ spec:
         resources:
           {{- toYaml .Values.webgui.resources | nindent 10 }}
         volumeMounts:
+        - name: tmp
+          mountPath: /tmp
         - name: logs
           mountPath: /app/logs
         livenessProbe:
@@ -63,6 +67,8 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 5
       volumes:
+      - name: tmp
+        emptyDir: {}
       - name: logs
         emptyDir: {}
       {{- with .Values.nodeSelector }}

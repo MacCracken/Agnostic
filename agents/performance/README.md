@@ -33,6 +33,13 @@ Tests system resilience:
 - Service degradation validation
 - Chaos engineering scenarios
 
+### AdvancedProfilingTool
+Deep performance profiling:
+- CPU profiling with function hotspot identification
+- Memory profiling and leak detection
+- Garbage collection analysis
+- Flame graph compatible data generation
+
 ## Configuration
 
 Environment variables:

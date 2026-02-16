@@ -114,7 +114,6 @@ pytest tests/integration/ -m integration
 
 - `tests/unit/` - Unit tests for individual components
 - `tests/integration/` - Integration tests for agent communication
-- `tests/end-to-end/` - Full workflow tests
 
 ## Code Quality
 
@@ -181,13 +180,13 @@ Performance & Resilience Agent      ─┘
 
 ## Technology Stack
 
-- **Agent framework:** CrewAI 0.75.0 + LangChain 0.2.16
+- **Agent framework:** CrewAI >=0.11.0,<1.0.0 + LangChain >=0.1.0,<0.2.0
 - **LLM providers:** OpenAI, Anthropic, Google Gemini, Ollama, LM Studio
-- **Web UI:** Chainlit 1.1.304 + FastAPI
-- **Messaging:** Redis 5.0.8 + Celery 5.4.0 + RabbitMQ
-- **Browser automation:** Playwright 1.45.0
-- **ML/CV:** scikit-learn 1.5.1, OpenCV 4.10.0
-- **Testing:** pytest 8.3.2
+- **Web UI:** Chainlit >=1.1.304,<2.0.0 + FastAPI >=0.115.0
+- **Messaging:** Redis >=5.0.8 + Celery >=5.4.0 + RabbitMQ
+- **Browser automation:** Playwright >=1.45.0
+- **ML/CV:** scikit-learn >=1.5.1, OpenCV >=4.10.0
+- **Testing:** pytest >=8.3.2
 
 ## Environment Variables
 
@@ -264,40 +263,7 @@ Edit `config/models.json`:
 
 ## Troubleshooting
 
-### Port Conflicts
-
-```bash
-# Check what's using required ports
-netstat -tulpn | grep -E ':8000|:6379|:5672'
-
-# Change ports in .env if needed
-WEBGUI_PORT=8001
-REDIS_PORT=6380
-RABBITMQ_PORT=5673
-```
-
-### Agent Not Responding
-
-```bash
-# Check agent logs
-docker-compose logs qa-manager
-
-# Verify RabbitMQ connection
-docker-compose logs rabbitmq
-
-# Restart the agent
-docker-compose restart qa-manager
-```
-
-### LLM Errors
-
-```bash
-# Verify API key is set
-echo $OPENAI_API_KEY
-
-# Test LLM connection
-python -c "from openai import OpenAI; OpenAI().models.list()"
-```
+For common troubleshooting steps (port conflicts, agent issues, LLM errors, Redis/build issues), see the [Quick Start Guide troubleshooting section](../getting-started/quick-start.md#-troubleshooting).
 
 ---
 
