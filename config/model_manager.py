@@ -1,20 +1,20 @@
-import os
 import json
 import logging
-# Add config path for imports
-from config.environment import config
-from typing import Dict, Any, Optional, List
+import os
 from abc import ABC, abstractmethod
-import requests
+from typing import Any
+
 import aiohttp
-from datetime import datetime
+
+# Add config path for imports
 
 logger = logging.getLogger(__name__)
 
+
 class BaseModelProvider(ABC):
     """Abstract base class for model providers"""
-    
-    def __init__(self, config: Dict[str, Any]) -> None:
+
+    def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.name = config.get("name", "unknown")
         self.base_url = config.get("base_url", "")
@@ -22,66 +22,71 @@ class BaseModelProvider(ABC):
         self.model = config.get("model", "")
         self.temperature = config.get("temperature", 0.1)
         self.max_tokens = config.get("max_tokens", 4000)
-    
+
     @abstractmethod
-    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+    async def chat_completion(
+        self, messages: list[dict[str, str]], **kwargs: Any
+    ) -> dict[str, Any]:
         """Perform chat completion"""
         pass
-    
+
     @abstractmethod
     async def test_connection(self) -> bool:
         """Test connection to the model provider"""
         pass
 
+
 class OpenAIProvider(BaseModelProvider):
     """OpenAI API provider"""
-    
-    def __init__(self, config: Dict[str, Any]) -> None:
+
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = config.get("base_url", "https://api.openai.com/v1")
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-    
-    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+
+    async def chat_completion(
+        self, messages: list[dict[str, str]], **kwargs: Any
+    ) -> dict[str, Any]:
         """OpenAI chat completion"""
         url = f"{self.base_url}/chat/completions"
-        
+
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens)
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+                async with session.post(
+                    url, headers=self.headers, json=payload
+                ) as response:
                     if response.status == 200:
                         result = await response.json()
                         return {
                             "success": True,
                             "content": result["choices"][0]["message"]["content"],
                             "usage": result.get("usage", {}),
-                            "model": result["model"]
+                            "model": result["model"],
                         }
                     else:
                         error_text = await response.text()
-                        logger.error(f"OpenAI API error: {response.status} - {error_text}")
+                        logger.error(
+                            f"OpenAI API error: {response.status} - {error_text}"
+                        )
                         return {
                             "success": False,
                             "error": f"OpenAI API error: {response.status}",
-                            "details": error_text
+                            "details": error_text,
                         }
         except Exception as e:
             logger.error(f"OpenAI connection error: {e}")
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e)
-            }
-    
+            return {"success": False, "error": "Connection error", "details": str(e)}
+
     async def test_connection(self) -> bool:
         """Test OpenAI connection"""
         try:
@@ -92,72 +97,72 @@ class OpenAIProvider(BaseModelProvider):
             logger.error(f"OpenAI connection test failed: {e}")
             return False
 
+
 class AnthropicProvider(BaseModelProvider):
     """Anthropic Claude API provider"""
-    
-    def __init__(self, config: Dict[str, Any]) -> None:
+
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
         self.base_url = config.get("base_url", "https://api.anthropic.com/v1")
         self.headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-    
-    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+
+    async def chat_completion(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> dict[str, Any]:
         """Anthropic chat completion"""
         url = f"{self.base_url}/messages"
-        
+
         # Convert messages to Anthropic format
         system_message = ""
         user_messages = []
-        
+
         for msg in messages:
             if msg["role"] == "system":
                 system_message = msg["content"]
             else:
-                user_messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-        
+                user_messages.append({"role": msg["role"], "content": msg["content"]})
+
         payload = {
             "model": self.model,
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
             "temperature": kwargs.get("temperature", self.temperature),
-            "messages": user_messages
+            "messages": user_messages,
         }
-        
+
         if system_message:
             payload["system"] = system_message
-        
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+                async with session.post(
+                    url, headers=self.headers, json=payload
+                ) as response:
                     if response.status == 200:
                         result = await response.json()
                         return {
                             "success": True,
                             "content": result["content"][0]["text"],
                             "usage": result.get("usage", {}),
-                            "model": result["model"]
+                            "model": result["model"],
                         }
                     else:
                         error_text = await response.text()
-                        logger.error(f"Anthropic API error: {response.status} - {error_text}")
+                        logger.error(
+                            f"Anthropic API error: {response.status} - {error_text}"
+                        )
                         return {
                             "success": False,
                             "error": f"Anthropic API error: {response.status}",
-                            "details": error_text
+                            "details": error_text,
                         }
         except Exception as e:
             logger.error(f"Anthropic connection error: {e}")
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e)
-            }
-    
+            return {"success": False, "error": "Connection error", "details": str(e)}
+
     async def test_connection(self) -> bool:
         """Test Anthropic connection"""
         try:
@@ -168,14 +173,17 @@ class AnthropicProvider(BaseModelProvider):
             logger.error(f"Anthropic connection test failed: {e}")
             return False
 
+
 class LocalLLMProvider(BaseModelProvider):
     """Local LLM provider (Ollama, LM Studio, etc.)"""
-    
-    def __init__(self, config: Dict[str, Any]) -> None:
+
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.provider_type = config.get("provider_type", "ollama")  # ollama, lm_studio, custom
+        self.provider_type = config.get(
+            "provider_type", "ollama"
+        )  # ollama, lm_studio, custom
         self.stream = config.get("stream", False)
-        
+
         # Set default headers based on provider type
         if self.provider_type == "ollama":
             self.headers = {"Content-Type": "application/json"}
@@ -183,8 +191,10 @@ class LocalLLMProvider(BaseModelProvider):
             self.headers = {"Content-Type": "application/json"}
         else:
             self.headers = config.get("headers", {"Content-Type": "application/json"})
-    
-    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+
+    async def chat_completion(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> dict[str, Any]:
         """Local LLM chat completion"""
         if self.provider_type == "ollama":
             return await self._ollama_completion(messages, **kwargs)
@@ -192,11 +202,13 @@ class LocalLLMProvider(BaseModelProvider):
             return await self._lm_studio_completion(messages, **kwargs)
         else:
             return await self._custom_completion(messages, **kwargs)
-    
-    async def _ollama_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+
+    async def _ollama_completion(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> dict[str, Any]:
         """Ollama API completion"""
         url = f"{self.base_url}/api/chat"
-        
+
         # Convert messages to Ollama format
         payload = {
             "model": self.model,
@@ -204,13 +216,15 @@ class LocalLLMProvider(BaseModelProvider):
             "stream": self.stream,
             "options": {
                 "temperature": kwargs.get("temperature", self.temperature),
-                "num_predict": kwargs.get("max_tokens", self.max_tokens)
-            }
+                "num_predict": kwargs.get("max_tokens", self.max_tokens),
+            },
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+                async with session.post(
+                    url, headers=self.headers, json=payload
+                ) as response:
                     if response.status == 200:
                         if self.stream:
                             # Handle streaming response
@@ -219,16 +233,19 @@ class LocalLLMProvider(BaseModelProvider):
                                 if line:
                                     try:
                                         data = json.loads(line.decode().strip())
-                                        if "message" in data and "content" in data["message"]:
+                                        if (
+                                            "message" in data
+                                            and "content" in data["message"]
+                                        ):
                                             content += data["message"]["content"]
                                     except json.JSONDecodeError:
                                         continue
-                            
+
                             return {
                                 "success": True,
                                 "content": content,
                                 "usage": {},
-                                "model": self.model
+                                "model": self.model,
                             }
                         else:
                             result = await response.json()
@@ -236,39 +253,41 @@ class LocalLLMProvider(BaseModelProvider):
                                 "success": True,
                                 "content": result["message"]["content"],
                                 "usage": result.get("usage", {}),
-                                "model": self.model
+                                "model": self.model,
                             }
                     else:
                         error_text = await response.text()
-                        logger.error(f"Ollama API error: {response.status} - {error_text}")
+                        logger.error(
+                            f"Ollama API error: {response.status} - {error_text}"
+                        )
                         return {
                             "success": False,
                             "error": f"Ollama API error: {response.status}",
-                            "details": error_text
+                            "details": error_text,
                         }
         except Exception as e:
             logger.error(f"Ollama connection error: {e}")
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e)
-            }
-    
-    async def _lm_studio_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+            return {"success": False, "error": "Connection error", "details": str(e)}
+
+    async def _lm_studio_completion(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> dict[str, Any]:
         """LM Studio API completion (OpenAI-compatible)"""
         url = f"{self.base_url}/v1/chat/completions"
-        
+
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": kwargs.get("temperature", self.temperature),
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
-            "stream": self.stream
+            "stream": self.stream,
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+                async with session.post(
+                    url, headers=self.headers, json=payload
+                ) as response:
                     if response.status == 200:
                         if self.stream:
                             # Handle streaming response
@@ -276,21 +295,28 @@ class LocalLLMProvider(BaseModelProvider):
                             async for line in response.content:
                                 if line:
                                     line_str = line.decode().strip()
-                                    if line_str.startswith("data: ") and not line_str.endswith("[DONE]"):
+                                    if line_str.startswith(
+                                        "data: "
+                                    ) and not line_str.endswith("[DONE]"):
                                         try:
                                             data = json.loads(line_str[6:])
-                                            if "choices" in data and len(data["choices"]) > 0:
-                                                delta = data["choices"][0].get("delta", {})
+                                            if (
+                                                "choices" in data
+                                                and len(data["choices"]) > 0
+                                            ):
+                                                delta = data["choices"][0].get(
+                                                    "delta", {}
+                                                )
                                                 if "content" in delta:
                                                     content += delta["content"]
                                         except json.JSONDecodeError:
                                             continue
-                            
+
                             return {
                                 "success": True,
                                 "content": content,
                                 "usage": {},
-                                "model": self.model
+                                "model": self.model,
                             }
                         else:
                             result = await response.json()
@@ -298,39 +324,41 @@ class LocalLLMProvider(BaseModelProvider):
                                 "success": True,
                                 "content": result["choices"][0]["message"]["content"],
                                 "usage": result.get("usage", {}),
-                                "model": result["model"]
+                                "model": result["model"],
                             }
                     else:
                         error_text = await response.text()
-                        logger.error(f"LM Studio API error: {response.status} - {error_text}")
+                        logger.error(
+                            f"LM Studio API error: {response.status} - {error_text}"
+                        )
                         return {
                             "success": False,
                             "error": f"LM Studio API error: {response.status}",
-                            "details": error_text
+                            "details": error_text,
                         }
         except Exception as e:
             logger.error(f"LM Studio connection error: {e}")
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e)
-            }
-    
-    async def _custom_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+            return {"success": False, "error": "Connection error", "details": str(e)}
+
+    async def _custom_completion(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> dict[str, Any]:
         """Custom local LLM completion"""
         # Default to OpenAI-compatible format
         url = f"{self.base_url}/v1/chat/completions"
-        
+
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": kwargs.get("temperature", self.temperature),
-            "max_tokens": kwargs.get("max_tokens", self.max_tokens)
+            "max_tokens": kwargs.get("max_tokens", self.max_tokens),
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+                async with session.post(
+                    url, headers=self.headers, json=payload
+                ) as response:
                     if response.status == 200:
                         result = await response.json()
                         # Try to extract content from common response formats
@@ -340,29 +368,27 @@ class LocalLLMProvider(BaseModelProvider):
                             content = result["content"]
                         else:
                             content = str(result)
-                        
+
                         return {
                             "success": True,
                             "content": content,
                             "usage": result.get("usage", {}),
-                            "model": self.model
+                            "model": self.model,
                         }
                     else:
                         error_text = await response.text()
-                        logger.error(f"Custom LLM API error: {response.status} - {error_text}")
+                        logger.error(
+                            f"Custom LLM API error: {response.status} - {error_text}"
+                        )
                         return {
                             "success": False,
                             "error": f"Custom LLM API error: {response.status}",
-                            "details": error_text
+                            "details": error_text,
                         }
         except Exception as e:
             logger.error(f"Custom LLM connection error: {e}")
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e)
-            }
-    
+            return {"success": False, "error": "Connection error", "details": str(e)}
+
     async def test_connection(self) -> bool:
         """Test local LLM connection"""
         try:
@@ -373,72 +399,76 @@ class LocalLLMProvider(BaseModelProvider):
             logger.error(f"Local LLM connection test failed: {e}")
             return False
 
+
 class GoogleProvider(BaseModelProvider):
     """Google Gemini API provider"""
-    
-    def __init__(self, config: Dict[str, Any]) -> None:
+
+    def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
-        self.base_url = config.get("base_url", "https://generativelanguage.googleapis.com/v1")
+        self.base_url = config.get(
+            "base_url", "https://generativelanguage.googleapis.com/v1"
+        )
         self.api_key = config.get("api_key", "")
         self.headers = {"Content-Type": "application/json"}
-    
-    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+
+    async def chat_completion(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> dict[str, Any]:
         """Google Gemini chat completion"""
         url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
-        
+
         # Convert messages to Gemini format
         contents = []
         for msg in messages:
             if msg["role"] != "system":  # Gemini doesn't use system role in messages
                 role = "user" if msg["role"] == "user" else "model"
-                contents.append({
-                    "role": role,
-                    "parts": [{"text": msg["content"]}]
-                })
-        
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
         payload = {
             "contents": contents,
             "generationConfig": {
                 "temperature": kwargs.get("temperature", self.temperature),
-                "maxOutputTokens": kwargs.get("max_tokens", self.max_tokens)
-            }
+                "maxOutputTokens": kwargs.get("max_tokens", self.max_tokens),
+            },
         }
-        
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+                async with session.post(
+                    url, headers=self.headers, json=payload
+                ) as response:
                     if response.status == 200:
                         result = await response.json()
                         if "candidates" in result and len(result["candidates"]) > 0:
-                            content = result["candidates"][0]["content"]["parts"][0]["text"]
+                            content = result["candidates"][0]["content"]["parts"][0][
+                                "text"
+                            ]
                             return {
                                 "success": True,
                                 "content": content,
                                 "usage": result.get("usageMetadata", {}),
-                                "model": self.model
+                                "model": self.model,
                             }
                         else:
                             return {
                                 "success": False,
                                 "error": "No content in response",
-                                "details": str(result)
+                                "details": str(result),
                             }
                     else:
                         error_text = await response.text()
-                        logger.error(f"Google API error: {response.status} - {error_text}")
+                        logger.error(
+                            f"Google API error: {response.status} - {error_text}"
+                        )
                         return {
                             "success": False,
                             "error": f"Google API error: {response.status}",
-                            "details": error_text
+                            "details": error_text,
                         }
         except Exception as e:
             logger.error(f"Google connection error: {e}")
-            return {
-                "success": False,
-                "error": "Connection error",
-                "details": str(e)
-            }
-    
+            return {"success": False, "error": "Connection error", "details": str(e)}
+
     async def test_connection(self) -> bool:
         """Test Google connection"""
         try:
@@ -449,59 +479,66 @@ class GoogleProvider(BaseModelProvider):
             logger.error(f"Google connection test failed: {e}")
             return False
 
+
 class ModelManager:
     """Manages multiple model providers and routing"""
-    
+
     def __init__(self, config_file: str = "config/models.json") -> None:
         self.config_file = config_file
-        self.providers: Dict[str, BaseModelProvider] = {}
-        self.primary_provider: Optional[str] = None
-        self.fallback_providers: List[str] = []
+        self.providers: dict[str, BaseModelProvider] = {}
+        self.primary_provider: str | None = None
+        self.fallback_providers: list[str] = []
         self.load_config()
-    
-    def load_config(self) -> Dict[str, Any]:
+
+    def load_config(self) -> dict[str, Any]:
         """Load model configuration from file"""
         try:
             config_path = os.path.join(os.getcwd(), self.config_file)
             if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
+                with open(config_path) as f:
                     config = json.load(f)
-                
+
                 # Initialize providers
-                for provider_name, provider_config in config.get("providers", {}).items():
+                for provider_name, provider_config in config.get(
+                    "providers", {}
+                ).items():
                     if provider_config.get("enabled", True):
                         provider = self._create_provider(provider_config)
                         if provider:
                             self.providers[provider_name] = provider
-                
+
                 # Set primary and fallback providers
                 self.primary_provider = config.get("primary_provider")
                 self.fallback_providers = config.get("fallback_providers", [])
-                
+
                 logger.info(f"Loaded {len(self.providers)} model providers")
                 logger.info(f"Primary provider: {self.primary_provider}")
                 return config
-                
+
             else:
                 logger.warning(f"Model config file not found: {config_path}")
                 self._create_default_config()
                 return {}
-                
+
         except Exception as e:
             logger.error(f"Error loading model config: {e}")
             self._create_default_config()
             return {}
-    
-    def _create_provider(self, config: Dict[str, Any]) -> Optional[BaseModelProvider]:
+
+    def _create_provider(self, config: dict[str, Any]) -> BaseModelProvider | None:
         """Create a provider instance based on configuration"""
         provider_type = config.get("type", "").lower()
-        
+
         try:
             if provider_type == "openai":
                 return OpenAIProvider(config)
             elif provider_type == "anthropic":
                 return AnthropicProvider(config)
-            elif provider_type == "local" or provider_type == "ollama" or provider_type == "lm_studio":
+            elif (
+                provider_type == "local"
+                or provider_type == "ollama"
+                or provider_type == "lm_studio"
+            ):
                 return LocalLLMProvider(config)
             elif provider_type == "google":
                 return GoogleProvider(config)
@@ -509,10 +546,12 @@ class ModelManager:
                 logger.error(f"Unknown provider type: {provider_type}")
                 return None
         except Exception as e:
-            logger.error(f"Error creating provider {config.get('name', 'unknown')}: {e}")
+            logger.error(
+                f"Error creating provider {config.get('name', 'unknown')}: {e}"
+            )
             return None
-    
-    def _create_default_config(self) -> Dict[str, Any]:
+
+    def _create_default_config(self) -> dict[str, Any]:
         """Create default configuration for OpenAI"""
         default_config = {
             "providers": {
@@ -524,114 +563,138 @@ class ModelManager:
                     "model": os.getenv("OPENAI_MODEL", "gpt-4"),
                     "temperature": 0.1,
                     "max_tokens": 4000,
-                    "enabled": True
+                    "enabled": True,
                 }
             },
             "primary_provider": "openai",
-            "fallback_providers": []
+            "fallback_providers": [],
         }
-        
+
         # Save default config
         config_dir = os.path.join(os.getcwd(), "config")
         os.makedirs(config_dir, exist_ok=True)
         config_path = os.path.join(config_dir, "models.json")
-        
-        with open(config_path, 'w') as f:
+
+        with open(config_path, "w") as f:
             json.dump(default_config, f, indent=2)
-        
+
         # Load the default config
         self.load_config()
         return default_config
-    
-    async def chat_completion(self, messages: List[Dict[str, str]], provider: Optional[str] = None, **kwargs) -> Dict[str, Any]:
+
+    async def chat_completion(
+        self, messages: list[dict[str, str]], provider: str | None = None, **kwargs
+    ) -> dict[str, Any]:
         """Perform chat completion with specified or primary provider"""
         target_provider = provider or self.primary_provider
-        
+
         if not target_provider or target_provider not in self.providers:
             return {
                 "success": False,
                 "error": "Provider not available",
-                "details": f"Provider '{target_provider}' not found or not enabled"
+                "details": f"Provider '{target_provider}' not found or not enabled",
             }
-        
+
         # Load config to check for agent-specific settings
         try:
             config_path = os.path.join(os.getcwd(), self.config_file)
-            with open(config_path, 'r') as f:
+            with open(config_path) as f:
                 config = json.load(f)
         except:
             config = {}
-        
+
         # Check for agent-specific model configuration
         agent_role = kwargs.get("agent_role")
         if agent_role and "agent_specific_models" in config:
             agent_config = config["agent_specific_models"].get(agent_role, {})
             preferred_provider = agent_config.get("preferred_provider", target_provider)
-            
+
             # Use agent-specific temperature and tokens if specified
             if "temperature" in agent_config:
                 kwargs["temperature"] = agent_config["temperature"]
             if "max_tokens" in agent_config:
                 kwargs["max_tokens"] = agent_config["max_tokens"]
-            
+
             # Use agent-specific fallback chain if configured
-            agent_fallbacks = agent_config.get("fallback_providers", self.fallback_providers)
+            agent_fallbacks = agent_config.get(
+                "fallback_providers", self.fallback_providers
+            )
         else:
             preferred_provider = target_provider
             agent_fallbacks = self.fallback_providers
-        
+
         # Try preferred provider first
         if preferred_provider in self.providers:
-            logger.info(f"Using preferred provider for {agent_role}: {preferred_provider}")
-            result = await self.providers[preferred_provider].chat_completion(messages, **kwargs)
-            
+            logger.info(
+                f"Using preferred provider for {agent_role}: {preferred_provider}"
+            )
+            result = await self.providers[preferred_provider].chat_completion(
+                messages, **kwargs
+            )
+
             # If preferred fails and fallbacks are configured, try them
             if not result.get("success", False) and agent_fallbacks:
                 for fallback_provider in agent_fallbacks:
-                    if fallback_provider in self.providers and fallback_provider != preferred_provider:
+                    if (
+                        fallback_provider in self.providers
+                        and fallback_provider != preferred_provider
+                    ):
                         logger.info(f"Trying fallback provider: {fallback_provider}")
-                        fallback_result = await self.providers[fallback_provider].chat_completion(messages, **kwargs)
+                        fallback_result = await self.providers[
+                            fallback_provider
+                        ].chat_completion(messages, **kwargs)
                         if fallback_result.get("success", False):
-                            logger.info(f"Fallback provider {fallback_provider} succeeded")
+                            logger.info(
+                                f"Fallback provider {fallback_provider} succeeded"
+                            )
                             fallback_result["fallback_used"] = fallback_provider
                             return fallback_result
-            
+
             return result
         else:
             # Fallback to original target provider if preferred is not available
-            result = await self.providers[target_provider].chat_completion(messages, **kwargs)
-            
+            result = await self.providers[target_provider].chat_completion(
+                messages, **kwargs
+            )
+
             # If primary fails and fallbacks are configured, try them
             if not result.get("success", False) and self.fallback_providers:
                 for fallback_provider in self.fallback_providers:
-                    if fallback_provider in self.providers and fallback_provider != target_provider:
+                    if (
+                        fallback_provider in self.providers
+                        and fallback_provider != target_provider
+                    ):
                         logger.info(f"Trying fallback provider: {fallback_provider}")
-                        fallback_result = await self.providers[fallback_provider].chat_completion(messages, **kwargs)
+                        fallback_result = await self.providers[
+                            fallback_provider
+                        ].chat_completion(messages, **kwargs)
                         if fallback_result.get("success", False):
-                            logger.info(f"Fallback provider {fallback_provider} succeeded")
+                            logger.info(
+                                f"Fallback provider {fallback_provider} succeeded"
+                            )
                             fallback_result["fallback_used"] = fallback_provider
                             return fallback_result
-            
+
             return result
-    
-    async def test_all_connections(self) -> Dict[str, bool]:
+
+    async def test_all_connections(self) -> dict[str, bool]:
         """Test connections to all enabled providers"""
         results = {}
-        
+
         for provider_name, provider in self.providers.items():
             try:
                 results[provider_name] = await provider.test_connection()
             except Exception as e:
                 logger.error(f"Error testing provider {provider_name}: {e}")
                 results[provider_name] = False
-        
+
         return results
-    
-    def get_available_providers(self) -> List[str]:
+
+    def get_available_providers(self) -> list[str]:
         """Get list of available provider names"""
         return list(self.providers.keys())
-    
-    def get_provider_info(self, provider_name: str) -> Optional[Dict[str, Any]]:
+
+    def get_provider_info(self, provider_name: str) -> dict[str, Any] | None:
         """Get information about a specific provider"""
         if provider_name in self.providers:
             provider = self.providers[provider_name]
@@ -639,9 +702,10 @@ class ModelManager:
                 "name": provider.name,
                 "model": provider.model,
                 "base_url": provider.base_url,
-                "type": provider.__class__.__name__
+                "type": provider.__class__.__name__,
             }
         return None
+
 
 # Global model manager instance
 model_manager = ModelManager()

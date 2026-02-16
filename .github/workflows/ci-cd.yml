@@ -56,7 +56,7 @@ jobs:
           ruff check agents/ config/ shared/ webgui/ --output-format=github
           black --check agents/ config/ shared/ webgui/
           isort --check-only agents/ config/ shared/ webgui/
-          mypy agents/ config/ shared/ --ignore-missing-imports || true
+          mypy agents/ config/ shared/ --ignore-missing-imports --no-error-summary || true
 
   # Build and Test
   build-and-test:

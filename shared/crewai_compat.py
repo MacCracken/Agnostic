@@ -3,6 +3,7 @@
 try:
     from crewai.tools import BaseTool  # type: ignore
 except Exception:  # pragma: no cover - fallback for older CrewAI builds
+
     class BaseTool:  # type: ignore
         name: str = ""
         description: str = ""
