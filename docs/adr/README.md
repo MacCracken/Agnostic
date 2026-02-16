@@ -20,6 +20,8 @@ This directory contains Architecture Decision Records (ADRs) for the Agentic QA 
 | [ADR-012](012-testing-strategy.md) | Testing Strategy | Accepted |
 | [ADR-013](013-plugin-architecture.md) | Plugin Architecture for Agent Registration | Accepted |
 | [ADR-014](014-webgui-rest-api.md) | WebGUI REST API | Accepted |
+| [ADR-015](015-observability-stack.md) | Observability Stack Integration | Accepted |
+| [ADR-016](016-communication-hardening.md) | Agent Communication Hardening | Accepted |
 
 ## ADR Template
 

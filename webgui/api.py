@@ -332,3 +332,17 @@ async def get_agent_detail(
     if metrics is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return asdict(metrics)
+
+
+# ---------------------------------------------------------------------------
+# Metrics endpoint (unauthenticated — for Prometheus scraping)
+# ---------------------------------------------------------------------------
+
+@api_router.get("/metrics")
+async def get_metrics():
+    from shared.metrics import get_content_type, get_metrics_text
+
+    return JSONResponse(
+        content=get_metrics_text(),
+        media_type=get_content_type(),
+    )

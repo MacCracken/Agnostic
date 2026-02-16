@@ -1,0 +1,127 @@
+"""
+Prometheus metrics for the Agentic QA Team System.
+
+Provides named metric objects (Counter, Histogram, Gauge) with a no-op
+fallback when ``prometheus_client`` is not installed, so callers can
+always call ``.labels(...).inc()`` / ``.observe()`` / ``.set()`` without
+guarding imports.
+"""
+
+from __future__ import annotations
+
+try:
+    from prometheus_client import Counter, Gauge, Histogram
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+
+
+# ------------------------------------------------------------------
+# No-op fallback when prometheus_client is absent
+# ------------------------------------------------------------------
+
+class _NoOpMetric:
+    """Drop-in replacement that silently ignores all metric operations."""
+
+    def labels(self, **_kwargs: object) -> "_NoOpMetric":
+        return self
+
+    def inc(self, amount: float = 1) -> None:  # noqa: ARG002
+        pass
+
+    def dec(self, amount: float = 1) -> None:  # noqa: ARG002
+        pass
+
+    def observe(self, amount: float) -> None:  # noqa: ARG002
+        pass
+
+    def set(self, value: float) -> None:  # noqa: ARG002
+        pass
+
+
+# ------------------------------------------------------------------
+# Metric definitions
+# ------------------------------------------------------------------
+
+def _counter(name: str, documentation: str, labelnames: tuple[str, ...]) -> Counter | _NoOpMetric:
+    if PROMETHEUS_AVAILABLE:
+        return Counter(name, documentation, labelnames)
+    return _NoOpMetric()
+
+
+def _histogram(name: str, documentation: str, labelnames: tuple[str, ...]) -> Histogram | _NoOpMetric:
+    if PROMETHEUS_AVAILABLE:
+        return Histogram(name, documentation, labelnames)
+    return _NoOpMetric()
+
+
+def _gauge(name: str, documentation: str, labelnames: tuple[str, ...]) -> Gauge | _NoOpMetric:
+    if PROMETHEUS_AVAILABLE:
+        return Gauge(name, documentation, labelnames)
+    return _NoOpMetric()
+
+
+# Task metrics
+TASKS_TOTAL = _counter(
+    "qa_tasks_total",
+    "Total number of QA tasks processed",
+    ("agent", "status"),
+)
+TASK_DURATION = _histogram(
+    "qa_task_duration_seconds",
+    "Duration of QA task execution in seconds",
+    ("agent",),
+)
+
+# LLM call metrics
+LLM_CALLS_TOTAL = _counter(
+    "qa_llm_calls_total",
+    "Total number of LLM API calls",
+    ("method", "status"),
+)
+LLM_CALL_DURATION = _histogram(
+    "qa_llm_call_duration_seconds",
+    "Duration of LLM API calls in seconds",
+    ("method",),
+)
+
+# HTTP request metrics
+HTTP_REQUESTS_TOTAL = _counter(
+    "qa_http_requests_total",
+    "Total number of HTTP requests",
+    ("method", "endpoint", "status_code"),
+)
+
+# Agent status metrics
+AGENTS_ACTIVE = _gauge(
+    "qa_agents_active",
+    "Number of currently active agents",
+    ("agent",),
+)
+
+# Circuit breaker metrics
+CIRCUIT_BREAKER_STATE = _gauge(
+    "qa_circuit_breaker_state",
+    "Circuit breaker state (0=closed, 1=open, 2=half-open)",
+    ("service",),
+)
+
+
+# ------------------------------------------------------------------
+# Exposition helpers
+# ------------------------------------------------------------------
+
+def get_metrics_text() -> str:
+    """Return Prometheus exposition format text, or empty string if unavailable."""
+    if PROMETHEUS_AVAILABLE:
+        return generate_latest().decode("utf-8")
+    return ""
+
+
+def get_content_type() -> str:
+    """Return the MIME type for Prometheus exposition format."""
+    if PROMETHEUS_AVAILABLE:
+        return CONTENT_TYPE_LATEST
+    return "text/plain; charset=utf-8"

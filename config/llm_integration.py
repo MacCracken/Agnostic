@@ -6,12 +6,18 @@ Provides real LLM-driven analysis for tools instead of static/mock data.
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from langchain.schema import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from shared.metrics import LLM_CALLS_TOTAL, LLM_CALL_DURATION
+from shared.resilience import CircuitBreaker
+
 logger = logging.getLogger(__name__)
+
+_llm_circuit = CircuitBreaker(name="llm_api", failure_threshold=5, recovery_timeout=60.0)
 
 
 class LLMIntegrationService:
@@ -38,9 +44,10 @@ class LLMIntegrationService:
 
     async def generate_test_scenarios(self, requirements: str) -> list[str]:
         """Generate test scenarios using LLM from requirements."""
-        if not self.llm:
+        if not self.llm or not _llm_circuit.can_execute():
             return self._fallback_scenarios()
 
+        start = time.monotonic()
         try:
             prompt = f"""
             As an expert QA engineer, analyze the following requirements and generate comprehensive test scenarios:
@@ -73,19 +80,26 @@ class LLMIntegrationService:
                 content = content[7:-3].strip()
 
             scenarios = json.loads(content)
+            _llm_circuit.record_success()
+            LLM_CALLS_TOTAL.labels(method="generate_test_scenarios", status="success").inc()
             return (
                 scenarios if isinstance(scenarios, list) else self._fallback_scenarios()
             )
 
         except Exception as e:
+            _llm_circuit.record_failure()
+            LLM_CALLS_TOTAL.labels(method="generate_test_scenarios", status="error").inc()
             logger.error(f"LLM scenario generation failed: {e}")
             return self._fallback_scenarios()
+        finally:
+            LLM_CALL_DURATION.labels(method="generate_test_scenarios").observe(time.monotonic() - start)
 
     async def extract_acceptance_criteria(self, requirements: str) -> list[str]:
         """Extract acceptance criteria using LLM from requirements."""
-        if not self.llm:
+        if not self.llm or not _llm_circuit.can_execute():
             return self._fallback_criteria()
 
+        start = time.monotonic()
         try:
             prompt = f"""
             As an expert QA engineer, extract detailed acceptance criteria from these requirements:
@@ -113,17 +127,24 @@ class LLMIntegrationService:
                 content = content[7:-3].strip()
 
             criteria = json.loads(content)
+            _llm_circuit.record_success()
+            LLM_CALLS_TOTAL.labels(method="extract_acceptance_criteria", status="success").inc()
             return criteria if isinstance(criteria, list) else self._fallback_criteria()
 
         except Exception as e:
+            _llm_circuit.record_failure()
+            LLM_CALLS_TOTAL.labels(method="extract_acceptance_criteria", status="error").inc()
             logger.error(f"LLM criteria extraction failed: {e}")
             return self._fallback_criteria()
+        finally:
+            LLM_CALL_DURATION.labels(method="extract_acceptance_criteria").observe(time.monotonic() - start)
 
     async def identify_test_risks(self, requirements: str) -> list[str]:
         """Identify potential test risks using LLM from requirements."""
-        if not self.llm:
+        if not self.llm or not _llm_circuit.can_execute():
             return self._fallback_risks()
 
+        start = time.monotonic()
         try:
             prompt = f"""
             As a seasoned QA risk analyst, identify potential testing risks from these requirements:
@@ -154,19 +175,26 @@ class LLMIntegrationService:
                 content = content[7:-3].strip()
 
             risks = json.loads(content)
+            _llm_circuit.record_success()
+            LLM_CALLS_TOTAL.labels(method="identify_test_risks", status="success").inc()
             return risks if isinstance(risks, list) else self._fallback_risks()
 
         except Exception as e:
+            _llm_circuit.record_failure()
+            LLM_CALLS_TOTAL.labels(method="identify_test_risks", status="error").inc()
             logger.error(f"LLM risk identification failed: {e}")
             return self._fallback_risks()
+        finally:
+            LLM_CALL_DURATION.labels(method="identify_test_risks").observe(time.monotonic() - start)
 
     async def perform_fuzzy_verification(
         self, test_results: dict[str, Any], business_goals: str
     ) -> dict[str, Any]:
         """Perform LLM-based fuzzy verification of test results."""
-        if not self.llm:
+        if not self.llm or not _llm_circuit.can_execute():
             return self._fallback_verification(test_results, business_goals)
 
+        start = time.monotonic()
         try:
             prompt = f"""
             As an expert QA analyst, perform fuzzy verification of these test results against business goals:
@@ -204,6 +232,8 @@ class LLMIntegrationService:
                 content = content[7:-3].strip()
 
             verification = json.loads(content)
+            _llm_circuit.record_success()
+            LLM_CALLS_TOTAL.labels(method="perform_fuzzy_verification", status="success").inc()
             return (
                 verification
                 if isinstance(verification, dict)
@@ -211,16 +241,21 @@ class LLMIntegrationService:
             )
 
         except Exception as e:
+            _llm_circuit.record_failure()
+            LLM_CALLS_TOTAL.labels(method="perform_fuzzy_verification", status="error").inc()
             logger.error(f"LLM fuzzy verification failed: {e}")
             return self._fallback_verification(test_results, business_goals)
+        finally:
+            LLM_CALL_DURATION.labels(method="perform_fuzzy_verification").observe(time.monotonic() - start)
 
     async def analyze_security_findings(
         self, scan_results: dict[str, Any]
     ) -> dict[str, Any]:
         """Analyze security findings using LLM intelligence."""
-        if not self.llm:
+        if not self.llm or not _llm_circuit.can_execute():
             return self._fallback_security_analysis(scan_results)
 
+        start = time.monotonic()
         try:
             prompt = f"""
             As a security expert, analyze these scan results and provide intelligent assessment:
@@ -258,6 +293,8 @@ class LLMIntegrationService:
                 content = content[7:-3].strip()
 
             analysis = json.loads(content)
+            _llm_circuit.record_success()
+            LLM_CALLS_TOTAL.labels(method="analyze_security_findings", status="success").inc()
             return (
                 analysis
                 if isinstance(analysis, dict)
@@ -265,16 +302,21 @@ class LLMIntegrationService:
             )
 
         except Exception as e:
+            _llm_circuit.record_failure()
+            LLM_CALLS_TOTAL.labels(method="analyze_security_findings", status="error").inc()
             logger.error(f"LLM security analysis failed: {e}")
             return self._fallback_security_analysis(scan_results)
+        finally:
+            LLM_CALL_DURATION.labels(method="analyze_security_findings").observe(time.monotonic() - start)
 
     async def generate_performance_profile(
         self, performance_data: dict[str, Any]
     ) -> dict[str, Any]:
         """Generate intelligent performance profile analysis."""
-        if not self.llm:
+        if not self.llm or not _llm_circuit.can_execute():
             return self._fallback_performance_analysis(performance_data)
 
+        start = time.monotonic()
         try:
             prompt = f"""
             As a performance engineering expert, analyze this performance data:
@@ -312,6 +354,8 @@ class LLMIntegrationService:
                 content = content[7:-3].strip()
 
             profile = json.loads(content)
+            _llm_circuit.record_success()
+            LLM_CALLS_TOTAL.labels(method="generate_performance_profile", status="success").inc()
             return (
                 profile
                 if isinstance(profile, dict)
@@ -319,8 +363,12 @@ class LLMIntegrationService:
             )
 
         except Exception as e:
+            _llm_circuit.record_failure()
+            LLM_CALLS_TOTAL.labels(method="generate_performance_profile", status="error").inc()
             logger.error(f"LLM performance profiling failed: {e}")
             return self._fallback_performance_analysis(performance_data)
+        finally:
+            LLM_CALL_DURATION.labels(method="generate_performance_profile").observe(time.monotonic() - start)
 
     def _fallback_scenarios(self) -> list[str]:
         """Fallback scenarios when LLM is unavailable."""

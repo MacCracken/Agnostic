@@ -17,7 +17,7 @@ All application code lives under the project root directory.
 cp .env.example .env   # then set OPENAI_API_KEY
 
 # Install dependencies
-pip install -e .[dev,test,web,ml,browser]  # Install with optional dependencies
+pip install -e .[dev,test,web,ml,browser,observability]  # Install with optional dependencies
 
 # Build using optimized base image (99% faster rebuilds)
 ./scripts/build-docker.sh              # Full build: base + all agents
@@ -149,6 +149,9 @@ Performance & Resilience Agent      ─┘
 - `advanced_testing/risk_prioritization_exploratory.py` — ML-driven risk scoring, code change analysis, exploratory test generation
 - `config/environment.py` — Config class for environment variables, Redis client factory, Celery app factory
 - `config/team_config_loader.py` — Team configuration loading (lean/standard/large presets)
+- `shared/metrics.py` — Prometheus metrics (Counter, Histogram, Gauge) with no-op fallback; `get_metrics_text()` exposition helper
+- `shared/logging_config.py` — Structured logging (`configure_logging(service_name)`); JSON via structlog or stdlib text
+- `shared/resilience.py` — `CircuitBreaker`, `RetryConfig` + `retry_async` decorator, `GracefulShutdown` async context manager
 - `shared/crewai_compat.py` — CrewAI BaseTool compatibility layer
 - `shared/data_generation_service.py` — Synthetic data generation service
 - `webgui/` — Enhanced Chainlit-based WebGUI with comprehensive monitoring and reporting
@@ -237,6 +240,8 @@ See `docs/adr/` for detailed Architecture Decision Records:
 - **ADR-005**: Authentication and Authorization Design (JWT + RBAC)
 - **ADR-013**: Plugin Architecture for Agent Registration (config-driven AgentRegistry)
 - **ADR-014**: WebGUI REST API (FastAPI router wrapping existing managers)
+- **ADR-015**: Observability Stack Integration (Prometheus metrics, structured logging, no-op fallbacks)
+- **ADR-016**: Agent Communication Hardening (circuit breaker, Celery reliability, graceful shutdown)
 
 ### Real-time Features
 - **Dashboard**: Live session monitoring with status indicators, resource metrics, compliance scores, predictive analytics, and cross-platform testing results
@@ -301,6 +306,7 @@ PDF_GENERATOR_ENGINE=reportlab
 - `POST /api/auth/refresh` - Refresh access token
 - `POST /api/auth/logout` - Invalidate tokens
 - `GET /api/auth/me` - Current user info
+- `GET /api/metrics` - Prometheus metrics (unauthenticated)
 
 **Planned (not yet implemented):**
 - `/ws/realtime` - WebSocket real-time updates

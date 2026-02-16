@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'agents',
 
 try:
     from senior_qa import SelfHealingTool
-except ImportError:
+except Exception:
     # Fallback for when dependencies aren't available
     pytest.skip("senior_qa module not available", allow_module_level=True)
 

@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Observability Stack** (`shared/metrics.py`): Prometheus metrics (Counter, Histogram, Gauge) with no-op fallback when `prometheus_client` not installed. Named metrics for tasks, LLM calls, HTTP requests, active agents, circuit breaker state. (ADR-015)
+- **Structured Logging** (`shared/logging_config.py`): `configure_logging(service_name)` reads `LOG_FORMAT`/`LOG_LEVEL` env vars; JSON output via structlog or stdlib text fallback. (ADR-015)
+- **Resilience Primitives** (`shared/resilience.py`): `CircuitBreaker` dataclass (CLOSED→OPEN→HALF_OPEN), `RetryConfig` + `retry_async` decorator with exponential backoff, `GracefulShutdown` async context manager with SIGTERM/SIGINT handling. (ADR-016)
+- **`/api/metrics` endpoint** (`webgui/api.py`): Unauthenticated Prometheus scrape endpoint returning exposition format text
+- **`observability` optional deps** (`pyproject.toml`): `prometheus-client>=0.20.0`, `structlog>=24.0.0`
+- **ADR-015**: Observability Stack Integration
+- **ADR-016**: Agent Communication Hardening
 - **Plugin Architecture** (`config/agent_registry.py`): Config-driven `AgentRegistry` + `AgentDefinition` dataclass. Replaces hardcoded if/elif task routing in `qa_manager.py` with `registry.route_task()`. Adding new agents no longer requires editing manager or WebGUI code. (ADR-013)
 - **WebGUI REST API** (`webgui/api.py`): 18 FastAPI endpoints wrapping existing manager singletons — dashboard (4), sessions (4), reports (3), agents (3), auth (4). JWT auth on all endpoints. (ADR-014)
 - **CI/CD Bandit security scan**: New `security-code-scan` job runs Bandit static analysis on all Python source
@@ -17,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ADR-014**: WebGUI REST API
 
 ### Changed
+- **Celery reliability** (`config/environment.py`): Added `task_acks_late`, `task_reject_on_worker_lost`, `task_default_retry_delay=60`, `task_max_retries=3`, `worker_cancel_long_running_tasks_on_connection_loss`
+- **LLM circuit breaker + metrics** (`config/llm_integration.py`): All 6 async methods instrumented with Prometheus counters/histograms and protected by `CircuitBreaker`
+- **Agent graceful shutdown**: All 6 agent `main()` functions now use `GracefulShutdown` context manager instead of bare `except KeyboardInterrupt`
 - **`config/team_config.json`**: Added explicit `role`, `celery_task`, `celery_queue`, `redis_prefix` fields to all standard agents
 - **`agents/manager/qa_manager.py`**: `_delegate_to_specialists` now uses `AgentRegistry.route_task()` instead of if/elif chain
 - **`webgui/app.py`**: Welcome message dynamically generated from `AgentRegistry.get_agents_for_team()`; REST API router mounted
@@ -32,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hardcoded credentials removed**: RabbitMQ credentials in `docker-compose.yml` now reference `${RABBITMQ_USER}` / `${RABBITMQ_PASSWORD}` environment variables
 
 ### Fixed
+- **`datetime.utcnow()` deprecation** (`webgui/auth.py`): Replaced 4 occurrences with `datetime.now(timezone.utc)`
+- **Pydantic test collection errors**: Broadened `except ImportError` to `except Exception` in 5 agent tool test files; added try/except to 2 files that lacked it
 - **Docker health checks**: Agent health checks now perform actual Redis ping (`r.ping()`) instead of always-passing `print('healthy')`
 - **PDF export**: Implemented real PDF generation with ReportLab (`SimpleDocTemplate`, `Paragraph`, `Table`) with HTML fallback when ReportLab is missing
 - **WebGUI RABBITMQ_URL**: Added missing `RABBITMQ_URL` environment variable to webgui service in docker-compose

@@ -97,19 +97,29 @@ This roadmap outlines the strategic direction and upcoming enhancements for the 
 - **Status**: Completed
 - 48 new unit tests across agent_registry, webgui auth, webgui exports, webgui API, config environment
 
+### Recently Completed (2026-02-16 Phase 3)
+
+#### Observability Stack Integration
+- **Status**: Completed
+- Prometheus metrics (`shared/metrics.py`) with no-op fallback — tasks, LLM calls, HTTP requests, agents, circuit breaker
+- Structured logging (`shared/logging_config.py`) — JSON via structlog or stdlib text
+- `/api/metrics` endpoint for Prometheus scraping
+- LLM call instrumentation (counter + histogram on all 6 methods)
+- See ADR-015
+
+#### Agent Communication Hardening
+- **Status**: Completed
+- Circuit breaker for LLM API calls (`shared/resilience.py`) — CLOSED/OPEN/HALF_OPEN states
+- Celery reliability: `task_acks_late`, `task_reject_on_worker_lost`, retry config
+- Graceful shutdown (`GracefulShutdown` context manager) in all 6 agent `main()` functions
+- `retry_async` decorator with exponential backoff
+- See ADR-016
+
 ### Immediate (Next 3 Months)
 
 #### 4. Kubernetes Production Readiness
-- **Priority**: Medium
+- **Priority**: High (next up)
 - **Scope**: NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, resource quotas, startup probes
-
-#### 5. Observability Stack Integration
-- **Priority**: High (next up)
-- **Scope**: Prometheus `/metrics` endpoints, JSON-structured logging, OpenTelemetry tracing across agent delegation chains, pre-built Grafana dashboards
-
-#### 6. Agent Communication Hardening
-- **Priority**: High (next up)
-- **Scope**: Retry with exponential backoff, dead-letter queues, circuit breaker for LLM calls, graceful shutdown handlers, health check endpoints for all agents
 
 ### Medium Term (3-6 Months)
 

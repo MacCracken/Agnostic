@@ -584,14 +584,12 @@ async def main():
 
     logger.info("QA Manager agent started with Celery worker and orchestration monitor")
 
-    # Keep the agent running
-    try:
-        while True:
+    # Keep the agent running with graceful shutdown
+    from shared.resilience import GracefulShutdown
+
+    async with GracefulShutdown("QA Manager") as shutdown:
+        while not shutdown.should_stop:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("QA Manager agent shutting down...")
-    except Exception as e:
-        logger.error(f"QA Manager agent error: {e}")
 
 
 if __name__ == "__main__":

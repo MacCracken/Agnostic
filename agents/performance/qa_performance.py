@@ -542,13 +542,12 @@ async def main():
         "Performance & Resilience agent started with Celery worker and Redis listener"
     )
 
-    try:
-        while True:
+    # Keep the agent running with graceful shutdown
+    from shared.resilience import GracefulShutdown
+
+    async with GracefulShutdown("Performance & Resilience") as shutdown:
+        while not shutdown.should_stop:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Performance & Resilience agent shutting down...")
-    except Exception as e:
-        logger.error(f"Performance & Resilience agent error: {e}")
 
 
 if __name__ == "__main__":

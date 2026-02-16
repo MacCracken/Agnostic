@@ -1815,13 +1815,12 @@ async def main():
         "Security & Compliance agent started with Celery worker and Redis listener"
     )
 
-    try:
-        while True:
+    # Keep the agent running with graceful shutdown
+    from shared.resilience import GracefulShutdown
+
+    async with GracefulShutdown("Security & Compliance") as shutdown:
+        while not shutdown.should_stop:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Security & Compliance agent shutting down...")
-    except Exception as e:
-        logger.error(f"Security & Compliance agent error: {e}")
 
 
 if __name__ == "__main__":

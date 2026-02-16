@@ -1715,14 +1715,12 @@ async def main():
 
     logger.info("Senior QA agent started with Celery worker and Redis listener")
 
-    # Keep the agent running
-    try:
-        while True:
+    # Keep the agent running with graceful shutdown
+    from shared.resilience import GracefulShutdown
+
+    async with GracefulShutdown("Senior QA") as shutdown:
+        while not shutdown.should_stop:
             await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Senior QA agent shutting down...")
-    except Exception as e:
-        logger.error(f"Senior QA agent error: {e}")
 
 
 if __name__ == "__main__":

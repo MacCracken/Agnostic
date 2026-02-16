@@ -10,7 +10,7 @@ import os
 import secrets
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -478,18 +478,18 @@ class AuthManager:
                 "role": user.role.value,
                 "permissions": [p.value for p in user.permissions],
                 "type": "access",
-                "exp": datetime.utcnow()
+                "exp": datetime.now(timezone.utc)
                 + timedelta(minutes=self.access_token_expire_minutes),
-                "iat": datetime.utcnow(),
+                "iat": datetime.now(timezone.utc),
             }
 
             # Refresh token payload
             refresh_payload = {
                 "user_id": user.user_id,
                 "type": "refresh",
-                "exp": datetime.utcnow()
+                "exp": datetime.now(timezone.utc)
                 + timedelta(days=self.refresh_token_expire_days),
-                "iat": datetime.utcnow(),
+                "iat": datetime.now(timezone.utc),
             }
 
             # Generate tokens

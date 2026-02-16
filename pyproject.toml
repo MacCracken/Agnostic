@@ -98,6 +98,10 @@ browser = [
     "playwright>=1.45.0",
     "appium-python-client>=5.0.0",
 ]
+observability = [
+    "prometheus-client>=0.20.0",
+    "structlog>=24.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/your-org/agnostic-qa-system"

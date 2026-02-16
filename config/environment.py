@@ -100,6 +100,11 @@ class Config:
             task_soft_time_limit=25 * 60,  # 25 minutes
             worker_prefetch_multiplier=1,
             worker_max_tasks_per_child=1000,
+            task_acks_late=True,
+            task_reject_on_worker_lost=True,
+            task_default_retry_delay=60,
+            task_max_retries=3,
+            worker_cancel_long_running_tasks_on_connection_loss=True,
         )
 
         return app

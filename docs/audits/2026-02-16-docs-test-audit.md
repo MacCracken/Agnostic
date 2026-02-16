@@ -109,6 +109,15 @@ The following Critical/High priority issues from the audit have been resolved:
 14. **CI/CD Missing Security Scan** — Resolved: Added Bandit security scan and Helm lint jobs
 15. **Test Coverage Gaps** — Resolved: 48 new unit tests for agent_registry, webgui auth, webgui exports, webgui API, config environment
 
+## Resolved Items (2026-02-16 Phase 3)
+
+16. **No Observability Infrastructure** — Resolved: `shared/metrics.py` (Prometheus metrics with no-op fallback), `shared/logging_config.py` (structured logging), `/api/metrics` endpoint, LLM call instrumentation (ADR-015)
+17. **No Circuit Breaker for LLM Calls** — Resolved: `CircuitBreaker` in `shared/resilience.py`, wired into all 6 LLM methods in `config/llm_integration.py` (ADR-016)
+18. **No Celery Retry/Reliability Config** — Resolved: `task_acks_late`, `task_reject_on_worker_lost`, retry config in `config/environment.py` (ADR-016)
+19. **No Graceful Shutdown** — Resolved: `GracefulShutdown` context manager replaces bare `except KeyboardInterrupt` in all 6 agents (ADR-016)
+20. **`datetime.utcnow()` Deprecation** — Resolved: 4 occurrences in `webgui/auth.py` replaced with `datetime.now(timezone.utc)`
+21. **Pydantic Test Collection Errors** — Resolved: Broadened except clauses in 7 agent tool test files
+
 ## Remaining Items
 1. Integration tests for Celery task routing (carried from 2026-02-11 audit)
 2. Explicit schemas for agent result payloads

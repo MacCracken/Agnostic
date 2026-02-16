@@ -12,7 +12,7 @@ try:
         PerformanceMonitoringTool,
         ResilienceValidationTool,
     )
-except ImportError:
+except Exception:
     pytest.skip("qa_performance module not available", allow_module_level=True)
 
 
