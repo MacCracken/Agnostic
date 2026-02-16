@@ -287,9 +287,9 @@ Frontend assets are organized in `webgui/static/`:
 
 ## Full Documentation
 
-For comprehensive documentation, see the [doc/](doc/) directory:
-- [Quick Start Guide](doc/getting-started/quick-start.md)
-- [Deployment Guides](doc/deployment/)
-- [Development Setup](doc/development/setup.md)
-- [Agent Documentation](doc/agents/)
-- [Project Roadmap](doc/project/roadmap.md)
+For comprehensive documentation, see the [docs/](docs/) directory:
+- [Quick Start Guide](docs/getting-started/quick-start.md)
+- [Deployment Guides](docs/deployment/)
+- [Development Setup](docs/development/setup.md)
+- [Agent Documentation](docs/agents/)
+- [Project Roadmap](docs/project/roadmap.md)

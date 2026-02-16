@@ -23,7 +23,7 @@ docker-compose up --build -d
 open http://localhost:8000
 ```
 
-[Full Quick Start Guide →](doc/getting-started/quick-start.md)
+[Full Quick Start Guide →](docs/getting-started/quick-start.md)
 
 ## 6-Agent Architecture
 
@@ -49,20 +49,20 @@ Performance & Resilience Agent      ─┘
 
 | Guide | Description |
 |-------|-------------|
-| [Quick Start](doc/getting-started/quick-start.md) | Get running in 5 minutes |
-| [Docker Deployment](doc/deployment/docker-compose.md) | Local & production Docker setup |
-| [Kubernetes Deployment](doc/deployment/kubernetes.md) | Production K8s with Helm |
-| [Development Setup](doc/development/setup.md) | Local development guide |
-| [Agent Docs](doc/agents/index.md) | Agent architecture details |
-| [Contributing](doc/development/contributing.md) | Contribution guidelines |
-| [Changelog](doc/project/changelog.md) | Version history |
-| [Roadmap](doc/project/roadmap.md) | Future plans |
+| [Quick Start](docs/getting-started/quick-start.md) | Get running in 5 minutes |
+| [Docker Deployment](docs/deployment/docker-compose.md) | Local & production Docker setup |
+| [Kubernetes Deployment](docs/deployment/kubernetes.md) | Production K8s with Helm |
+| [Development Setup](docs/development/setup.md) | Local development guide |
+| [Agent Docs](docs/agents/index.md) | Agent architecture details |
+| [Contributing](docs/development/contributing.md) | Contribution guidelines |
+| [Changelog](docs/project/changelog.md) | Version history |
+| [Roadmap](docs/project/roadmap.md) | Future plans |
 
 ### Additional Resources
 
 - [Architecture Decision Records](docs/adr/) - System design decisions
 - [API Documentation](docs/api/) - Agent, WebGUI, LLM APIs
-- [Security Assessment](doc/security/assessment.md) - Security findings
+- [Security Assessment](docs/security/assessment.md) - Security findings
 - [Docker Build](docker/README.md) - Build optimization
 - [Helm Chart](k8s/helm/agentic-qa/README.md) - K8s deployment
 
@@ -77,7 +77,7 @@ Performance & Resilience Agent      ─┘
 docker-compose up -d
 ```
 
-[Docker Deployment Guide →](doc/deployment/docker-compose.md)
+[Docker Deployment Guide →](docs/deployment/docker-compose.md)
 
 ### Kubernetes (Production)
 
@@ -89,7 +89,7 @@ helm install agentic-qa ./k8s/helm/agentic-qa \
   --set secrets.openaiApiKey=$(echo -n "your-key" | base64)
 ```
 
-[Kubernetes Deployment Guide →](doc/deployment/kubernetes.md)
+[Kubernetes Deployment Guide →](docs/deployment/kubernetes.md)
 
 ## Usage Example
 
@@ -129,7 +129,7 @@ result = await manager.orchestrate_qa_session({
 
 ## Contributing
 
-See [Contributing Guidelines](doc/development/contributing.md).
+See [Contributing Guidelines](docs/development/contributing.md).
 
 ## License
 
@@ -137,4 +137,4 @@ MIT License - see [LICENSE](LICENSE) file.
 
 ---
 
-*Last Updated: 2026-02-16* | [Documentation](doc/README.md) | [Changelog](doc/project/changelog.md)
+*Last Updated: 2026-02-16* | [Documentation](docs/README.md) | [Changelog](docs/project/changelog.md)

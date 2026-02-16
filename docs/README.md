@@ -28,12 +28,12 @@ Welcome to the Agentic QA Team System documentation. This directory contains com
 ## External Documentation
 
 ### API Documentation
-- [Agent APIs](../docs/api/agents.md)
-- [WebGUI APIs](../docs/api/webgui.md)
-- [LLM Integration](../docs/api/llm_integration.md)
+- [Agent APIs](api/agents.md)
+- [WebGUI APIs](api/webgui.md)
+- [LLM Integration](api/llm_integration.md)
 
 ### Architecture Decision Records
-- [ADR Index](../docs/adr/README.md) - System design decisions
+- [ADR Index](adr/README.md) - System design decisions
 
 ### Additional Guides
 - [Docker Build Optimization](../docker/README.md)
