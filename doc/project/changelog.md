@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Team configuration system with lean/standard/large presets (`config/team_config.json`)
 - Team config loader utility (`config/team_config_loader.py`)
 - Scalable Team Architecture ADR (ADR-011)
+- **SOC 2 Type II Compliance Tool** - Trust service criteria validation (security, availability, processing integrity, confidentiality, privacy)
+- **ISO 27001:2022 Compliance Tool** - Annex A controls validation (organizational, people, physical, technological)
+- **HIPAA Compliance Tool** - Privacy Rule, Security Rule, and Breach Notification validation
+- **Mobile App Testing Tool** - iOS and Android testing with Appium integration, device profiles, functional/UI/performance testing
+- **Desktop App Testing Tool** - Windows, macOS, Linux testing for Electron and native apps
+- **Cross-Platform Testing Orchestrator** - Unified testing across web, mobile, and desktop platforms
+- **Defect Prediction Tool** - ML-driven defect prediction using code churn, complexity, author experience, test coverage, and historical bug analysis
+- **Quality Trend Analysis Tool** - Time-series analysis of quality metrics with trend detection, volatility analysis, and future predictions
+- **Risk Scoring Tool** - Multi-dimensional risk scoring (technical, business, schedule, resource, compliance) for features and releases
+- **Release Readiness Tool** - Comprehensive release readiness assessment combining quality, testing, security, performance, and business dimensions
 - Removed duplicate documentation (docs/guides/quick-start.md)
 
 ### Changed

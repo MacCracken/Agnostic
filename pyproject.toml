@@ -87,6 +87,7 @@ ml = [
 ]
 browser = [
     "playwright>=1.45.0",
+    "appium-python-client>=5.0.0",
 ]
 
 [project.urls]

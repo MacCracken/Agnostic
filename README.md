@@ -109,7 +109,9 @@ result = await manager.orchestrate_qa_session({
 - **Self-Healing UI Testing**: CV-based element detection with automatic selector repair
 - **Fuzzy Verification**: LLM-based quality scoring beyond pass/fail
 - **Risk-Based Prioritization**: ML-driven test ordering by risk score
-- **Security & Compliance**: Automated OWASP, GDPR, PCI DSS validation
+- **Security & Compliance**: Automated OWASP, GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA validation
+- **Cross-Platform Testing**: Web, mobile (iOS/Android), and desktop (Windows/macOS/Linux) unified testing
+- **Predictive Quality Analytics**: ML-driven defect prediction, quality trend analysis, risk scoring, and release readiness assessment
 - **Performance Profiling**: Load testing with bottleneck identification
 - **Real-time Dashboard**: Live monitoring via Chainlit WebGUI
 

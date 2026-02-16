@@ -318,7 +318,7 @@ class OptimizedQAManager:
                         "id": "security_audit",
                         "name": "Security & Compliance Audit",
                         "target_url": task_data.get("target_url", "http://localhost:8000"),
-                        "standards": task_data.get("compliance_standards", ["GDPR", "PCI DSS", "OWASP"])
+                        "standards": task_data.get("compliance_standards", ["GDPR", "PCI DSS", "OWASP", "SOC 2", "ISO 27001", "HIPAA"])
                     },
                     "priority": test_plan.get("priority_matrix", {}).get("security_critical", "critical")
                 }
@@ -565,7 +565,7 @@ async def main():
         "requirements": "Comprehensive testing of user authentication system with performance, security, and UX validation",
         "target_url": "http://localhost:8000",
         "load_profile": "moderate",
-        "compliance_standards": ["GDPR", "PCI DSS"],
+        "compliance_standards": ["GDPR", "PCI DSS", "SOC 2", "ISO 27001", "HIPAA"],
         "wcag_level": "AA"
     }
 

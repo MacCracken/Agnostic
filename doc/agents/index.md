@@ -10,7 +10,7 @@
 | **Senior QA Engineer** | Self-healing UI, model-based testing, edge cases | Complex Testing | `agents/senior/senior_qa.py` |
 | **Junior QA Worker** | Regression execution, data generation, optimization | Test Automation | `agents/junior/junior_qa.py` |
 | **QA Analyst** | Reporting, security assessment, performance profiling | Analysis & Reporting | `agents/analyst/qa_analyst.py` |
-| **Security & Compliance Agent** | OWASP, GDPR, PCI DSS | Security & Compliance | `agents/security_compliance/README.md` |
+| **Security & Compliance Agent** | OWASP, GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA | Security & Compliance | `agents/security_compliance/qa_security_compliance.py` |
 | **Performance & Resilience Agent** | Load testing, performance monitoring, resilience checks | Performance & Reliability | `agents/performance/README.md` |
 
 ---
@@ -33,7 +33,7 @@
 - EdgeCaseAnalysisTool
 
 ### Junior QA Worker
-**Focus**: Regression execution, synthetic data, test ordering optimization, UX testing, localization.
+**Focus**: Regression execution, synthetic data, test ordering optimization, UX testing, localization, cross-platform testing.
 
 **Key tools**:
 - RegressionTestingTool
@@ -43,23 +43,33 @@
 - FlakyTestDetectionTool
 - UXUsabilityTestingTool
 - LocalizationTestingTool
+- MobileAppTestingTool
+- DesktopAppTestingTool
+- CrossPlatformTestingTool
 
 ### QA Analyst
-**Focus**: Aggregation, reporting, security and performance analysis, traceability.
+**Focus**: Aggregation, reporting, security and performance analysis, traceability, predictive analytics.
 
 **Key tools**:
 - DataOrganizationReportingTool
 - SecurityAssessmentTool
 - PerformanceProfilingTool
 - TestTraceabilityTool
+- DefectPredictionTool
+- QualityTrendAnalysisTool
+- RiskScoringTool
+- ReleaseReadinessTool
 
 ### Security & Compliance Agent
-**Focus**: OWASP, GDPR, PCI DSS.
+**Focus**: OWASP, GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA.
 
 **Key tools**:
 - ComprehensiveSecurityAssessmentTool
 - GDPRComplianceTool
 - PCIDSSComplianceTool
+- SOC2ComplianceTool
+- ISO27001ComplianceTool
+- HIPAAComplianceTool
 
 ### Performance & Resilience Agent
 **Focus**: Performance monitoring, load testing, resilience validation, advanced profiling.
