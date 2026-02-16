@@ -25,12 +25,15 @@
 - FuzzyVerificationTool
 
 ### Senior QA Engineer
-**Focus**: Self-healing UI, model-based testing, edge case analysis.
+**Focus**: Self-healing UI, model-based testing, edge case analysis, AI-driven test generation.
 
 **Key tools**:
 - SelfHealingTool
 - ModelBasedTestingTool
 - EdgeCaseAnalysisTool
+- AITestGenerationTool
+- CodeAnalysisTestGeneratorTool
+- AutonomousTestDataGeneratorTool
 
 ### Junior QA Worker
 **Focus**: Regression execution, synthetic data, test ordering optimization, UX testing, localization, cross-platform testing.

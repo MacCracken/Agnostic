@@ -387,7 +387,7 @@ async def on_message(message: cl.Message) -> Dict[str, Any]:
         else:
             await cl.Message(content="📝 No resilience validation available yet.").send()
 
-    elif user_input.lower() in ("compliance", "gdpr", "pci", "compliance report"):
+    elif user_input.lower() in ("compliance", "gdpr", "pci", "compliance report", "soc2", "iso27001", "hipaa"):
         comp_data = gui_instance.redis_client.get(f"security_compliance:{session_id}:audit")
         if comp_data:
             try:
@@ -401,11 +401,168 @@ async def on_message(message: cl.Message) -> Dict[str, Any]:
                 pci = comp.get("pci_dss_compliance", {})
                 response += f"**PCI DSS:** {pci.get('pci_score', 'N/A')}% ({pci.get('violations_count', 0)} violations)\n"
 
+                soc2 = comp.get("soc2_score", {})
+                if soc2:
+                    response += f"**SOC 2:** {soc2.get('soc2_score', 'N/A')}% ({soc2.get('violations_count', 0)} violations)\n"
+
+                iso = comp.get("iso27001_score", {})
+                if iso:
+                    response += f"**ISO 27001:** {iso.get('iso27001_score', 'N/A')}% ({iso.get('violations_count', 0)} violations)\n"
+
+                hipaa = comp.get("hipaa_score", {})
+                if hipaa:
+                    response += f"**HIPAA:** {hipaa.get('hipaa_score', 'N/A')}% ({hipaa.get('violations_count', 0)} violations)\n"
+
                 await cl.Message(content=response).send()
             except json.JSONDecodeError:
                 await cl.Message(content="❌ Could not parse compliance data.").send()
         else:
             await cl.Message(content="📝 No compliance audit available yet.").send()
+
+    elif user_input.lower() in ("predict", "prediction", "defect prediction", "predictive"):
+        pred_data = gui_instance.redis_client.get(f"analyst:{session_id}:prediction")
+        if not pred_data:
+            pred_data = gui_instance.redis_client.get(f"analyst:{session_id}:defect_prediction")
+        if pred_data:
+            try:
+                pred = json.loads(pred_data)
+                response = "🔮 **Defect Prediction & Risk Analysis**\n\n"
+                
+                if "defect_prediction" in pred:
+                    dp = pred["defect_prediction"]
+                    response += f"**Predicted Defects:** {dp.get('total_predicted_defects', 'N/A')}\n"
+                    response += f"**Confidence:** {dp.get('confidence', 'N/A')}\n\n"
+                    
+                    high_risk = dp.get("high_risk_areas", [])
+                    if high_risk:
+                        response += "**High Risk Areas:**\n"
+                        for area in high_risk[:5]:
+                            response += f"  • {area.get('component', 'N/A')} - Risk: {area.get('risk_score', 'N/A')}\n"
+                
+                if "component_risk_scores" in pred:
+                    response += "\n**Component Risk Scores:**\n"
+                    for comp, score in pred["component_risk_scores"].items():
+                        response += f"  • {comp}: {score}\n"
+                
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse prediction data.").send()
+        else:
+            await cl.Message(content="📝 No predictive analytics available yet. Run a full QA session first.").send()
+
+    elif user_input.lower() in ("trend", "quality trend", "trends"):
+        trend_data = gui_instance.redis_client.get(f"analyst:{session_id}:quality_trend")
+        if trend_data:
+            try:
+                trend = json.loads(trend_data)
+                response = "📈 **Quality Trend Analysis**\n\n"
+                response += f"**Trend Direction:** {trend.get('trend_direction', 'N/A')}\n"
+                response += f"**Quality Score:** {trend.get('quality_trend', 'N/A')}\n"
+                response += f"**Volatility:** {trend.get('volatility', 'N/A')}\n\n"
+                
+                if "predictions" in trend:
+                    pred = trend["predictions"]
+                    response += "**7-Day Predictions:**\n"
+                    response += f"  • Pass Rate: {pred.get('predicted_pass_rate_7d', 'N/A')}%\n"
+                    response += f"  • Predicted Defects: {pred.get('predicted_defects_7d', 'N/A')}\n"
+                
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse trend data.").send()
+        else:
+            await cl.Message(content="📝 No quality trend data available yet.").send()
+
+    elif user_input.lower() in ("risk", "risk score"):
+        risk_data = gui_instance.redis_client.get(f"analyst:{session_id}:risk_scoring")
+        if risk_data:
+            try:
+                risk = json.loads(risk_data)
+                response = "⚠️ **Risk Scoring**\n\n"
+                response += f"**Portfolio Risk Score:** {risk.get('portfolio_risk_score', 'N/A')}\n"
+                response += f"**Risk Level:** {risk.get('portfolio_risk_level', 'N/A')}\n"
+                response += f"**High Risk Features:** {risk.get('high_risk_count', 'N/A')}\n\n"
+                
+                if "feature_risks" in risk:
+                    response += "**Top Risk Features:**\n"
+                    for feature in risk["feature_risks"][:5]:
+                        response += f"  • {feature.get('feature_name', 'N/A')} - {feature.get('risk_level', 'N/A')}\n"
+                
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse risk data.").send()
+        else:
+            await cl.Message(content="📝 No risk scoring data available yet.").send()
+
+    elif user_input.lower() in ("release", "release readiness", "ready"):
+        readiness_data = gui_instance.redis_client.get(f"analyst:{session_id}:release_readiness")
+        if readiness_data:
+            try:
+                readiness = json.loads(readiness_data)
+                rr = readiness.get("release_readiness", {})
+                response = "🚀 **Release Readiness Assessment**\n\n"
+                response += f"**Overall Score:** {rr.get('overall_score', 'N/A')}/100\n"
+                response += f"**Readiness Level:** {rr.get('readiness_level', 'N/A')}\n"
+                response += f"**Ready for Release:** {'✅ Yes' if rr.get('ready_for_release') else '❌ No'}\n"
+                response += f"**Confidence:** {rr.get('confidence', 'N/A')}\n\n"
+                
+                if "dimension_scores" in readiness:
+                    response += "**Dimension Scores:**\n"
+                    for dim, score in readiness["dimension_scores"].items():
+                        response += f"  • {dim.capitalize()}: {score}\n"
+                
+                blockers = readiness.get("blockers", [])
+                if blockers:
+                    response += "\n**🚫 Blockers:**\n"
+                    for b in blockers:
+                        response += f"  • {b.get('description', 'N/A')}\n"
+                
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse readiness data.").send()
+        else:
+            await cl.Message(content="📝 No release readiness data available yet.").send()
+
+    elif user_input.lower() in ("mobile", "desktop", "cross-platform", "cross platform"):
+        cross_data = gui_instance.redis_client.get(f"junior:{session_id}:cross_platform")
+        if cross_data:
+            try:
+                cross = json.loads(cross_data)
+                response = "📱 **Cross-Platform Testing Results**\n\n"
+                response += f"**Overall Score:** {cross.get('overall_score', 'N/A')}\n\n"
+                
+                if "platform_results" in cross:
+                    for platform, result in cross["platform_results"].items():
+                        response += f"**{platform.capitalize()}:** {result.get('score', result.get('mobile_score', result.get('desktop_score', 'N/A')))}%\n"
+                
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse cross-platform data.").send()
+        else:
+            await cl.Message(content="📝 No cross-platform testing data available yet.").send()
+
+    elif user_input.lower() in ("ai test", "ai generated", "test generation"):
+        ai_data = gui_instance.redis_client.get(f"senior:{session_id}:ai_test_generation")
+        if ai_data:
+            try:
+                ai = json.loads(ai_data)
+                response = "🤖 **AI-Enhanced Test Generation**\n\n"
+                
+                if "total_test_cases" in ai:
+                    response += f"**Test Cases Generated:** {ai.get('total_test_cases', 'N/A')}\n"
+                
+                if "coverage_analysis" in ai:
+                    cov = ai["coverage_analysis"]
+                    response += "\n**Coverage Analysis:**\n"
+                    response += f"  • Functional: {cov.get('functional_coverage', 'N/A')}%\n"
+                    response += f"  • Edge Case: {cov.get('edge_case_coverage', 'N/A')}%\n"
+                    response += f"  • Negative: {cov.get('negative_coverage', 'N/A')}%\n"
+                    response += f"  • Boundary: {cov.get('boundary_coverage', 'N/A')}%\n"
+                
+                await cl.Message(content=response).send()
+            except json.JSONDecodeError:
+                await cl.Message(content="❌ Could not parse AI test data.").send()
+        else:
+            await cl.Message(content="📝 No AI test generation data available yet.").send()
 
     else:
         # General help message
@@ -418,7 +575,13 @@ async def on_message(message: cl.Message) -> Dict[str, Any]:
             "• **'security'** - View security assessment\n"
             "• **'performance'** - View performance profile\n"
             "• **'resilience'** - View resilience validation\n"
-            "• **'compliance'** - View GDPR/PCI compliance\n"
+            "• **'compliance'** - View compliance (GDPR/PCI/SOC2/ISO27001/HIPAA)\n"
+            "• **'predict'** - View defect prediction & risk analysis\n"
+            "• **'trend'** - View quality trend analysis\n"
+            "• **'risk'** - View risk scoring\n"
+            "• **'release'** - View release readiness assessment\n"
+            "• **'mobile'** - View cross-platform mobile testing\n"
+            "• **'ai test'** - View AI-generated test cases\n"
             "• **'help'** - Show this help message\n\n"
             "You can also upload a PR or feature document to get started!"
         ).send()

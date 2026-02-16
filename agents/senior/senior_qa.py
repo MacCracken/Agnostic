@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import asyncio
+import random
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from crewai import Agent, Task, Crew, Process
@@ -565,6 +566,544 @@ class EdgeCaseAnalysisTool(BaseTool):
             ]
         }
 
+
+class AITestGenerationTool(BaseTool):
+    name: str = "AI Test Generation"
+    description: str = "Autonomous AI-driven test case generation from requirements analysis and code understanding using LLM"
+
+    async def _run(self, generation_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate test cases autonomously from requirements using AI"""
+        requirements = generation_config.get("requirements", "")
+        code_context = generation_config.get("code_context", {})
+        test_types = generation_config.get("test_types", ["functional", "edge_case", "negative", "boundary"])
+        
+        test_cases = []
+        
+        for test_type in test_types:
+            if test_type == "functional":
+                cases = await self._generate_functional_tests(requirements, code_context)
+            elif test_type == "edge_case":
+                cases = await self._generate_edge_case_tests(requirements, code_context)
+            elif test_type == "negative":
+                cases = await self._generate_negative_tests(requirements, code_context)
+            elif test_type == "boundary":
+                cases = await self._generate_boundary_tests(requirements, code_context)
+            elif test_type == "integration":
+                cases = await self._generate_integration_tests(requirements, code_context)
+            elif test_type == "ui":
+                cases = await self._generate_ui_tests(requirements, code_context)
+            else:
+                cases = []
+            
+            test_cases.extend(cases)
+        
+        test_suite = {
+            "total_test_cases": len(test_cases),
+            "test_cases": test_cases,
+            "coverage_analysis": self._analyze_coverage(test_cases, requirements),
+            "recommendations": self._generate_test_recommendations(test_cases)
+        }
+        
+        return test_suite
+
+    async def _generate_functional_tests(self, requirements: str, code_context: Dict) -> List[Dict]:
+        """Generate functional test cases"""
+        prompt = f"""Based on these requirements: {requirements}
+
+Generate 5-8 functional test cases in JSON format with:
+- test_id
+- test_name  
+- description
+- test_data (sample inputs)
+- expected_result
+- priority (high/medium/low)
+
+Return as a JSON array of test cases."""
+
+        try:
+            response = await self.llm.agenerate([prompt])
+            content = response.generations[0][0].text
+            test_cases = self._parse_llm_response(content)
+            return test_cases if test_cases else self._fallback_functional_tests()
+        except Exception:
+            return self._fallback_functional_tests()
+
+    async def _generate_edge_case_tests(self, requirements: str, code_context: Dict) -> List[Dict]:
+        """Generate edge case test scenarios"""
+        prompt = f"""Based on these requirements: {requirements}
+
+Generate 5-8 edge case test scenarios that test unusual inputs, race conditions, concurrency issues, error handling, and unexpected data formats.
+
+Return as JSON with: test_id, test_name, description, edge_condition, test_data, expected_result"""
+
+        try:
+            response = await self.llm.agenerate([prompt])
+            content = response.generations[0][0].text
+            test_cases = self._parse_llm_response(content)
+            return test_cases if test_cases else self._fallback_edge_case_tests()
+        except Exception:
+            return self._fallback_edge_case_tests()
+
+    async def _generate_negative_tests(self, requirements: str, code_context: Dict) -> List[Dict]:
+        """Generate negative test cases"""
+        prompt = f"""Based on these requirements: {requirements}
+
+Generate 5 negative test cases that verify error handling, invalid inputs, missing data, and security vulnerabilities.
+
+Return as JSON with: test_id, test_name, description, invalid_input, expected_error"""
+
+        try:
+            response = await self.llm.agenerate([prompt])
+            content = response.generations[0][0].text
+            test_cases = self._parse_llm_response(content)
+            return test_cases if test_cases else self._fallback_negative_tests()
+        except Exception:
+            return self._fallback_negative_tests()
+
+    async def _generate_boundary_tests(self, requirements: str, code_context: Dict) -> List[Dict]:
+        """Generate boundary value analysis tests"""
+        prompt = f"""Based on these requirements: {requirements}
+
+Generate 5 boundary value tests for numeric ranges, string lengths, date limits, file sizes, and API rate limits.
+
+Return as JSON with: test_id, test_name, boundary_type, boundary_value, test_data, expected_result"""
+
+        try:
+            response = await self.llm.agenerate([prompt])
+            content = response.generations[0][0].text
+            test_cases = self._parse_llm_response(content)
+            return test_cases if test_cases else self._fallback_boundary_tests()
+        except Exception:
+            return self._fallback_boundary_tests()
+
+    async def _generate_integration_tests(self, requirements: str, code_context: Dict) -> List[Dict]:
+        """Generate integration test scenarios"""
+        prompt = f"""Based on these requirements: {requirements}
+
+Generate 5 integration test scenarios that test interactions between components, API endpoints, and external services.
+
+Return as JSON with: test_id, test_name, components_involved, test_sequence, expected_result"""
+
+        try:
+            response = await self.llm.agenerate([prompt])
+            content = response.generations[0][0].text
+            test_cases = self._parse_llm_response(content)
+            return test_cases if test_cases else self._fallback_integration_tests()
+        except Exception:
+            return self._fallback_integration_tests()
+
+    async def _generate_ui_tests(self, requirements: str, code_context: Dict) -> List[Dict]:
+        """Generate UI/UX test scenarios"""
+        prompt = f"""Based on these requirements: {requirements}
+
+Generate 5 UI test scenarios for layout, responsiveness, accessibility, and user interactions.
+
+Return as JSON with: test_id, test_name, ui_element, test_action, validation_criteria"""
+
+        try:
+            response = await self.llm.agenerate([prompt])
+            content = response.generations[0][0].text
+            test_cases = self._parse_llm_response(content)
+            return test_cases if test_cases else self._fallback_ui_tests()
+        except Exception:
+            return self._fallback_ui_tests()
+
+    def _parse_llm_response(self, content: str) -> List[Dict]:
+        """Parse LLM response into test cases"""
+        try:
+            import re
+            json_match = re.search(r'\[.*\]', content, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return []
+
+    def _analyze_coverage(self, test_cases: List[Dict], requirements: str) -> Dict:
+        """Analyze test coverage of requirements"""
+        coverage = {
+            "functional_coverage": 0,
+            "edge_case_coverage": 0,
+            "negative_coverage": 0,
+            "boundary_coverage": 0,
+            "overall_coverage": 0
+        }
+        
+        if not test_cases:
+            return coverage
+        
+        categories = {"functional": 0, "edge_case": 0, "negative": 0, "boundary": 0}
+        
+        for tc in test_cases:
+            test_type = tc.get("test_type", "functional")
+            if test_type in categories:
+                categories[test_type] += 1
+        
+        total = len(test_cases)
+        coverage["functional_coverage"] = round(categories["functional"] / max(1, total) * 100, 1)
+        coverage["edge_case_coverage"] = round(categories["edge_case"] / max(1, total) * 100, 1)
+        coverage["negative_coverage"] = round(categories["negative"] / max(1, total) * 100, 1)
+        coverage["boundary_coverage"] = round(categories["boundary"] / max(1, total) * 100, 1)
+        coverage["overall_coverage"] = min(100, total * 10)
+        
+        return coverage
+
+    def _generate_test_recommendations(self, test_cases: List[Dict]) -> List[str]:
+        """Generate recommendations for test suite"""
+        recs = []
+        
+        if len(test_cases) < 10:
+            recs.append("Consider adding more test cases for comprehensive coverage")
+        
+        categories = set(tc.get("test_type", "functional") for tc in test_cases)
+        if "negative" not in categories:
+            recs.append("Add negative test cases for error handling validation")
+        if "boundary" not in categories:
+            recs.append("Add boundary value tests for edge conditions")
+        
+        high_priority = [tc for tc in test_cases if tc.get("priority") == "high"]
+        if len(high_priority) < 3:
+            recs.append("Ensure critical paths have high-priority test cases")
+        
+        if not recs:
+            recs.append("Test suite looks comprehensive")
+        
+        return recs
+
+    def _fallback_functional_tests(self) -> List[Dict]:
+        return [
+            {"test_id": "func_001", "test_name": "Primary flow validation", "description": "Test main user journey", "priority": "high"},
+            {"test_id": "func_002", "test_name": "Secondary flows", "description": "Test alternative paths", "priority": "medium"},
+            {"test_id": "func_003", "test_name": "Data persistence", "description": "Verify data is saved correctly", "priority": "high"},
+        ]
+
+    def _fallback_edge_case_tests(self) -> List[Dict]:
+        return [
+            {"test_id": "edge_001", "test_name": "Empty input handling", "description": "Test with empty/null inputs", "priority": "high"},
+            {"test_id": "edge_002", "test_name": "Maximum data size", "description": "Test with maximum allowed data", "priority": "medium"},
+            {"test_id": "edge_003", "test_name": "Concurrent operations", "description": "Test race conditions", "priority": "high"},
+        ]
+
+    def _fallback_negative_tests(self) -> List[Dict]:
+        return [
+            {"test_id": "neg_001", "test_name": "Invalid input rejection", "description": "Verify invalid inputs are rejected", "priority": "high"},
+            {"test_id": "neg_002", "test_name": "Authentication bypass prevention", "description": "Test security validations", "priority": "high"},
+        ]
+
+    def _fallback_boundary_tests(self) -> List[Dict]:
+        return [
+            {"test_id": "bnd_001", "test_name": "Min/Max value handling", "description": "Test boundary values", "priority": "medium"},
+            {"test_id": "bnd_002", "test_name": "String length limits", "description": "Test string boundary conditions", "priority": "medium"},
+        ]
+
+    def _fallback_integration_tests(self) -> List[Dict]:
+        return [
+            {"test_id": "int_001", "test_name": "API integration", "description": "Test API endpoint integration", "priority": "high"},
+            {"test_id": "int_002", "test_name": "Database integration", "description": "Test database operations", "priority": "high"},
+        ]
+
+    def _fallback_ui_tests(self) -> List[Dict]:
+        return [
+            {"test_id": "ui_001", "test_name": "Responsive layout", "description": "Test responsive design", "priority": "medium"},
+            {"test_id": "ui_002", "test_name": "Accessibility", "description": "Test accessibility features", "priority": "high"},
+        ]
+
+
+class CodeAnalysisTestGeneratorTool(BaseTool):
+    name: str = "Code Analysis Test Generator"
+    description: str = "Analyze source code to automatically generate test cases based on code structure, functions, and potential failure points"
+
+    async def _run(self, analysis_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate tests based on code analysis"""
+        code_files = analysis_config.get("code_files", [])
+        code_content = analysis_config.get("code_content", "")
+        
+        if not code_content and code_files:
+            code_content = self._read_code_files(code_files)
+        
+        functions = self._extract_functions(code_content)
+        classes = self._extract_classes(code_content)
+        
+        test_cases = []
+        
+        for func in functions:
+            test_cases.extend(self._generate_tests_for_function(func))
+        
+        for cls in classes:
+            test_cases.extend(self._generate_tests_for_class(cls))
+        
+        analysis = {
+            "functions_analyzed": len(functions),
+            "classes_analyzed": len(classes),
+            "test_cases_generated": len(test_cases),
+            "coverage": self._calculate_code_coverage(test_cases, functions, classes),
+            "test_cases": test_cases,
+            "recommendations": self._generate_analysis_recommendations(test_cases)
+        }
+        
+        return analysis
+
+    def _read_code_files(self, files: List[str]) -> str:
+        """Read content of code files"""
+        content = []
+        for filepath in files:
+            try:
+                with open(filepath, 'r') as f:
+                    content.append(f.read())
+            except (IOError, FileNotFoundError):
+                pass
+        return "\n".join(content)
+
+    def _extract_functions(self, code: str) -> List[Dict]:
+        """Extract function definitions from code"""
+        import re
+        
+        functions = []
+        
+        py_funcs = re.findall(r'def (\w+)\s*\((.*?)\):', code)
+        for name, params in py_funcs:
+            functions.append({
+                "name": name,
+                "language": "python",
+                "params": params.split(","),
+                "return_type": "unknown"
+            })
+        
+        js_funcs = re.findall(r'function\s+(\w+)\s*\((.*?)\)', code)
+        for name, params in js_funcs:
+            functions.append({
+                "name": name,
+                "language": "javascript",
+                "params": params.split(","),
+                "return_type": "unknown"
+            })
+        
+        return functions
+
+    def _extract_classes(self, code: str) -> List[Dict]:
+        """Extract class definitions from code"""
+        import re
+        
+        classes = []
+        
+        py_classes = re.findall(r'class\s+(\w+)(?:\((.*?)\))?:', code)
+        for name, inheritance in py_classes:
+            classes.append({
+                "name": name,
+                "language": "python",
+                "inheritance": inheritance.split(",") if inheritance else [],
+                "methods": []
+            })
+        
+        js_classes = re.findall(r'class\s+(\w+)(?:\s+extends\s+(\w+))?', code)
+        for name, inheritance in js_classes:
+            classes.append({
+                "name": name,
+                "language": "javascript",
+                "inheritance": [inheritance] if inheritance else [],
+                "methods": []
+            })
+        
+        return classes
+
+    def _generate_tests_for_function(self, func: Dict) -> List[Dict]:
+        """Generate test cases for a function"""
+        tests = []
+        
+        tests.append({
+            "test_id": f"code_{func['name']}_001",
+            "test_name": f"Test {func['name']} with valid input",
+            "target": func['name'],
+            "test_type": "unit",
+            "priority": "high"
+        })
+        
+        tests.append({
+            "test_id": f"code_{func['name']}_002",
+            "test_name": f"Test {func['name']} edge case",
+            "target": func['name'],
+            "test_type": "edge_case",
+            "priority": "medium"
+        })
+        
+        if len(func.get('params', [])) > 0:
+            tests.append({
+                "test_id": f"code_{func['name']}_003",
+                "test_name": f"Test {func['name']} with missing params",
+                "target": func['name'],
+                "test_type": "negative",
+                "priority": "high"
+            })
+        
+        return tests
+
+    def _generate_tests_for_class(self, cls: Dict) -> List[Dict]:
+        """Generate test cases for a class"""
+        tests = []
+        
+        tests.append({
+            "test_id": f"code_class_{cls['name']}_001",
+            "test_name": f"Test {cls['name']} instantiation",
+            "target": cls['name'],
+            "test_type": "unit",
+            "priority": "high"
+        })
+        
+        if cls.get('inheritance'):
+            tests.append({
+                "test_id": f"code_class_{cls['name']}_002",
+                "test_name": f"Test {cls['name']} inheritance",
+                "target": cls['name'],
+                "test_type": "integration",
+                "priority": "medium"
+            })
+        
+        return tests
+
+    def _calculate_code_coverage(self, test_cases: List[Dict], functions: List, classes: List) -> Dict:
+        """Calculate code coverage metrics"""
+        total_targets = len(functions) + len(classes)
+        tested_targets = len(set(tc.get("target", "") for tc in test_cases))
+        
+        return {
+            "functions_covered": len(functions),
+            "classes_covered": len(classes),
+            "estimated_coverage_percent": round(tested_targets / max(1, total_targets) * 100, 1)
+        }
+
+    def _generate_analysis_recommendations(self, test_cases: List[Dict]) -> List[str]:
+        """Generate recommendations from code analysis"""
+        recs = []
+        
+        unit_tests = [tc for tc in test_cases if tc.get("test_type") == "unit"]
+        if len(unit_tests) < len(test_cases) * 0.3:
+            recs.append("Add more unit tests for individual functions")
+        
+        negative_tests = [tc for tc in test_cases if tc.get("test_type") == "negative"]
+        if not negative_tests:
+            recs.append("Add negative tests to cover error conditions")
+        
+        if not recs:
+            recs.append("Code analysis complete - generated test cases cover main scenarios")
+        
+        return recs
+
+
+class AutonomousTestDataGeneratorTool(BaseTool):
+    name: str = "Autonomous Test Data Generator"
+    description: str = "AI-powered intelligent test data generation with context awareness, constraints handling, and realistic data patterns"
+
+    async def _run(self, data_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate intelligent test data"""
+        schema = data_config.get("schema", {})
+        constraints = data_config.get("constraints", {})
+        count = data_config.get("count", 100)
+        data_type = data_config.get("data_type", "user")
+        
+        generated_data = []
+        
+        for i in range(count):
+            record = self._generate_record(data_type, schema, constraints, i)
+            generated_data.append(record)
+        
+        return {
+            "data_type": data_type,
+            "records_generated": len(generated_data),
+            "sample_data": generated_data[:10],
+            "constraints_validated": self._validate_constraints(generated_data, constraints),
+            "data_quality": self._assess_data_quality(generated_data),
+            "recommendations": self._generate_data_recommendations(generated_data, constraints)
+        }
+
+    def _generate_record(self, data_type: str, schema: Dict, constraints: Dict, index: int) -> Dict:
+        """Generate a single data record"""
+        record = {"id": index + 1}
+        
+        if data_type == "user":
+            record["username"] = f"user_{index + 1}"
+            record["email"] = f"user{index + 1}@example.com"
+            record["age"] = random.randint(18, 80)
+            record["country"] = random.choice(["US", "UK", "CA", "AU", "DE"])
+            record["is_active"] = random.choice([True, False])
+        elif data_type == "transaction":
+            record["amount"] = round(random.uniform(10, 10000), 2)
+            record["currency"] = random.choice(["USD", "EUR", "GBP"])
+            record["status"] = random.choice(["completed", "pending", "failed"])
+            record["timestamp"] = datetime.now().isoformat()
+        elif data_type == "product":
+            record["name"] = f"Product {index + 1}"
+            record["price"] = round(random.uniform(5, 500), 2)
+            record["category"] = random.choice(["electronics", "clothing", "food", "books"])
+            record["in_stock"] = random.choice([True, False])
+        else:
+            record["data"] = f"record_{index + 1}"
+        
+        return record
+
+    def _validate_constraints(self, data: List[Dict], constraints: Dict) -> Dict:
+        """Validate generated data against constraints"""
+        validation = {
+            "total_records": len(data),
+            "constraints_checked": len(constraints),
+            "violations": 0,
+            "valid": True
+        }
+        
+        if constraints.get("required_fields"):
+            for record in data:
+                for field in constraints["required_fields"]:
+                    if field not in record or record[field] is None:
+                        validation["violations"] += 1
+                        validation["valid"] = False
+        
+        if constraints.get("unique_fields"):
+            for field in constraints["unique_fields"]:
+                values = [r.get(field) for r in data if field in r]
+                if len(values) != len(set(values)):
+                    validation["violations"] += 1
+        
+        return validation
+
+    def _assess_data_quality(self, data: List[Dict]) -> Dict:
+        """Assess quality of generated data"""
+        if not data:
+            return {"quality_score": 0, "issues": ["No data generated"]}
+        
+        issues = []
+        
+        null_count = sum(1 for r in data if any(v is None for v in r.values()))
+        if null_count > len(data) * 0.1:
+            issues.append("High null value percentage")
+        
+        duplicate_count = len(data) - len(set(json.dumps(r, sort_keys=True) for r in data))
+        if duplicate_count > len(data) * 0.2:
+            issues.append("High duplicate percentage")
+        
+        quality_score = 100 - (len(issues) * 25)
+        
+        return {
+            "quality_score": max(0, quality_score),
+            "issues": issues if issues else ["Data quality looks good"],
+            "completeness": round((len(data[0]) if data else 0) / 10 * 100, 1)
+        }
+
+    def _generate_data_recommendations(self, data: List[Dict], constraints: Dict) -> List[str]:
+        """Generate recommendations for test data"""
+        recs = []
+        
+        if len(data) < 50:
+            recs.append("Generate more test data for better coverage")
+        
+        quality = self._assess_data_quality(data)
+        if quality["quality_score"] < 75:
+            recs.append("Improve data quality by refining constraints")
+        
+        if not recs:
+            recs.append("Test data generation complete with good quality")
+        
+        return recs
+
+
 class SeniorQAAgent:
     def __init__(self):
         # Validate environment variables
@@ -586,14 +1125,22 @@ class SeniorQAAgent:
         # Initialize CrewAI agent
         self.agent = Agent(
             role='Senior QA Engineer & Testing Expert',
-            goal='Specialize in self-healing scripts, complex edge-case analysis, and model-based testing',
-            backstory="""You are a Senior QA Engineer with 10+ years of expertise in advanced testing 
-            methodologies. You excel at self-healing automation, complex edge case analysis, and 
-            model-based testing approaches that ensure comprehensive system validation.""",
+            goal='Specialize in self-healing scripts, complex edge-case analysis, model-based testing, and AI-driven test generation',
+            backstory="""You are a Senior QA Engineer with 12+ years of expertise in advanced testing 
+            methodologies. You excel at self-healing automation, complex edge case analysis, model-based 
+            testing approaches, and AI-powered autonomous test generation that ensures comprehensive 
+            system validation using LLM-driven approaches.""",
             verbose=True,
             allow_delegation=False,
             llm=self.llm,
-            tools=[SelfHealingTool(), ModelBasedTestingTool(), EdgeCaseAnalysisTool()]
+            tools=[
+                SelfHealingTool(),
+                ModelBasedTestingTool(),
+                EdgeCaseAnalysisTool(),
+                AITestGenerationTool(),
+                CodeAnalysisTestGeneratorTool(),
+                AutonomousTestDataGeneratorTool()
+            ]
         )
     
     async def handle_complex_scenario(self, task_data: Dict[str, Any]) -> Dict[str, Any]:

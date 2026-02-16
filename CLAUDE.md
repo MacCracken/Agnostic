@@ -133,7 +133,7 @@ Performance & Resilience Agent      ─┘
 
 **Agent roles and delegation flow:**
 1. **QA Manager** (`agents/manager/qa_manager.py`) — decomposes requirements into test plans, delegates tasks by complexity, performs fuzzy verification (LLM-based 0-1 quality scoring), synthesizes reports. Tools: `TestPlanDecompositionTool`, `FuzzyVerificationTool`.
-2. **Senior QA Engineer** (`agents/senior/senior_qa.py`) — handles complex scenarios: self-healing UI selectors (CV + semantic analysis), model-based testing (FSM), edge-case/boundary analysis. Tools: `SelfHealingTool`, `ModelBasedTestingTool`, `EdgeCaseAnalysisTool`.
+2. **Senior QA Engineer** (`agents/senior/senior_qa.py`) — handles complex scenarios: self-healing UI selectors (CV + semantic analysis), model-based testing (FSM), edge-case/boundary analysis, AI-driven test generation. Tools: `SelfHealingTool`, `ModelBasedTestingTool`, `EdgeCaseAnalysisTool`, `AITestGenerationTool`, `CodeAnalysisTestGeneratorTool`, `AutonomousTestDataGeneratorTool`.
 3. **Junior QA Worker** (`agents/junior/junior_qa.py`) — executes regression suites, root cause detection, synthetic data generation, risk-based test ordering, visual regression testing, cross-platform testing (mobile, desktop). Tools: `RegressionTestingTool`, `SyntheticDataGeneratorTool`, `TestExecutionOptimizerTool`, `VisualRegressionTool`, `MobileAppTestingTool`, `DesktopAppTestingTool`, `CrossPlatformTestingTool`.
 4. **QA Analyst** (`agents/analyst/qa_analyst.py`) — aggregates test data into structured reports, runs security assessments, profiles performance, predicts defects, analyzes quality trends, scores risks, and evaluates release readiness. Tools: `DataOrganizationReportingTool`, `SecurityAssessmentTool`, `PerformanceProfilingTool`, `TestTraceabilityTool`, `DefectPredictionTool`, `QualityTrendAnalysisTool`, `RiskScoringTool`, `ReleaseReadinessTool`.
 5. **Security & Compliance Agent** (`agents/security_compliance/qa_security_compliance.py`) — handles security testing (OWASP, penetration testing), compliance validation (GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA), and audit trail management. Tools: `SecurityTestingTool`, `ComplianceValidationTool`, `AuditTrailTool`, `SOC2ComplianceTool`, `ISO27001ComplianceTool`, `HIPAAComplianceTool`.
@@ -227,16 +227,17 @@ See `docs/adr/` for detailed Architecture Decision Records:
 - **ADR-005**: Authentication and Authorization Design (JWT + RBAC)
 
 ### Real-time Features
-- **Dashboard**: Live session monitoring with status indicators and resource metrics
+- **Dashboard**: Live session monitoring with status indicators, resource metrics, compliance scores, predictive analytics, and cross-platform testing results
 - **WebSocket Updates**: Real-time progress, agent status, and notifications
 - **Agent Monitoring**: Performance metrics, task queue visualization, communication graphs
 - **Resource Tracking**: CPU/memory usage, Redis metrics, system load
 
 ### Reporting & Analytics
 - **Multi-format Exports**: PDF (with charts), JSON (raw data), CSV (spreadsheet analysis)
-- **Report Types**: Executive Summary, Technical Report, Compliance Report, Agent Performance
+- **Report Types**: Executive Summary, Technical Report, Compliance Report (GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA), Agent Performance, Predictive Analytics
 - **Historical Analysis**: Session comparison, trend analysis, searchable archives
 - **Scheduled Reports**: Automated generation and distribution
+- **Predictive Analytics**: Defect prediction, quality trends, risk scoring, release readiness assessment
 
 ### Authentication & Security
 - **Multi-provider Auth**: Google OAuth2, GitHub, Azure AD, SAML support

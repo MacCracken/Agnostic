@@ -69,6 +69,29 @@ class ResourceMetrics:
     system_load: float
     uptime_seconds: int
 
+@dataclass
+class ComplianceMetrics:
+    gdpr_score: float
+    pci_score: float
+    soc2_score: float
+    iso27001_score: float
+    hipaa_score: float
+    overall_score: float
+
+@dataclass
+class PredictiveMetrics:
+    predicted_defects: int
+    risk_score: float
+    quality_trend: str
+    release_readiness: float
+
+@dataclass
+class CrossPlatformMetrics:
+    web_score: float
+    mobile_score: float
+    desktop_score: float
+    overall_score: float
+
 class DashboardManager:
     """Manages real-time dashboard data and metrics"""
     

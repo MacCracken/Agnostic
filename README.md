@@ -39,10 +39,10 @@ Performance & Resilience Agent      ─┘
 | Agent | Capabilities | Primary Focus |
 |-------|--------------|---------------|
 | **QA Manager** | Test planning, delegation, fuzzy verification | Orchestration |
-| **Senior QA Engineer** | Self-healing UI, model-based testing, edge cases | Complex Testing |
-| **Junior QA Worker** | Regression execution, data generation, optimization | Test Automation |
-| **QA Analyst** | Reporting, security assessment, performance profiling | Analysis |
-| **Security & Compliance Agent** | OWASP, GDPR, PCI DSS | Security |
+| **Senior QA Engineer** | Self-healing UI, model-based testing, edge cases, AI test generation | Complex Testing |
+| **Junior QA Worker** | Regression, data generation, optimization, cross-platform testing | Test Automation |
+| **QA Analyst** | Reporting, security, performance, predictive analytics | Analysis |
+| **Security & Compliance Agent** | OWASP, GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA | Security |
 | **Performance & Resilience Agent** | Load testing, monitoring, resilience checks | Performance |
 
 ## Documentation
@@ -100,7 +100,7 @@ manager = OptimizedQAManager()
 result = await manager.orchestrate_qa_session({
     "requirements": "Test user authentication flow",
     "target_url": "http://localhost:8000",
-    "compliance_standards": ["OWASP", "GDPR"]
+    "compliance_standards": ["GDPR", "PCI DSS", "SOC 2", "ISO 27001", "HIPAA"]
 })
 ```
 
@@ -112,17 +112,20 @@ result = await manager.orchestrate_qa_session({
 - **Security & Compliance**: Automated OWASP, GDPR, PCI DSS, SOC 2, ISO 27001, HIPAA validation
 - **Cross-Platform Testing**: Web, mobile (iOS/Android), and desktop (Windows/macOS/Linux) unified testing
 - **Predictive Quality Analytics**: ML-driven defect prediction, quality trend analysis, risk scoring, and release readiness assessment
+- **AI-Enhanced Test Generation**: Autonomous test case generation from requirements and code analysis using LLM
 - **Performance Profiling**: Load testing with bottleneck identification
 - **Real-time Dashboard**: Live monitoring via Chainlit WebGUI
 
 ## Technology Stack
 
-- **Agents**: CrewAI 0.75.0 + LangChain 0.2.16
+- **Agents**: CrewAI 0.11+ (crewai package)
 - **LLMs**: OpenAI, Anthropic, Google Gemini, Ollama, LM Studio
-- **Web UI**: Chainlit 1.1.304 + FastAPI
-- **Messaging**: Redis 5.0.8 + RabbitMQ
-- **Automation**: Playwright 1.45.0
-- **ML/CV**: scikit-learn 1.5.1, OpenCV 4.10.0
+- **Web UI**: Chainlit 1.1+ / 2.x compatible + FastAPI
+- **Messaging**: Redis 5.0+ + RabbitMQ + Celery
+- **Automation**: Playwright 1.45+
+- **ML/CV**: scikit-learn, OpenCV, NumPy, Pandas
+
+**Python**: 3.11-3.13 (compatible)
 
 ## Contributing
 
@@ -134,4 +137,4 @@ MIT License - see [LICENSE](LICENSE) file.
 
 ---
 
-*Last Updated: 2026-02-11* | [Documentation](doc/README.md) | [Changelog](doc/project/changelog.md)
+*Last Updated: 2026-02-16* | [Documentation](doc/README.md) | [Changelog](doc/project/changelog.md)

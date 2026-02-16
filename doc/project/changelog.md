@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Quality Trend Analysis Tool** - Time-series analysis of quality metrics with trend detection, volatility analysis, and future predictions
 - **Risk Scoring Tool** - Multi-dimensional risk scoring (technical, business, schedule, resource, compliance) for features and releases
 - **Release Readiness Tool** - Comprehensive release readiness assessment combining quality, testing, security, performance, and business dimensions
+- **AI Test Generation Tool** - LLM-driven autonomous test case generation from requirements (functional, edge case, negative, boundary, integration, UI tests)
+- **Code Analysis Test Generator** - Automatic test generation based on code structure analysis (functions, classes)
+- **Autonomous Test Data Generator** - AI-powered intelligent test data generation with constraints validation and quality assessment
 - Removed duplicate documentation (docs/guides/quick-start.md)
 
 ### Changed
