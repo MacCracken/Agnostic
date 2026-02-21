@@ -115,6 +115,47 @@ This roadmap outlines the strategic direction and upcoming enhancements for the 
 - `retry_async` decorator with exponential backoff
 - See ADR-016
 
+### Recently Completed (2026-02-21 Phase 4)
+
+#### REST Task Submission API
+- **Status**: Completed
+- `POST /api/tasks` and `GET /api/tasks/{id}` — fire-and-forget task submission with Redis polling
+- `asyncio.create_task` background execution, 24-hour Redis TTL, `pending → running → completed | failed`
+- See ADR-017
+
+#### API Key Authentication
+- **Status**: Completed
+- `X-API-Key` header auth — dual mode: static `AGNOSTIC_API_KEY` env var + Redis-backed per-client keys
+- Management endpoints: `POST/GET /api/auth/api-keys`, `DELETE /api/auth/api-keys/{key_id}`
+- HMAC-SHA256 used as signing algorithm; raw keys never stored (only sha256 hashes)
+- See ADR-017
+
+#### Webhook Callbacks
+- **Status**: Completed
+- Optional `callback_url` + `callback_secret` on task submission
+- HMAC-SHA256 `X-Signature` header on callback POST
+- Failures logged but do not affect task result
+- See ADR-018
+
+#### Agent-Specific Convenience Endpoints
+- **Status**: Completed
+- `POST /api/tasks/security`, `/performance`, `/regression`, `/full`
+- See ADR-017
+
+#### Enhanced Health Endpoint
+- **Status**: Completed
+- Redis ping, RabbitMQ TCP connect, per-agent heartbeat freshness check
+- Returns `healthy | degraded | unhealthy` with per-component detail
+- Configurable via `AGENT_STALE_THRESHOLD_SECONDS`
+
+#### CORS Configuration
+- **Status**: Completed
+- `CORSMiddleware` with `CORS_ALLOWED_ORIGINS` env var
+- Default allows YEOMAN dashboard (`localhost:18789`) and common dev port (`localhost:3001`)
+- See ADR-018
+
+---
+
 ### Immediate (Next 3 Months)
 
 #### 4. Kubernetes Production Readiness

@@ -1,19 +1,25 @@
 """
 WebGUI REST API — FastAPI router wrapping existing manager singletons.
 
-Provides HTTP endpoints for dashboard, sessions, reports, agents, and auth.
-All business logic lives in the existing manager modules; this module
-only handles HTTP concerns (routing, serialization, auth dependency).
+Provides HTTP endpoints for dashboard, sessions, reports, agents, auth,
+and task submission.  All business logic lives in the existing manager
+modules; this module only handles HTTP concerns (routing, serialization,
+auth dependency).
 """
 
+import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import os
 import sys
+import uuid
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -32,11 +38,45 @@ api_router = APIRouter(prefix="/api")
 # ---------------------------------------------------------------------------
 
 async def get_current_user(
-    authorization: str | None = None,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict[str, Any]:
-    """Extract and verify JWT from Authorization header."""
+    """Extract and verify credentials from request headers.
+
+    Checks X-API-Key first (env-var static key, then Redis-backed keys),
+    then falls back to Bearer JWT.
+    """
+    # 1. Check X-API-Key header
+    if x_api_key is not None:
+        # Static env-var key (simple deployments)
+        static_key = os.getenv("AGNOSTIC_API_KEY")
+        if static_key and x_api_key == static_key:
+            return {
+                "user_id": "api-key-user",
+                "email": "api@agnostic",
+                "role": "api_user",
+                "permissions": [p.value for p in Permission],
+            }
+
+        # Redis-backed keys (multi-key deployments)
+        try:
+            from config.environment import config
+
+            redis_client = config.get_redis_client()
+            key_hash = hashlib.sha256(x_api_key.encode()).hexdigest()
+            key_data = redis_client.get(f"api_key:{key_hash}")
+            if key_data:
+                return json.loads(key_data)
+        except Exception as e:
+            logger.warning(f"Redis API key lookup failed: {e}")
+
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # 2. Fall back to Bearer JWT
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+        raise HTTPException(
+            status_code=401, detail="Missing or invalid authorization header"
+        )
 
     token = authorization.removeprefix("Bearer ")
     payload = await auth_manager.verify_token(token)
@@ -83,6 +123,33 @@ class ReportGenerateRequest(BaseModel):
 class SessionCompareRequest(BaseModel):
     session1_id: str
     session2_id: str
+
+
+class TaskSubmitRequest(BaseModel):
+    title: str
+    description: str
+    target_url: str | None = None
+    priority: str = "high"           # critical | high | medium | low
+    standards: list[str] = []        # ["OWASP", "GDPR", ...]
+    agents: list[str] = []           # [] = all; or ["security-compliance", "performance"]
+    business_goals: str = "Ensure quality and functionality"
+    constraints: str = "Standard testing environment"
+    callback_url: str | None = None   # POST here on completion
+    callback_secret: str | None = None  # HMAC-SHA256 signing secret
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    session_id: str
+    status: str       # pending | running | completed | failed
+    created_at: str
+    updated_at: str
+    result: dict | None = None
+
+
+class ApiKeyCreateRequest(BaseModel):
+    description: str = ""
+    role: str = "api_user"
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +199,262 @@ async def auth_me(user: dict = Depends(get_current_user)):
         "role": user.get("role"),
         "permissions": user.get("permissions", []),
     }
+
+
+# ---------------------------------------------------------------------------
+# API key management endpoints (require SYSTEM_CONFIGURE permission)
+# ---------------------------------------------------------------------------
+
+@api_router.post("/auth/api-keys")
+async def create_api_key(
+    req: ApiKeyCreateRequest,
+    user: dict = Depends(require_permission(Permission.SYSTEM_CONFIGURE)),
+):
+    """Create a new API key. Returns the raw key once — store it safely."""
+    from config.environment import config
+    from webgui.auth import create_api_key as _create_api_key
+
+    redis_client = config.get_redis_client()
+    raw_key, key_id, key_meta = _create_api_key(
+        redis_client=redis_client,
+        description=req.description,
+        role=req.role,
+        created_by=user.get("user_id", "unknown"),
+    )
+    return {
+        "key_id": key_id,
+        "api_key": raw_key,
+        "description": req.description,
+        "role": req.role,
+        "created_at": key_meta["created_at"],
+        "note": "Store this key safely — it will not be shown again.",
+    }
+
+
+@api_router.get("/auth/api-keys")
+async def list_api_keys(
+    user: dict = Depends(require_permission(Permission.SYSTEM_CONFIGURE)),
+):
+    """List API key IDs and metadata (never raw keys)."""
+    from config.environment import config
+    from webgui.auth import list_api_keys as _list_api_keys
+
+    redis_client = config.get_redis_client()
+    keys = _list_api_keys(redis_client)
+    return {"api_keys": keys}
+
+
+@api_router.delete("/auth/api-keys/{key_id}")
+async def delete_api_key(
+    key_id: str,
+    user: dict = Depends(require_permission(Permission.SYSTEM_CONFIGURE)),
+):
+    """Revoke an API key by its ID (first 8 chars of sha256 hash)."""
+    from config.environment import config
+    from webgui.auth import revoke_api_key as _revoke_api_key
+
+    redis_client = config.get_redis_client()
+    deleted = _revoke_api_key(redis_client, key_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return {"status": "revoked", "key_id": key_id}
+
+
+# ---------------------------------------------------------------------------
+# Task submission endpoints (P1)
+# ---------------------------------------------------------------------------
+
+@api_router.post("/tasks", response_model=TaskStatusResponse)
+async def submit_task(
+    req: TaskSubmitRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Submit a new QA task. Returns immediately with task_id for polling."""
+    from config.environment import config
+
+    task_id = str(uuid.uuid4())
+    session_id = (
+        f"session_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{task_id[:8]}"
+    )
+    now = datetime.now(UTC).isoformat()
+
+    requirements = {
+        "title": req.title,
+        "description": req.description,
+        "priority": req.priority,
+        "standards": req.standards,
+        "agents": req.agents,
+        "business_goals": req.business_goals,
+        "constraints": req.constraints,
+        "target_url": req.target_url,
+        "submitted_by": user.get("user_id", "api-user"),
+        "submitted_at": now,
+    }
+
+    task_record: dict[str, Any] = {
+        "task_id": task_id,
+        "session_id": session_id,
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+        "result": None,
+    }
+
+    redis_client = config.get_redis_client()
+    redis_client.setex(f"task:{task_id}", 86400, json.dumps(task_record))
+
+    # Fire-and-forget async execution
+    asyncio.create_task(
+        _run_task_async(
+            task_id=task_id,
+            session_id=session_id,
+            requirements=requirements,
+            redis_client=redis_client,
+            callback_url=req.callback_url,
+            callback_secret=req.callback_secret,
+        )
+    )
+
+    return TaskStatusResponse(**task_record)
+
+
+@api_router.get("/tasks/{task_id}", response_model=TaskStatusResponse)
+async def get_task(task_id: str, user: dict = Depends(get_current_user)):
+    """Poll task status by task_id."""
+    from config.environment import config
+
+    redis_client = config.get_redis_client()
+    data = redis_client.get(f"task:{task_id}")
+    if not data:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    record = json.loads(data)
+    return TaskStatusResponse(**record)
+
+
+async def _run_task_async(
+    task_id: str,
+    session_id: str,
+    requirements: dict[str, Any],
+    redis_client: Any,
+    callback_url: str | None,
+    callback_secret: str | None,
+) -> None:
+    """Run a QA task asynchronously, updating Redis through status transitions."""
+
+    def _update_task(status: str, result: dict | None = None) -> dict[str, Any]:
+        raw = redis_client.get(f"task:{task_id}")
+        record: dict[str, Any] = json.loads(raw) if raw else {
+            "task_id": task_id,
+            "session_id": session_id,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        record["status"] = status
+        record["updated_at"] = datetime.now(UTC).isoformat()
+        record["result"] = result
+        redis_client.setex(f"task:{task_id}", 86400, json.dumps(record))
+        return record
+
+    final_record: dict[str, Any] = {}
+    try:
+        _update_task("running")
+
+        # Lazy-import to avoid startup overhead
+        try:
+            from agents.manager.qa_manager_optimized import OptimizedQAManager
+
+            manager = OptimizedQAManager()
+            result = await manager.orchestrate_qa_session(
+                {"session_id": session_id, **requirements}
+            )
+        except ImportError:
+            from agents.manager.qa_manager import QAManagerAgent
+
+            manager = QAManagerAgent()
+            result = await manager.process_requirements(
+                {"session_id": session_id, **requirements}
+            )
+
+        final_record = _update_task("completed", result)
+
+    except Exception as e:
+        logger.error(f"Task {task_id} failed: {e}")
+        final_record = _update_task("failed", {"error": str(e)})
+
+    # P3 — Webhook callback on completion
+    if callback_url and final_record:
+        await _fire_webhook(callback_url, callback_secret, final_record)
+
+
+async def _fire_webhook(
+    callback_url: str,
+    callback_secret: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """POST task result to callback_url with optional HMAC-SHA256 signature."""
+    try:
+        import httpx
+
+        body = json.dumps(payload)
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+
+        if callback_secret:
+            sig = hmac.new(
+                callback_secret.encode(), body.encode(), hashlib.sha256
+            ).hexdigest()
+            headers["X-Signature"] = f"sha256={sig}"
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(callback_url, content=body, headers=headers)
+
+        logger.info(f"Webhook delivered to {callback_url}")
+
+    except Exception as e:
+        logger.warning(f"Webhook delivery to {callback_url} failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Agent-specific convenience endpoints (P4)
+# ---------------------------------------------------------------------------
+
+@api_router.post("/tasks/security", response_model=TaskStatusResponse)
+async def submit_security_task(
+    req: TaskSubmitRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Submit a security-focused QA task (routes to security-compliance agent)."""
+    req.agents = ["security-compliance"]
+    return await submit_task(req, user)
+
+
+@api_router.post("/tasks/performance", response_model=TaskStatusResponse)
+async def submit_performance_task(
+    req: TaskSubmitRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Submit a performance-focused QA task (routes to performance agent)."""
+    req.agents = ["performance"]
+    return await submit_task(req, user)
+
+
+@api_router.post("/tasks/regression", response_model=TaskStatusResponse)
+async def submit_regression_task(
+    req: TaskSubmitRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Submit a regression QA task (routes to junior-qa + qa-analyst)."""
+    req.agents = ["junior-qa", "qa-analyst"]
+    return await submit_task(req, user)
+
+
+@api_router.post("/tasks/full", response_model=TaskStatusResponse)
+async def submit_full_task(
+    req: TaskSubmitRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Submit a full QA task (uses all 6 agents)."""
+    req.agents = []
+    return await submit_task(req, user)
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +564,6 @@ async def list_reports(user: dict = Depends(get_current_user)):
     for key in keys:
         data = redis_client.get(key)
         if data:
-            import json
-
             reports.append(json.loads(data))
     return reports
 
@@ -258,7 +579,7 @@ async def generate_report(
         report_type = ReportType(req.report_type)
         report_format = ReportFormat(req.format)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid report type or format: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid report type or format: {e}") from e
 
     report_req = ReportRequest(
         session_id=req.session_id,
@@ -284,8 +605,6 @@ async def download_report(
     from config.environment import config
 
     redis_client = config.get_redis_client()
-    import json
-
     meta_data = redis_client.get(f"report:{report_id}:meta")
     if not meta_data:
         raise HTTPException(status_code=404, detail="Report not found")

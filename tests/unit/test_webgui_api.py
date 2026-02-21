@@ -1,6 +1,8 @@
+import json
 import os
 import sys
-from unittest.mock import AsyncMock, Mock, patch
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -128,3 +130,173 @@ class TestAgentEndpoints:
         mock_monitor.get_queue_depths = AsyncMock(return_value={"qa_manager": 0})
         resp = authed_client.get("/api/agents/queues")
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# P6 — Enhanced health endpoint
+# ---------------------------------------------------------------------------
+
+class TestHealthCheckEndpoint:
+    """Tests for the enhanced /health endpoint in webgui/app.py."""
+
+    def _make_health_app(self):
+        """Import the real app's health endpoint for testing."""
+        try:
+            from webgui.app import app as real_app
+            return real_app
+        except ImportError:
+            return None
+
+    def test_health_redis_ok_rabbitmq_ok_agents_offline(self):
+        """Infrastructure ok but all agents offline → degraded."""
+        try:
+            from webgui.app import app as real_app
+        except ImportError:
+            pytest.skip("webgui.app not importable")
+
+        mock_redis = Mock()
+        mock_redis.ping.return_value = True
+        mock_redis.get.return_value = None  # no heartbeats
+
+        with patch("webgui.app.config") as mock_config, \
+             patch("webgui.app.socket") as mock_socket, \
+             patch("webgui.app._agent_registry") as mock_registry:
+
+            mock_config.get_redis_client.return_value = mock_redis
+
+            # RabbitMQ connect succeeds
+            mock_sock_instance = Mock()
+            mock_socket.create_connection.return_value = mock_sock_instance
+
+            # Registry returns empty list (no agents)
+            mock_registry.get_agents_for_team.return_value = []
+
+            client = TestClient(real_app)
+            resp = client.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["redis"] == "ok"
+        assert data["rabbitmq"] == "ok"
+        assert data["status"] in ("healthy", "degraded")
+        assert "timestamp" in data
+
+    def test_health_redis_error(self):
+        """Redis failure → unhealthy."""
+        try:
+            from webgui.app import app as real_app
+        except ImportError:
+            pytest.skip("webgui.app not importable")
+
+        mock_redis = Mock()
+        mock_redis.ping.side_effect = ConnectionError("redis down")
+
+        with patch("webgui.app.config") as mock_config, \
+             patch("webgui.app.socket") as mock_socket, \
+             patch("webgui.app._agent_registry") as mock_registry:
+
+            mock_config.get_redis_client.return_value = mock_redis
+            mock_socket.create_connection.return_value = Mock()
+            mock_registry.get_agents_for_team.return_value = []
+
+            client = TestClient(real_app)
+            resp = client.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["redis"] == "error"
+        assert data["status"] == "unhealthy"
+
+    def test_health_rabbitmq_error(self):
+        """RabbitMQ failure → unhealthy."""
+        try:
+            from webgui.app import app as real_app
+        except ImportError:
+            pytest.skip("webgui.app not importable")
+
+        mock_redis = Mock()
+        mock_redis.ping.return_value = True
+        mock_redis.get.return_value = None
+
+        with patch("webgui.app.config") as mock_config, \
+             patch("webgui.app.socket") as mock_socket, \
+             patch("webgui.app._agent_registry") as mock_registry:
+
+            mock_config.get_redis_client.return_value = mock_redis
+            mock_socket.create_connection.side_effect = ConnectionRefusedError("rmq down")
+            mock_registry.get_agents_for_team.return_value = []
+
+            client = TestClient(real_app)
+            resp = client.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["rabbitmq"] == "error"
+        assert data["status"] == "unhealthy"
+
+    def test_health_alive_agent(self):
+        """At least one alive agent + infra ok → healthy."""
+        try:
+            from webgui.app import app as real_app
+        except ImportError:
+            pytest.skip("webgui.app not importable")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        heartbeat_data = json.dumps({"last_heartbeat": now_iso}).encode()
+
+        mock_redis = Mock()
+        mock_redis.ping.return_value = True
+        mock_redis.get.return_value = heartbeat_data
+
+        mock_agent = Mock()
+        mock_agent.name = "QA Manager"
+
+        with patch("webgui.app.config") as mock_config, \
+             patch("webgui.app.socket") as mock_socket, \
+             patch("webgui.app._agent_registry") as mock_registry:
+
+            mock_config.get_redis_client.return_value = mock_redis
+            mock_socket.create_connection.return_value = Mock()
+            mock_registry.get_agents_for_team.return_value = [mock_agent]
+
+            client = TestClient(real_app)
+            resp = client.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "healthy"
+
+    def test_health_stale_agent(self):
+        """Agent heartbeat older than threshold → stale."""
+        try:
+            from webgui.app import app as real_app
+        except ImportError:
+            pytest.skip("webgui.app not importable")
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        heartbeat_data = json.dumps({"last_heartbeat": old_ts}).encode()
+
+        mock_redis = Mock()
+        mock_redis.ping.return_value = True
+        mock_redis.get.return_value = heartbeat_data
+
+        mock_agent = Mock()
+        mock_agent.name = "QA Manager"
+
+        with patch("webgui.app.config") as mock_config, \
+             patch("webgui.app.socket") as mock_socket, \
+             patch("webgui.app._agent_registry") as mock_registry, \
+             patch.dict(os.environ, {"AGENT_STALE_THRESHOLD_SECONDS": "60"}):
+
+            mock_config.get_redis_client.return_value = mock_redis
+            mock_socket.create_connection.return_value = Mock()
+            mock_registry.get_agents_for_team.return_value = [mock_agent]
+
+            client = TestClient(real_app)
+            resp = client.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        # stale agent, infra ok → degraded
+        agent_statuses = list(data["agents"].values())
+        assert "stale" in agent_statuses

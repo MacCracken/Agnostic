@@ -1,259 +1,302 @@
-# WebGUI API Reference
+# WebGUI REST API Reference
 
 ## Overview
 
-The WebGUI provides a Chainlit-based interface for human-in-the-loop interaction with the QA agent system.
+The WebGUI exposes a Chainlit-based chat interface **and** a full REST API for machine-to-machine access. All REST routes are mounted under `/api`.
 
-## Base Configuration
-- **URL**: `http://localhost:8000`
-- **Framework**: Chainlit 1.1.304 + FastAPI
-- **Authentication**: Session-based with Redis storage
+- **Base URL (local):** `http://localhost:8000`
+- **Framework:** Chainlit 1.1.304 + FastAPI
+- **Authentication:** `Authorization: Bearer <JWT>` or `X-API-Key: <key>`
+- **Interactive docs:** `http://localhost:8000/docs` (Swagger UI), `/redoc`
+- **OpenAPI schema:** `http://localhost:8000/openapi.json`
 
-## REST API Endpoints
+---
 
-### Session Management
+## Authentication
+
+### JWT (browser / interactive)
+
 ```http
-POST /api/session/create
-GET  /api/session/{session_id}
-DELETE /api/session/{session_id}
+POST /api/auth/login
+Content-Type: application/json
+
+{"email": "user@example.com", "password": "secret"}
 ```
 
-### Agent Operations
+Response:
+```json
+{
+  "access_token": "<jwt>",
+  "refresh_token": "<jwt>",
+  "token_type": "bearer",
+  "expires_in": 900
+}
+```
+
+Use the access token in subsequent requests:
 ```http
-GET  /api/agents/status           # Agent health status
-GET  /api/agents/{agent_name}      # Specific agent info
-POST /api/agents/{agent_name}/task # Submit task to agent
+Authorization: Bearer <access_token>
 ```
 
-### Task Management
+### API Key (M2M / CI/CD)
+
+Pass the API key in the `X-API-Key` header:
+
 ```http
-POST /api/tasks                    # Create new task
-GET  /api/tasks/{task_id}          # Get task details
-GET  /api/tasks                    # List all tasks
-PUT  /api/tasks/{task_id}/status   # Update task status
+X-API-Key: <your-key>
 ```
 
-### File Operations
-```http
-POST /api/files/upload            # Upload test files
-GET  /api/files/{file_id}         # Download file
-GET  /api/files                    # List uploaded files
+Two modes:
+
+| Mode | Configuration |
+|------|---------------|
+| Static (single key) | Set `AGNOSTIC_API_KEY` env var |
+| Per-client Redis-backed | Create via `POST /api/auth/api-keys` |
+
+---
+
+## Endpoints
+
+### Auth
+
+| Method | Path | Description | Auth required |
+|--------|------|-------------|---------------|
+| `POST` | `/api/auth/login` | Authenticate; get JWT tokens | No |
+| `POST` | `/api/auth/refresh` | Refresh access token | No |
+| `POST` | `/api/auth/logout` | Invalidate tokens | Yes |
+| `GET`  | `/api/auth/me` | Current user info | Yes |
+| `POST` | `/api/auth/api-keys` | Create API key | Yes + `system:configure` |
+| `GET`  | `/api/auth/api-keys` | List API key IDs | Yes + `system:configure` |
+| `DELETE` | `/api/auth/api-keys/{key_id}` | Revoke API key | Yes + `system:configure` |
+
+#### `POST /api/auth/api-keys`
+
+Request:
+```json
+{"description": "YEOMAN CI key", "role": "api_user"}
 ```
 
-## WebSocket Events
-
-### Real-time Communication
-```javascript
-// Connect to WebSocket
-const ws = new WebSocket('ws://localhost:8000/ws');
-
-// Listen for task updates
-ws.on('task_update', (data) => {
-    console.log('Task status:', data);
-});
-
-// Listen for agent status
-ws.on('agent_status', (data) => {
-    console.log('Agent health:', data);
-});
+Response (raw key shown **once**):
+```json
+{
+  "key_id": "a1b2c3d4",
+  "api_key": "<raw-key-store-safely>",
+  "description": "YEOMAN CI key",
+  "role": "api_user",
+  "created_at": "2026-02-21T10:00:00",
+  "note": "Store this key safely — it will not be shown again."
+}
 ```
 
-### Event Types
-- `task_created` - New task submitted
-- `task_updated` - Task status changed
-- `agent_status` - Agent health update
-- `message` - General notifications
-- `reasoning_trace` - LLM reasoning steps
-
-## Request/Response Formats
+---
 
 ### Task Submission
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/tasks` | Submit a QA task |
+| `GET`  | `/api/tasks/{task_id}` | Poll task status |
+| `POST` | `/api/tasks/security` | Security-focused task |
+| `POST` | `/api/tasks/performance` | Performance-focused task |
+| `POST` | `/api/tasks/regression` | Regression task (junior + analyst) |
+| `POST` | `/api/tasks/full` | Full 6-agent task |
+
+#### `POST /api/tasks`
+
+Request:
 ```json
 {
-    "session_id": "uuid-string",
-    "agent": "qa_manager",
-    "tool": "TestPlanDecompositionTool", 
-    "parameters": {
-        "requirements": "User registration flow",
-        "context": {"app_type": "web"}
-    },
-    "priority": "high"
+  "title": "Sprint 42 QA",
+  "description": "Test the new checkout flow including OWASP checks",
+  "target_url": "https://staging.example.com",
+  "priority": "high",
+  "standards": ["OWASP", "GDPR"],
+  "agents": [],
+  "business_goals": "Zero P0 bugs before release",
+  "constraints": "Staging environment, no PII",
+  "callback_url": "https://ci.example.com/hooks/qa",
+  "callback_secret": "optional-hmac-secret"
 }
 ```
 
-### Task Response
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `title` | string | **required** | Short task title |
+| `description` | string | **required** | Detailed requirements |
+| `target_url` | string\|null | `null` | URL under test |
+| `priority` | string | `"high"` | `critical \| high \| medium \| low` |
+| `standards` | string[] | `[]` | e.g. `["OWASP", "GDPR"]` |
+| `agents` | string[] | `[]` | `[]` = all 6 agents; or e.g. `["security-compliance"]` |
+| `business_goals` | string | `"Ensure quality..."` | Goals for fuzzy verification |
+| `constraints` | string | `"Standard testing..."` | Environment constraints |
+| `callback_url` | string\|null | `null` | Webhook URL for completion notification |
+| `callback_secret` | string\|null | `null` | HMAC-SHA256 signing secret for webhook |
+
+Response (immediate, status = `pending`):
 ```json
 {
-    "task_id": "uuid-string",
-    "status": "completed",
-    "result": {
-        "test_plan": [...],
-        "scenarios": [...],
-        "confidence": 0.95
-    },
-    "reasoning_trace": [
-        {"step": "analyze_requirements", "output": "..."},
-        {"step": "generate_scenarios", "output": "..."}
-    ],
-    "execution_time": 2.3,
-    "agent": "qa_manager"
+  "task_id": "3f4a1b2c-...",
+  "session_id": "session_20260221_100000_3f4a1b2c",
+  "status": "pending",
+  "created_at": "2026-02-21T10:00:00+00:00",
+  "updated_at": "2026-02-21T10:00:00+00:00",
+  "result": null
 }
 ```
 
-### Agent Status
+#### `GET /api/tasks/{task_id}`
+
+Response:
 ```json
 {
-    "agents": {
-        "qa_manager": {
-            "status": "active",
-            "last_heartbeat": "2026-02-10T23:30:00Z",
-            "current_tasks": 2,
-            "memory_usage": "125MB"
-        },
-        "qa_analyst": {
-            "status": "idle", 
-            "last_heartbeat": "2026-02-10T23:29:45Z",
-            "current_tasks": 0,
-            "memory_usage": "98MB"
-        }
-    }
+  "task_id": "3f4a1b2c-...",
+  "session_id": "session_20260221_100000_3f4a1b2c",
+  "status": "completed",
+  "created_at": "2026-02-21T10:00:00+00:00",
+  "updated_at": "2026-02-21T10:05:32+00:00",
+  "result": {
+    "test_plan": {...},
+    "verification": {...}
+  }
 }
 ```
 
-## File Upload Support
+`status` values: `pending | running | completed | failed`
 
-### Supported Formats
-- **Test Plans**: JSON, YAML
-- **Test Data**: CSV, JSON, XML
-- **Screenshots**: PNG, JPG (for visual testing)
-- **Logs**: TXT, LOG
+#### Convenience endpoints
 
-### Upload Process
-```javascript
-const formData = new FormData();
-formData.append('file', fileInput.files[0]);
-formData.append('type', 'test_data');
-formData.append('session_id', sessionId);
+All accept the same `TaskSubmitRequest` body. The `agents` field is **overridden** by the endpoint:
 
-fetch('/api/files/upload', {
-    method: 'POST',
-    body: formData
-}).then(response => response.json());
-```
+| Endpoint | `agents` override |
+|----------|-------------------|
+| `/api/tasks/security` | `["security-compliance"]` |
+| `/api/tasks/performance` | `["performance"]` |
+| `/api/tasks/regression` | `["junior-qa", "qa-analyst"]` |
+| `/api/tasks/full` | `[]` (all 6 agents) |
 
-## Authentication & Sessions
+#### Webhook Callback
 
-### Session Creation
+When `callback_url` is provided, on task completion the API posts:
+
 ```http
-POST /api/session/create
-{
-    "user_agent": "Mozilla/5.0...",
-    "preferences": {
-        "theme": "dark",
-        "notifications": true
-    }
-}
+POST <callback_url>
+Content-Type: application/json
+X-Signature: sha256=<hmac-sha256-hex>
+
+{"task_id": "...", "status": "completed", ...}
 ```
 
-### Session Response
-```json
-{
-    "session_id": "uuid-string",
-    "expires_at": "2026-02-11T01:30:00Z",
-    "csrf_token": "random-string"
-}
-```
-
-## Error Handling
-
-### Error Response Format
-```json
-{
-    "error": {
-        "code": "AGENT_UNAVAILABLE",
-        "message": "QA Manager agent is not responding",
-        "details": {
-            "agent": "qa_manager",
-            "last_seen": "2026-02-10T23:25:00Z"
-        }
-    },
-    "request_id": "uuid-string"
-}
-```
-
-### Common Error Codes
-- `AGENT_UNAVAILABLE` - Agent not responding
-- `INVALID_PARAMETERS` - Malformed request
-- `SESSION_EXPIRED` - Authentication required
-- `FILE_TOO_LARGE` - Upload size exceeded
-- `RATE_LIMITED` - Too many requests
-
-## Rate Limiting
-
-### Limits
-- **Tasks**: 10 per minute per session
-- **File Upload**: 5 per minute per session  
-- **API Calls**: 100 per minute per IP
-
-### Headers
-```http
-X-RateLimit-Limit: 10
-X-RateLimit-Remaining: 7
-X-RateLimit-Reset: 1644527400
-```
-
-## Integration Examples
-
-### JavaScript Client
-```javascript
-class QAClient {
-    constructor(baseUrl = 'http://localhost:8000') {
-        this.baseUrl = baseUrl;
-        this.sessionId = null;
-    }
-    
-    async createSession() {
-        const response = await fetch(`${this.baseUrl}/api/session/create`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({})
-        });
-        this.sessionId = response.session_id;
-        return response;
-    }
-    
-    async submitTask(agent, tool, parameters) {
-        return await fetch(`${this.baseUrl}/api/tasks`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Session-ID': this.sessionId
-            },
-            body: JSON.stringify({agent, tool, parameters})
-        });
-    }
-}
-```
-
-### Python Client
+Verify the signature on the receiving end:
 ```python
-import requests
-import websocket
-
-class WebGUIClient:
-    def __init__(self, base_url="http://localhost:8000"):
-        self.base_url = base_url
-        self.session_id = None
-        
-    def create_session(self):
-        response = requests.post(f"{self.base_url}/api/session/create")
-        self.session_id = response.json()["session_id"]
-        return self.session_id
-        
-    def submit_task(self, agent: str, tool: str, parameters: dict):
-        headers = {"X-Session-ID": self.session_id}
-        data = {"agent": agent, "tool": tool, "parameters": parameters}
-        response = requests.post(f"{self.base_url}/api/tasks", 
-                               json=data, headers=headers)
-        return response.json()
+import hmac, hashlib
+body = request.body()
+expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+assert request.headers["X-Signature"] == f"sha256={expected}"
 ```
+
+---
+
+### Dashboard
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/dashboard` | Aggregate dashboard data |
+| `GET` | `/api/dashboard/sessions` | Active sessions |
+| `GET` | `/api/dashboard/agents` | Agent status |
+| `GET` | `/api/dashboard/metrics` | Resource metrics |
+
+---
+
+### Sessions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/sessions` | Session history (pagination: `limit`, `offset`, `user_id`) |
+| `GET` | `/api/sessions/search?q=<query>` | Search sessions |
+| `GET` | `/api/sessions/{session_id}` | Session details |
+| `POST` | `/api/sessions/compare` | Compare two sessions |
+
+---
+
+### Reports
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/reports` | List user's reports |
+| `POST` | `/api/reports/generate` | Generate a report |
+| `GET` | `/api/reports/{report_id}/download` | Download report file |
+
+---
+
+### Agents
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/agents` | All agent statuses |
+| `GET` | `/api/agents/queues` | Queue depths |
+| `GET` | `/api/agents/{agent_name}` | Agent metrics |
+
+---
+
+### Observability
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `GET` | `/api/metrics` | None | Prometheus metrics (scrape endpoint) |
+| `GET` | `/health` | None | Infrastructure + agent liveness |
+
+#### `GET /health`
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-02-21T10:00:00+00:00",
+  "redis": "ok",
+  "rabbitmq": "ok",
+  "agents": {
+    "qa-manager": "alive",
+    "senior-qa": "stale",
+    "junior-qa": "alive",
+    "qa-analyst": "alive",
+    "security-compliance": "offline",
+    "performance": "alive"
+  }
+}
+```
+
+| `status` | Meaning |
+|----------|---------|
+| `healthy` | Redis ok + RabbitMQ ok + ≥1 agent alive |
+| `degraded` | Infrastructure ok but all agents stale/offline |
+| `unhealthy` | Redis or RabbitMQ unreachable |
+
+Agent heartbeat staleness threshold: `AGENT_STALE_THRESHOLD_SECONDS` (default: `300`).
+
+---
+
+## TypeScript Client Generation
+
+After any API change, regenerate the TypeScript client used by YEOMAN:
+
+```bash
+# Export the schema
+python scripts/export-openapi.py
+
+# Generate TypeScript types
+npx openapi-typescript http://localhost:8000/openapi.json \
+  --output packages/mcp/src/tools/agnostic-client.ts
+```
+
+The `scripts/export-openapi.py` script writes `docs/api/openapi.json` from the live FastAPI schema.
+
+---
+
+## CORS
+
+Allowed origins are controlled via the `CORS_ALLOWED_ORIGINS` env var (comma-separated):
+
+```bash
+CORS_ALLOWED_ORIGINS=http://localhost:18789,http://localhost:3001
+```
+
+Default: `http://localhost:18789,http://localhost:3001`.

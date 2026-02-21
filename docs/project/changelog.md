@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **REST Task Submission** (`webgui/api.py`): `POST /api/tasks` and `GET /api/tasks/{id}` — fire-and-forget QA task submission with Redis-backed status polling (ADR-017)
+- **API Key Authentication** (`webgui/api.py`, `webgui/auth.py`): `X-API-Key` header support with dual-mode auth (static `AGNOSTIC_API_KEY` env var + Redis-backed per-client keys). New management endpoints: `POST/GET /api/auth/api-keys`, `DELETE /api/auth/api-keys/{key_id}` (ADR-017)
+- **Webhook Callbacks** (`webgui/api.py`): Optional `callback_url` + `callback_secret` on task submission — POST result with HMAC-SHA256 `X-Signature` header on task completion (ADR-018)
+- **Agent-Specific Convenience Endpoints** (`webgui/api.py`): `POST /api/tasks/security`, `/api/tasks/performance`, `/api/tasks/regression`, `/api/tasks/full` — thin wrappers that route to specific agent subsets (ADR-017)
+- **Enhanced Health Check** (`webgui/app.py`): `/health` now checks Redis ping, RabbitMQ TCP connect, and per-agent heartbeat freshness in Redis. Returns `healthy | degraded | unhealthy` with per-component detail. Configurable via `AGENT_STALE_THRESHOLD_SECONDS` (default 300s)
+- **CORS Middleware** (`webgui/app.py`): `CORSMiddleware` with `CORS_ALLOWED_ORIGINS` env var (comma-separated, default: `http://localhost:18789,http://localhost:3001`) (ADR-018)
+- **OpenAPI Export Script** (`scripts/export-openapi.py`): Generates `docs/api/openapi.json` from the live FastAPI schema
+- **ADR-017**: REST Task Submission and API Key Authentication
+- **ADR-018**: Webhook Callbacks and CORS Configuration
+- **`AGNOSTIC_API_KEY`** and **`CORS_ALLOWED_ORIGINS`** added to `.env.example`
+- **34 new unit tests** covering task submission (P1–P4), enhanced health (P6), and API key auth (P2)
+
+### Added
 - **Observability Stack** (`shared/metrics.py`): Prometheus metrics (Counter, Histogram, Gauge) with no-op fallback when `prometheus_client` not installed. Named metrics for tasks, LLM calls, HTTP requests, active agents, circuit breaker state. (ADR-015)
 - **Structured Logging** (`shared/logging_config.py`): `configure_logging(service_name)` reads `LOG_FORMAT`/`LOG_LEVEL` env vars; JSON output via structlog or stdlib text fallback. (ADR-015)
 - **Resilience Primitives** (`shared/resilience.py`): `CircuitBreaker` dataclass (CLOSED→OPEN→HALF_OPEN), `RetryConfig` + `retry_async` decorator with exponential backoff, `GracefulShutdown` async context manager with SIGTERM/SIGINT handling. (ADR-016)

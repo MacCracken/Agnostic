@@ -286,27 +286,50 @@ PDF_GENERATOR_ENGINE=reportlab
 
 ### WebGUI API Endpoints
 
-**Implemented** (see `webgui/api.py`, ADR-014):
-- `/health` - Health check endpoint
-- `GET /api/dashboard` - Aggregate dashboard data
-- `GET /api/dashboard/sessions` - Active sessions
-- `GET /api/dashboard/agents` - Agent status
-- `GET /api/dashboard/metrics` - Resource metrics
-- `GET /api/sessions` - Session history (with pagination)
-- `GET /api/sessions/search` - Search sessions
-- `GET /api/sessions/{id}` - Session details
-- `POST /api/sessions/compare` - Compare two sessions
-- `GET /api/reports` - List user's reports
-- `POST /api/reports/generate` - Generate a report
-- `GET /api/reports/{id}/download` - Download report file
-- `GET /api/agents` - All agent statuses
-- `GET /api/agents/queues` - Queue depths
-- `GET /api/agents/{name}` - Agent metrics
+**Implemented** (see `webgui/api.py`, ADR-014, ADR-017, ADR-018):
+
+Auth & API keys:
 - `POST /api/auth/login` - Authenticate and get tokens
 - `POST /api/auth/refresh` - Refresh access token
 - `POST /api/auth/logout` - Invalidate tokens
 - `GET /api/auth/me` - Current user info
+- `POST /api/auth/api-keys` - Create API key (returns raw key once)
+- `GET /api/auth/api-keys` - List API key IDs + metadata
+- `DELETE /api/auth/api-keys/{key_id}` - Revoke API key
+
+Task submission (M2M / CI/CD):
+- `POST /api/tasks` - Submit QA task (fire-and-forget, returns task_id)
+- `GET /api/tasks/{task_id}` - Poll task status
+- `POST /api/tasks/security` - Security-focused task (security-compliance agent)
+- `POST /api/tasks/performance` - Performance-focused task (performance agent)
+- `POST /api/tasks/regression` - Regression task (junior-qa + qa-analyst)
+- `POST /api/tasks/full` - Full task (all 6 agents)
+
+Dashboard:
+- `GET /api/dashboard` - Aggregate dashboard data
+- `GET /api/dashboard/sessions` - Active sessions
+- `GET /api/dashboard/agents` - Agent status
+- `GET /api/dashboard/metrics` - Resource metrics
+
+Sessions:
+- `GET /api/sessions` - Session history (with pagination)
+- `GET /api/sessions/search` - Search sessions
+- `GET /api/sessions/{id}` - Session details
+- `POST /api/sessions/compare` - Compare two sessions
+
+Reports:
+- `GET /api/reports` - List user's reports
+- `POST /api/reports/generate` - Generate a report
+- `GET /api/reports/{id}/download` - Download report file
+
+Agents:
+- `GET /api/agents` - All agent statuses
+- `GET /api/agents/queues` - Queue depths
+- `GET /api/agents/{name}` - Agent metrics
+
+Observability:
 - `GET /api/metrics` - Prometheus metrics (unauthenticated)
+- `GET /health` - Enhanced health check: Redis + RabbitMQ + per-agent liveness
 
 **Planned (not yet implemented):**
 - `/ws/realtime` - WebSocket real-time updates

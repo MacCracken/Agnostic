@@ -1,13 +1,15 @@
 import json
 import logging
 import os
+import socket
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import chainlit as cl
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 # Add config path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -765,14 +767,116 @@ async def on_chat_end() -> dict[str, Any]:
 # FastAPI application with health check and REST API
 app = FastAPI()
 
+# ---------------------------------------------------------------------------
+# P7 — CORS middleware
+# ---------------------------------------------------------------------------
+_cors_origins_raw = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:18789,http://localhost:3001",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins_raw.split(",")],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from webgui.api import api_router  # noqa: E402
 
 app.include_router(api_router)
 
 
+# ---------------------------------------------------------------------------
+# P6 — Enhanced health check
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 async def health_check() -> dict[str, Any]:
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    """Return infrastructure and agent liveness status."""
+    status_details: dict[str, Any] = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "redis": "ok",
+        "rabbitmq": "ok",
+        "agents": {},
+    }
+
+    # 1. Redis ping
+    try:
+        redis_client = config.get_redis_client()
+        redis_client.ping()
+    except Exception as e:
+        logger.warning(f"Health check: Redis error: {e}")
+        status_details["redis"] = "error"
+
+    # 2. RabbitMQ TCP connect (lightweight — avoids heavy pika import)
+    rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
+    rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
+    try:
+        sock = socket.create_connection((rabbitmq_host, rabbitmq_port), timeout=2)
+        sock.close()
+    except Exception as e:
+        logger.warning(f"Health check: RabbitMQ error: {e}")
+        status_details["rabbitmq"] = "error"
+
+    # 3. Agent liveness via Redis heartbeats
+    stale_threshold = int(os.getenv("AGENT_STALE_THRESHOLD_SECONDS", "300"))
+    now_ts = datetime.now(UTC).timestamp()
+
+    try:
+        agent_defs = _agent_registry.get_agents_for_team()
+        agent_names = [a.name.lower().replace(" ", "-") for a in agent_defs]
+    except Exception:
+        agent_names = [
+            "qa-manager",
+            "senior-qa",
+            "junior-qa",
+            "qa-analyst",
+            "security-compliance",
+            "performance",
+        ]
+
+    try:
+        redis_client = config.get_redis_client()
+        for agent_name in agent_names:
+            heartbeat_raw = redis_client.get(f"agent:{agent_name}:status")
+            if heartbeat_raw:
+                agent_info = json.loads(heartbeat_raw)
+                last_hb = agent_info.get("last_heartbeat")
+                if last_hb:
+                    try:
+                        hb_ts = datetime.fromisoformat(last_hb).timestamp()
+                        if now_ts - hb_ts <= stale_threshold:
+                            status_details["agents"][agent_name] = "alive"
+                        else:
+                            status_details["agents"][agent_name] = "stale"
+                    except ValueError:
+                        status_details["agents"][agent_name] = "stale"
+                else:
+                    status_details["agents"][agent_name] = "offline"
+            else:
+                status_details["agents"][agent_name] = "offline"
+    except Exception as e:
+        logger.warning(f"Health check: agent status error: {e}")
+        for agent_name in agent_names:
+            if agent_name not in status_details["agents"]:
+                status_details["agents"][agent_name] = "offline"
+
+    # Determine overall status
+    infra_ok = (
+        status_details["redis"] == "ok" and status_details["rabbitmq"] == "ok"
+    )
+    any_alive = any(v == "alive" for v in status_details["agents"].values())
+
+    if not infra_ok:
+        overall = "unhealthy"
+    elif any_alive:
+        overall = "healthy"
+    else:
+        overall = "degraded"
+
+    status_details["status"] = overall
+    return status_details
 
 
 if __name__ == "__main__":
