@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A2A Protocol Integration** (`webgui/api.py`): `POST /api/v1/a2a/receive` and `GET /api/v1/a2a/capabilities` — enables Agnostic to act as a first-class peer in YEOMAN's agent delegation tree. Handles `a2a:delegate` (routes to task submission), `a2a:heartbeat`, and unknown types (forward-compatible). (ADR-019)
+- **ADR-019**: A2A Protocol Integration
+- **8 new unit tests** covering A2A capabilities, delegate, heartbeat, unknown type, auth enforcement, and input validation
+
+### Added
 - **REST Task Submission** (`webgui/api.py`): `POST /api/tasks` and `GET /api/tasks/{id}` — fire-and-forget QA task submission with Redis-backed status polling (ADR-017)
 - **API Key Authentication** (`webgui/api.py`, `webgui/auth.py`): `X-API-Key` header support with dual-mode auth (static `AGNOSTIC_API_KEY` env var + Redis-backed per-client keys). New management endpoints: `POST/GET /api/auth/api-keys`, `DELETE /api/auth/api-keys/{key_id}` (ADR-017)
 - **Webhook Callbacks** (`webgui/api.py`): Optional `callback_url` + `callback_secret` on task submission — POST result with HMAC-SHA256 `X-Signature` header on task completion (ADR-018)

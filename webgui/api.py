@@ -458,6 +458,69 @@ async def submit_full_task(
 
 
 # ---------------------------------------------------------------------------
+# P8 — A2A (Agent-to-Agent) protocol endpoints
+# ---------------------------------------------------------------------------
+
+class A2AMessage(BaseModel):
+    id: str
+    type: str           # "a2a:delegate", "a2a:heartbeat", etc.
+    fromPeerId: str
+    toPeerId: str
+    payload: dict[str, Any] = {}
+    timestamp: int      # Unix milliseconds
+
+
+@api_router.post("/v1/a2a/receive")
+async def receive_a2a_message(
+    msg: A2AMessage,
+    user: dict = Depends(get_current_user),
+):
+    """Receive an A2A protocol message from a YEOMAN peer."""
+    if msg.type == "a2a:delegate":
+        payload = msg.payload
+        task_req = TaskSubmitRequest(
+            title=payload.get("title", "A2A QA Task"),
+            description=payload.get("description", ""),
+            target_url=payload.get("target_url"),
+            priority=payload.get("priority", "high"),
+            agents=payload.get("agents", []),
+            standards=payload.get("standards", []),
+        )
+        result = await submit_task(task_req, user)
+        return {"accepted": True, "task_id": result.task_id, "message_id": msg.id}
+
+    if msg.type == "a2a:heartbeat":
+        return {"accepted": True, "message_id": msg.id, "timestamp": msg.timestamp}
+
+    # Unknown message type — acknowledge receipt but take no action
+    return {"accepted": True, "message_id": msg.id, "warning": f"Unhandled type: {msg.type}"}
+
+
+@api_router.get("/v1/a2a/capabilities")
+async def a2a_capabilities():
+    """Advertise what this Agnostic instance can do as an A2A peer."""
+    return {
+        "capabilities": [
+            {
+                "name": "qa",
+                "description": "6-agent QA pipeline (security, performance, regression, compliance)",
+                "version": "1.0",
+            },
+            {
+                "name": "security-audit",
+                "description": "OWASP, GDPR, PCI DSS, SOC 2 compliance scanning",
+                "version": "1.0",
+            },
+            {
+                "name": "performance-test",
+                "description": "Load testing and P95/P99 latency profiling",
+                "version": "1.0",
+            },
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
 # Dashboard endpoints
 # ---------------------------------------------------------------------------
 

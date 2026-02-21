@@ -39,6 +39,9 @@ Welcome to the Agentic QA Team System documentation. This directory contains com
 - [Docker Build Optimization](../docker/README.md)
 - [Helm Chart](../k8s/helm/agentic-qa/README.md)
 
+### YEOMAN Integration
+- [TODO.md](../TODO.md) — REST & A2A API backlog for YEOMAN MCP bridge (P1–P8)
+
 ---
 
 For the latest updates, see the [Changelog](project/changelog.md).

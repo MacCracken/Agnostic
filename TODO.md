@@ -9,7 +9,7 @@ YEOMAN agents can drive the full QA pipeline over HTTP without the chat interfac
 
 ---
 
-## Priority 1 — Task Submission Endpoint
+## Priority 1 — Task Submission Endpoint ✅ Implemented
 
 The most critical missing piece. Currently, QA task submission only happens via
 the Chainlit `@cl.on_message` handler inside `webgui/app.py`. There is no REST
@@ -132,7 +132,7 @@ async def get_task(task_id: str, user: dict = Depends(get_current_user)):
 
 ---
 
-## Priority 2 — API Key Authentication
+## Priority 2 — API Key Authentication ✅ Implemented
 
 The current auth requires email + password login to get a JWT. For service-to-service
 integration (YEOMAN → Agnostic), API key auth is simpler and more appropriate.
@@ -147,7 +147,7 @@ integration (YEOMAN → Agnostic), API key auth is simpler and more appropriate.
 
 ---
 
-## Priority 3 — Webhook / Callback on Task Completion
+## Priority 3 — Webhook / Callback on Task Completion ✅ Implemented
 
 Instead of polling `GET /api/tasks/{task_id}`, callers can register a webhook URL
 that Agnostic POSTs to when a task completes.
@@ -163,7 +163,7 @@ POST the final `TaskStatusResponse` JSON with `X-Signature: sha256(<secret>, <bo
 
 ---
 
-## Priority 4 — Agent-Specific Task Endpoints
+## Priority 4 — Agent-Specific Task Endpoints ✅ Implemented
 
 Add convenience endpoints that pre-select the relevant agent(s) so callers don't
 need to know internal agent names:
@@ -177,7 +177,7 @@ POST /api/tasks/full        → runs full 6-agent team (same as POST /api/tasks 
 
 ---
 
-## Priority 5 — OpenAPI Schema & Client SDK
+## Priority 5 — OpenAPI Schema & Client SDK ✅ Implemented
 
 - Ensure all request/response models are typed Pydantic models (not raw dicts)
   so FastAPI auto-generates complete OpenAPI docs at `/docs`
@@ -187,7 +187,7 @@ POST /api/tasks/full        → runs full 6-agent team (same as POST /api/tasks 
 
 ---
 
-## Priority 6 — Health Endpoint Enhancements
+## Priority 6 — Health Endpoint Enhancements ✅ Implemented
 
 `GET /health` exists but only returns `{ status, timestamp }`. Extend it:
 
@@ -212,7 +212,7 @@ async def health_check():
 
 ---
 
-## Priority 7 — CORS Configuration
+## Priority 7 — CORS Configuration ✅ Implemented
 
 Add explicit CORS headers so YEOMAN dashboard (running on a different port) can
 call the Agnostic API from the browser if needed:
@@ -231,6 +231,81 @@ app.add_middleware(
 
 ---
 
+## Priority 8 — A2A Protocol Receive Endpoint ✅ Implemented
+
+Implement `POST /api/v1/a2a/receive` so YEOMAN can delegate QA tasks via the A2A
+(Agent-to-Agent) protocol instead of REST. This enables Agnostic agents to appear
+as first-class peers in YEOMAN's delegation tree.
+
+**Add to `webgui/api.py`:**
+
+```python
+from pydantic import BaseModel
+
+class A2AMessage(BaseModel):
+    id: str
+    type: str          # "a2a:delegate", "a2a:heartbeat", etc.
+    fromPeerId: str
+    toPeerId: str
+    payload: dict
+    timestamp: int     # Unix milliseconds
+
+@api_router.post("/api/v1/a2a/receive")
+async def receive_a2a_message(
+    msg: A2AMessage,
+    user: dict = Depends(get_current_user),
+):
+    """Receive an A2A protocol message from a YEOMAN peer."""
+    if msg.type == "a2a:delegate":
+        # Extract QA task from payload and route to the task queue
+        # Payload shape from YEOMAN:
+        # {
+        #   "task_type": "qa",
+        #   "title": str,
+        #   "description": str,
+        #   "target_url": str | None,
+        #   "priority": "critical" | "high" | "medium" | "low",
+        #   "agents": list[str],   # [] = all agents
+        #   "standards": list[str]
+        # }
+        payload = msg.payload
+        task_req = TaskSubmitRequest(
+            title=payload.get("title", "A2A QA Task"),
+            description=payload.get("description", ""),
+            target_url=payload.get("target_url"),
+            priority=payload.get("priority", "high"),
+            agents=payload.get("agents", []),
+            standards=payload.get("standards", []),
+        )
+        result = await submit_task(task_req, user)
+        return {"accepted": True, "task_id": result.task_id, "message_id": msg.id}
+
+    if msg.type == "a2a:heartbeat":
+        return {"accepted": True, "message_id": msg.id, "timestamp": msg.timestamp}
+
+    # Unknown message type — acknowledge receipt but take no action
+    return {"accepted": True, "message_id": msg.id, "warning": f"Unhandled type: {msg.type}"}
+```
+
+**Also add** `GET /api/v1/a2a/capabilities` to advertise what Agnostic can do:
+
+```python
+@api_router.get("/api/v1/a2a/capabilities")
+async def a2a_capabilities():
+    return {
+        "capabilities": [
+            {"name": "qa", "description": "6-agent QA pipeline (security, performance, regression, compliance)", "version": "1.0"},
+            {"name": "security-audit", "description": "OWASP, GDPR, PCI DSS, SOC 2 compliance scanning", "version": "1.0"},
+            {"name": "performance-test", "description": "Load testing and P95/P99 latency profiling", "version": "1.0"},
+        ]
+    }
+```
+
+**YEOMAN MCP tool:** `agnostic_delegate_a2a` (shipped in `packages/mcp/src/tools/agnostic-tools.ts`).
+**YEOMAN peer registration:** `POST /api/v1/a2a/peers/local` with `{ "url": "http://127.0.0.1:8000", "name": "agnostic" }`.
+
+---
+
 ## Integration Reference
 
 The YEOMAN MCP bridge (`packages/mcp/src/tools/agnostic-tools.ts`) calls:
@@ -244,14 +319,15 @@ The YEOMAN MCP bridge (`packages/mcp/src/tools/agnostic-tools.ts`) calls:
 | `agnostic_session_detail` | `GET /api/sessions/{id}` | ✅ Exists |
 | `agnostic_dashboard` | `GET /api/dashboard` | ✅ Exists |
 | `agnostic_generate_report` | `POST /api/reports/generate` | ✅ Exists |
-| `agnostic_submit_qa` | `POST /api/tasks` | ❌ Needs Priority 1 above |
-| `agnostic_task_status` | `GET /api/tasks/{id}` | ❌ Needs Priority 1 above |
+| `agnostic_submit_qa` | `POST /api/tasks` | ✅ Functional (P1 + P3 implemented) |
+| `agnostic_task_status` | `GET /api/tasks/{id}` | ✅ Functional (P1 implemented) |
+| `agnostic_delegate_a2a` | `POST /api/v1/a2a/receive` | ✅ Implemented (P8) |
 
 Configure in YEOMAN `.env`:
 ```env
 MCP_EXPOSE_AGNOSTIC_TOOLS=true
 AGNOSTIC_URL=http://127.0.0.1:8000
-AGNOSTIC_EMAIL=admin@example.com
-AGNOSTIC_PASSWORD=your-password
-# Future: AGNOSTIC_API_KEY=... (after Priority 2 is implemented)
+AGNOSTIC_API_KEY=your-api-key       # preferred (P2 implemented)
+# AGNOSTIC_EMAIL=admin@example.com  # fallback JWT auth
+# AGNOSTIC_PASSWORD=your-password   # fallback JWT auth
 ```

@@ -22,6 +22,9 @@ This directory contains Architecture Decision Records (ADRs) for the Agentic QA 
 | [ADR-014](014-webgui-rest-api.md) | WebGUI REST API | Accepted |
 | [ADR-015](015-observability-stack.md) | Observability Stack Integration | Accepted |
 | [ADR-016](016-communication-hardening.md) | Agent Communication Hardening | Accepted |
+| [ADR-017](017-rest-task-submission-api-keys.md) | REST Task Submission and API Key Authentication | Accepted |
+| [ADR-018](018-webhook-callbacks-cors.md) | Webhook Callbacks and CORS Configuration | Accepted |
+| [ADR-019](019-a2a-protocol.md) | A2A Protocol Integration | Accepted |
 
 ## ADR Template
 

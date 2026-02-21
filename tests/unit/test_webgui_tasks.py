@@ -510,3 +510,155 @@ class TestAgentSpecificEndpoints:
             json={"title": "T", "description": "D"},
         )
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# A2A protocol endpoints (P8)
+# ---------------------------------------------------------------------------
+
+class TestA2AEndpoints:
+    """Tests for POST /api/v1/a2a/receive and GET /api/v1/a2a/capabilities."""
+
+    def test_capabilities_unauthenticated(self, app):
+        """GET /api/v1/a2a/capabilities should not require auth."""
+        client = TestClient(app)
+        resp = client.get("/api/v1/a2a/capabilities")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "capabilities" in data
+        assert isinstance(data["capabilities"], list)
+        assert len(data["capabilities"]) > 0
+        names = [c["name"] for c in data["capabilities"]]
+        assert "qa" in names
+        assert "security-audit" in names
+        assert "performance-test" in names
+
+    def test_capabilities_shape(self, app):
+        """Each capability must have name, description, and version."""
+        client = TestClient(app)
+        resp = client.get("/api/v1/a2a/capabilities")
+        for cap in resp.json()["capabilities"]:
+            assert "name" in cap
+            assert "description" in cap
+            assert "version" in cap
+
+    @patch("config.environment.config")
+    @patch("webgui.api.asyncio")
+    def test_delegate_message_spawns_task(
+        self, mock_asyncio, mock_config, authed_client
+    ):
+        """a2a:delegate should create a QA task and return task_id."""
+        mock_redis = Mock()
+        mock_redis.setex.return_value = True
+        mock_config.get_redis_client.return_value = mock_redis
+        mock_asyncio.create_task = Mock()
+
+        resp = authed_client.post(
+            "/api/v1/a2a/receive",
+            json={
+                "id": "msg-001",
+                "type": "a2a:delegate",
+                "fromPeerId": "yeoman-agent",
+                "toPeerId": "agnostic",
+                "payload": {
+                    "title": "Security scan via A2A",
+                    "description": "Run OWASP checks on staging",
+                    "priority": "high",
+                    "agents": ["security-compliance"],
+                    "standards": ["OWASP"],
+                },
+                "timestamp": 1708516800000,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted"] is True
+        assert "task_id" in data
+        assert data["message_id"] == "msg-001"
+
+    @patch("config.environment.config")
+    @patch("webgui.api.asyncio")
+    def test_delegate_minimal_payload(
+        self, mock_asyncio, mock_config, authed_client
+    ):
+        """Delegate with only title + description in payload."""
+        mock_redis = Mock()
+        mock_redis.setex.return_value = True
+        mock_config.get_redis_client.return_value = mock_redis
+        mock_asyncio.create_task = Mock()
+
+        resp = authed_client.post(
+            "/api/v1/a2a/receive",
+            json={
+                "id": "msg-002",
+                "type": "a2a:delegate",
+                "fromPeerId": "yeoman",
+                "toPeerId": "agnostic",
+                "payload": {"title": "Quick QA", "description": "Full pipeline"},
+                "timestamp": 1708516800000,
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["accepted"] is True
+
+    def test_heartbeat_message(self, authed_client):
+        """a2a:heartbeat should be acknowledged immediately."""
+        resp = authed_client.post(
+            "/api/v1/a2a/receive",
+            json={
+                "id": "hb-001",
+                "type": "a2a:heartbeat",
+                "fromPeerId": "yeoman",
+                "toPeerId": "agnostic",
+                "payload": {},
+                "timestamp": 1708516800000,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted"] is True
+        assert data["message_id"] == "hb-001"
+        assert data["timestamp"] == 1708516800000
+
+    def test_unknown_message_type_returns_warning(self, authed_client):
+        """Unknown message types should be acknowledged with a warning."""
+        resp = authed_client.post(
+            "/api/v1/a2a/receive",
+            json={
+                "id": "unk-001",
+                "type": "a2a:unknown_future_type",
+                "fromPeerId": "yeoman",
+                "toPeerId": "agnostic",
+                "payload": {},
+                "timestamp": 1708516800000,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["accepted"] is True
+        assert "warning" in data
+        assert "a2a:unknown_future_type" in data["warning"]
+
+    def test_receive_requires_auth(self, app):
+        """POST /api/v1/a2a/receive must reject unauthenticated requests."""
+        client = TestClient(app)
+        resp = client.post(
+            "/api/v1/a2a/receive",
+            json={
+                "id": "x",
+                "type": "a2a:heartbeat",
+                "fromPeerId": "y",
+                "toPeerId": "z",
+                "payload": {},
+                "timestamp": 0,
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_receive_invalid_body(self, authed_client):
+        """Missing required fields should return 422."""
+        resp = authed_client.post(
+            "/api/v1/a2a/receive",
+            json={"type": "a2a:heartbeat"},  # missing id, fromPeerId, etc.
+        )
+        assert resp.status_code == 422

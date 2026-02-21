@@ -331,6 +331,10 @@ Observability:
 - `GET /api/metrics` - Prometheus metrics (unauthenticated)
 - `GET /health` - Enhanced health check: Redis + RabbitMQ + per-agent liveness
 
+A2A Protocol (YEOMAN integration):
+- `POST /api/v1/a2a/receive` - Receive A2A message (`a2a:delegate`, `a2a:heartbeat`, unknown types)
+- `GET /api/v1/a2a/capabilities` - Advertise supported capabilities (unauthenticated)
+
 **Planned (not yet implemented):**
 - `/ws/realtime` - WebSocket real-time updates
 

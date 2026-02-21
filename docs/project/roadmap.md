@@ -154,6 +154,14 @@ This roadmap outlines the strategic direction and upcoming enhancements for the 
 - Default allows YEOMAN dashboard (`localhost:18789`) and common dev port (`localhost:3001`)
 - See ADR-018
 
+#### A2A Protocol Integration
+- **Status**: Completed
+- `POST /api/v1/a2a/receive` handles `a2a:delegate`, `a2a:heartbeat`, and unknown types (forward-compatible)
+- `GET /api/v1/a2a/capabilities` advertises QA, security-audit, and performance-test capabilities
+- Agnostic is now a first-class peer in YEOMAN's agent delegation tree
+- Reuses existing task submission, auth, and Redis infrastructure
+- See ADR-019
+
 ---
 
 ### Immediate (Next 3 Months)

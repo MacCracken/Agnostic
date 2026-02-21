@@ -238,6 +238,80 @@ assert request.headers["X-Signature"] == f"sha256={expected}"
 
 ---
 
+### A2A Protocol (Agent-to-Agent)
+
+These endpoints implement the YEOMAN A2A wire protocol so Agnostic can appear as a first-class peer in a YEOMAN delegation tree (ADR-019).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| `POST` | `/api/v1/a2a/receive` | Yes | Receive an A2A protocol message |
+| `GET`  | `/api/v1/a2a/capabilities` | No | Advertise supported capabilities |
+
+#### `GET /api/v1/a2a/capabilities`
+
+No authentication required.
+
+```json
+{
+  "capabilities": [
+    {"name": "qa",             "description": "6-agent QA pipeline (security, performance, regression, compliance)", "version": "1.0"},
+    {"name": "security-audit", "description": "OWASP, GDPR, PCI DSS, SOC 2 compliance scanning", "version": "1.0"},
+    {"name": "performance-test","description": "Load testing and P95/P99 latency profiling", "version": "1.0"}
+  ]
+}
+```
+
+#### `POST /api/v1/a2a/receive`
+
+Accepts any A2A envelope. Routing is performed on the `type` field:
+
+```json
+{
+  "id": "msg-abc-123",
+  "type": "a2a:delegate",
+  "fromPeerId": "yeoman-agent",
+  "toPeerId": "agnostic",
+  "payload": {
+    "title": "Security scan",
+    "description": "Run OWASP checks on staging",
+    "target_url": "https://staging.example.com",
+    "priority": "high",
+    "agents": ["security-compliance"],
+    "standards": ["OWASP", "GDPR"]
+  },
+  "timestamp": 1708516800000
+}
+```
+
+| `type` | Behaviour |
+|--------|-----------|
+| `a2a:delegate` | Extracts task fields from `payload`, submits via `POST /api/tasks`, returns `task_id` |
+| `a2a:heartbeat` | Echoes `message_id` + `timestamp` |
+| *(anything else)* | Returns `accepted: true` with a `warning` field (forward-compatible) |
+
+**Delegate response:**
+```json
+{"accepted": true, "task_id": "3f4a1b2c-...", "message_id": "msg-abc-123"}
+```
+
+**Heartbeat response:**
+```json
+{"accepted": true, "message_id": "hb-001", "timestamp": 1708516800000}
+```
+
+**Payload fields for `a2a:delegate`** (all optional except `title` + `description`):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `title` | string | `"A2A QA Task"` | Task title |
+| `description` | string | `""` | Task requirements |
+| `target_url` | string\|null | `null` | URL under test |
+| `priority` | string | `"high"` | `critical \| high \| medium \| low` |
+| `agents` | string[] | `[]` | Agent subset; `[]` = all 6 |
+| `standards` | string[] | `[]` | e.g. `["OWASP", "GDPR"]` |
+
+---
+
 ### Observability
 
 | Method | Path | Auth | Description |

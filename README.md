@@ -12,12 +12,12 @@ A containerized, multi-agent QA platform powered by CrewAI. Six specialized AI a
 
 ```bash
 # 1. Clone and setup
-git clone <repository-url> && cd agnostic
+git clone https://github.com/MacCracken/agnostic && cd agnostic
 cp .env.example .env
 # Edit .env: set OPENAI_API_KEY
 
 # 2. Launch (Docker)
-docker-compose up --build -d
+docker compose up --build -d
 
 # 3. Access WebGUI
 open http://localhost:8000
@@ -74,7 +74,7 @@ Performance & Resilience Agent      ─┘
 # Optimized build (99% faster)
 ./scripts/build-docker.sh --base-only  # One-time (~5 min)
 ./scripts/build-docker.sh --agents-only  # Rebuilds (~30 sec)
-docker-compose up -d
+docker compose up -d
 ```
 
 [Docker Deployment Guide →](docs/deployment/docker-compose.md)
@@ -127,6 +127,39 @@ result = await manager.orchestrate_qa_session({
 
 **Python**: 3.11-3.13 (compatible)
 
+## YEOMAN Integration
+
+Agnostic can be orchestrated by [SecureYeoman](https://github.com/MacCracken/secureyeoman) via 10 MCP bridge tools (`agnostic_*`). The integration is production-ready — Priorities P1–P4 are fully implemented.
+
+### Quick setup
+
+```bash
+# 1. Start the Agnostic stack (or set AGNOSTIC_AUTO_START=true in YEOMAN's .env)
+docker compose up -d
+
+# 2. Configure YEOMAN
+MCP_EXPOSE_AGNOSTIC_TOOLS=true
+AGNOSTIC_URL=http://127.0.0.1:8000
+AGNOSTIC_API_KEY=your-api-key      # preferred (P2 implemented)
+```
+
+### Available MCP tools
+
+| Tool | Purpose |
+|------|---------|
+| `agnostic_health` | Reachability check |
+| `agnostic_agents_status` | Per-agent live status |
+| `agnostic_agents_queues` | RabbitMQ queue depths |
+| `agnostic_dashboard` | Aggregate metrics |
+| `agnostic_session_list` | Recent QA sessions |
+| `agnostic_session_detail` | Full session results |
+| `agnostic_generate_report` | Generate exec/security/perf report |
+| `agnostic_submit_qa` | Submit a QA task (REST, webhook-ready) |
+| `agnostic_task_status` | Poll task status |
+| `agnostic_delegate_a2a` | Delegate via A2A protocol (requires P8) |
+
+See [`TODO.md`](TODO.md) for the full API improvement backlog (P1–P8).
+
 ## Contributing
 
 See [Contributing Guidelines](docs/development/contributing.md).
@@ -137,4 +170,4 @@ MIT License - see [LICENSE](LICENSE) file.
 
 ---
 
-*Last Updated: 2026-02-16* | [Documentation](docs/README.md) | [Changelog](docs/project/changelog.md)
+*Last Updated: 2026-02-21* | [Documentation](docs/README.md) | [Changelog](docs/project/changelog.md)
