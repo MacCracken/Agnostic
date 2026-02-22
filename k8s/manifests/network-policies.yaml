@@ -1,0 +1,184 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: qa-agents-network-policy
+  namespace: agentic-qa
+spec:
+  podSelector:
+    matchLabels:
+      component: qa-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            component: qa-agent
+      - podSelector:
+          matchLabels:
+            app: webgui
+      - namespaceSelector:
+          matchLabels:
+            name: ingress-nginx
+      ports:
+      - protocol: TCP
+        port: 8001
+      - protocol: TCP
+        port: 8002
+      - protocol: TCP
+        port: 8003
+      - protocol: TCP
+        port: 8004
+      - protocol: TCP
+        port: 8005
+      - protocol: TCP
+        port: 8006
+  egress:
+    - to:
+      - podSelector:
+          matchLabels:
+            app: redis
+      ports:
+      - protocol: TCP
+        port: 6379
+    - to:
+      - podSelector:
+          matchLabels:
+            app: rabbitmq
+      ports:
+      - protocol: TCP
+        port: 5672
+    - to:
+      - namespaceSelector: {}
+      ports:
+      - protocol: TCP
+        port: 53
+      - protocol: UDP
+        port: 53
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-network-policy
+  namespace: agentic-qa
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            component: qa-agent
+      - podSelector:
+          matchLabels:
+            app: webgui
+      ports:
+      - protocol: TCP
+        port: 6379
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rabbitmq-network-policy
+  namespace: agentic-qa
+spec:
+  podSelector:
+    matchLabels:
+      app: rabbitmq
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            component: qa-agent
+      - podSelector:
+          matchLabels:
+            app: webgui
+      ports:
+      - protocol: TCP
+        port: 5672
+      - protocol: TCP
+        port: 15672
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: webgui-network-policy
+  namespace: agentic-qa
+spec:
+  podSelector:
+    matchLabels:
+      app: webgui
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: ingress-nginx
+      ports:
+      - protocol: TCP
+        port: 8000
+  egress:
+    - to:
+      - podSelector:
+          matchLabels:
+            app: redis
+      ports:
+      - protocol: TCP
+        port: 6379
+    - to:
+      - podSelector:
+          matchLabels:
+            app: rabbitmq
+      ports:
+      - protocol: TCP
+        port: 5672
+    - to:
+      - podSelector:
+          matchLabels:
+            component: qa-agent
+      ports:
+      - protocol: TCP
+        port: 8001
+      - protocol: TCP
+        port: 8002
+      - protocol: TCP
+        port: 8003
+      - protocol: TCP
+        port: 8004
+      - protocol: TCP
+        port: 8005
+      - protocol: TCP
+        port: 8006
+    - to:
+      - namespaceSelector: {}
+      ports:
+      - protocol: TCP
+        port: 53
+      - protocol: UDP
+        port: 53
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+            - 10.0.0.0/8
+            - 172.16.0.0/12
+            - 192.168.0.0/16

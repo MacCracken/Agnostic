@@ -224,8 +224,18 @@ affinity: {}
 
 # Autoscaling
 autoscaling:
-  enabled: false
+  enabled: true
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
   targetMemoryUtilizationPercentage: 80
+  juniorQaMaxReplicas: 5
+  webguiMaxReplicas: 5
+
+# Startup probe configuration
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 30
+  timeoutSeconds: 3

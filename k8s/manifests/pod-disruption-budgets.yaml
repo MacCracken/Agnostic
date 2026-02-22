@@ -1,0 +1,76 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: qa-manager-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: qa-manager
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: senior-qa-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: senior-qa
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: junior-qa-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: junior-qa
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: qa-analyst-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: qa-analyst
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: security-compliance-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: security-compliance
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: performance-agent-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: performance-agent
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: webgui-pdb
+  namespace: agentic-qa
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: webgui

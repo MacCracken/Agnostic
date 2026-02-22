@@ -73,6 +73,14 @@ spec:
             port: 8002
           initialDelaySeconds: 10
           periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+          timeoutSeconds: 3
       volumes:
       - name: tmp
         emptyDir: {}
@@ -154,6 +162,14 @@ spec:
             port: 8003
           initialDelaySeconds: 10
           periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8003
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+          timeoutSeconds: 3
       volumes:
       - name: tmp
         emptyDir: {}
@@ -235,6 +251,14 @@ spec:
             port: 8004
           initialDelaySeconds: 10
           periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8004
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+          timeoutSeconds: 3
       volumes:
       - name: tmp
         emptyDir: {}
@@ -316,6 +340,14 @@ spec:
             port: 8005
           initialDelaySeconds: 10
           periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8005
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+          timeoutSeconds: 3
       volumes:
       - name: tmp
         emptyDir: {}
@@ -397,6 +429,14 @@ spec:
             port: 8006
           initialDelaySeconds: 10
           periodSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8006
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+          timeoutSeconds: 3
       volumes:
       - name: tmp
         emptyDir: {}
