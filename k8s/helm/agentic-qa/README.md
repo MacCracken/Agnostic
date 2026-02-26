@@ -60,10 +60,15 @@ The chart includes templates for all system components:
 | `performance.yaml` | Performance & Resilience agent deployment + service |
 | `webgui.yaml` | Chainlit WebGUI deployment + service |
 | `rabbitmq.yaml` | RabbitMQ deployment + PVC + service |
+| `redis.yaml` | Redis deployment + PVC + service |
 | `serviceaccount.yaml` | ServiceAccount for pod identity |
 | `ingress.yaml` | Ingress for external WebGUI access |
+| `network-policy.yaml` | NetworkPolicies for least-privilege traffic isolation |
+| `hpa.yaml` | HorizontalPodAutoscalers for all agents + WebGUI |
+| `pdb.yaml` | PodDisruptionBudgets for HA during node maintenance |
+| `resource-quota.yaml` | Namespace-level resource quota (opt-in) |
 | `configmap.yaml` | Shared environment configuration |
-| `secrets.yaml` | OpenAI API key and RabbitMQ password |
+| `secret.yaml` | OpenAI API key and RabbitMQ password |
 
 ## Configuration
 
@@ -75,7 +80,10 @@ Key configuration options in `values.yaml`:
 - **Ingress**: External access configuration (WebGUI only; RabbitMQ management is not exposed)
 - **Security**: Hardened by default — read-only root filesystem, drop all capabilities, seccomp RuntimeDefault
 - **Resources**: CPU and memory limits for each component (aligned with docker-compose)
-- **Autoscaling**: Horizontal pod autoscaling settings
+- **Autoscaling** (`autoscaling.*`): HPA for all deployments — CPU/memory targets, min/max replicas
+- **Network Policies** (`networkPolicy.enabled`): Least-privilege ingress/egress rules per pod type
+- **Pod Disruption Budgets** (`podDisruptionBudget.*`): Minimum available pods during voluntary disruptions
+- **Resource Quota** (`resourceQuota.*`): Namespace-level caps on CPU, memory, pods, etc. (disabled by default)
 
 ## Scaling
 
@@ -105,10 +113,24 @@ helm upgrade agentic-qa ./k8s/helm/agentic-qa \
 helm uninstall agentic-qa --namespace agentic-qa
 ```
 
+## Environment-Specific Values
+
+Pre-built values files are provided for common environments:
+
+```bash
+# Development (minimal resources, autoscaling and quotas off)
+helm install agentic-qa ./k8s/helm/agentic-qa -f values-dev.yaml
+
+# Production (full HA, HPA, quotas, TLS)
+helm install agentic-qa ./k8s/helm/agentic-qa -f values-prod.yaml
+```
+
 ## Troubleshooting
 
-1. **Pods not starting**: Check resource limits and node availability
-2. **Connection issues**: Verify service names and network policies
+1. **Pods not starting**: Check resource limits and node availability (`kubectl describe pod <name> -n agentic-qa`)
+2. **Connection issues**: Verify service names and check network policies (`kubectl get networkpolicies -n agentic-qa`)
 3. **Secret errors**: Ensure OpenAI API key is properly base64 encoded
+4. **HPA not scaling**: Confirm `metrics-server` is running (`kubectl get deployment metrics-server -n kube-system`)
+5. **Node drain blocked**: A PDB with `minAvailable: 1` on a single-replica pod blocks drain — scale to 2 replicas first or set `podDisruptionBudget.enabled=false` temporarily
 
-For more details, see the main documentation.
+For more details, see the [Kubernetes Deployment Guide](../../docs/deployment/kubernetes.md).

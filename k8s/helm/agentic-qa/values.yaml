@@ -222,7 +222,7 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
-# Autoscaling
+# Autoscaling (HorizontalPodAutoscaler)
 autoscaling:
   enabled: true
   minReplicas: 1
@@ -231,6 +231,30 @@ autoscaling:
   targetMemoryUtilizationPercentage: 80
   juniorQaMaxReplicas: 5
   webguiMaxReplicas: 5
+
+# Network policies (restricts inter-pod traffic to only what is needed)
+networkPolicy:
+  enabled: true
+
+# Pod Disruption Budgets (ensures at least one pod remains during node drains)
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Namespace-level resource quotas
+resourceQuota:
+  enabled: false  # Enable in production to cap total cluster resource usage
+  requests:
+    cpu: "16"
+    memory: "32Gi"
+  limits:
+    cpu: "32"
+    memory: "64Gi"
+  pods: "20"
+  services: "20"
+  secrets: "20"
+  configmaps: "20"
+  persistentvolumeclaims: "10"
 
 # Startup probe configuration
 startupProbe:

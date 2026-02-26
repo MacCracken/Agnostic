@@ -20,6 +20,12 @@ resources:
   # Optional: Ingress for external access
   - manifests/ingress.yaml
 
+  # Production readiness
+  - manifests/network-policies.yaml
+  - manifests/horizontal-pod-autoscalers.yaml
+  - manifests/pod-disruption-budgets.yaml
+  - manifests/resource-quota.yaml
+
 # Common labels for all resources
 commonLabels:
   app.kubernetes.io/name: "agentic-qa"

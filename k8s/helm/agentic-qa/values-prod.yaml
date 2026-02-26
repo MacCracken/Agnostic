@@ -1,0 +1,200 @@
+# values-prod.yaml — Production environment overrides
+#
+# Use with:
+#   helm install agentic-qa ./k8s/helm/agentic-qa \
+#     --namespace agentic-qa --create-namespace \
+#     -f values-prod.yaml \
+#     --set secrets.openaiApiKey=$(echo -n "your-key" | base64) \
+#     --set secrets.rabbitmqPassword=$(echo -n "your-secure-password" | base64) \
+#     --set secrets.rabbitmqPasswordPlain=your-secure-password \
+#     --set ingress.host=qa.yourdomain.com
+
+# Image tag — pin to a specific release in production
+image:
+  tag: "2026.2.22"
+  pullPolicy: IfNotPresent
+
+# Namespace
+namespace:
+  name: "agentic-qa"
+
+# Production resource sizing
+agents:
+  qaManager:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "1"
+      limits:
+        memory: "2Gi"
+        cpu: "2"
+
+  seniorQa:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "1.5Gi"
+        cpu: "1"
+      limits:
+        memory: "3Gi"
+        cpu: "2"
+
+  juniorQa:
+    replicaCount: 2  # Start with 2 for immediate burst capacity
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "750m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
+
+  qaAnalyst:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "750m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
+
+  securityCompliance:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "750m"
+      limits:
+        memory: "2Gi"
+        cpu: "1500m"
+
+  performance:
+    replicaCount: 1
+    resources:
+      requests:
+        memory: "1.5Gi"
+        cpu: "1"
+      limits:
+        memory: "3Gi"
+        cpu: "2"
+
+# Production infrastructure sizing
+redis:
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+  persistence:
+    size: 5Gi
+
+rabbitmq:
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+  persistence:
+    size: 5Gi
+
+# WebGUI with LoadBalancer (or use ingress below)
+webgui:
+  replicaCount: 2
+  service:
+    type: ClusterIP  # Use Ingress for external access
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "1"
+
+# Ingress with TLS (update host and issuer for your domain)
+ingress:
+  enabled: true
+  className: "nginx"
+  host: "qa.yourdomain.com"  # REQUIRED: update this
+  tls:
+    enabled: true
+    secretName: "agentic-qa-tls"
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+
+# HPA enabled with production-appropriate thresholds
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80
+  juniorQaMaxReplicas: 10
+  webguiMaxReplicas: 5
+
+# Network policies enforced in production
+networkPolicy:
+  enabled: true
+
+# PDBs ensure zero-downtime rolling updates
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Resource quota protects cluster from runaway consumption
+resourceQuota:
+  enabled: true
+  requests:
+    cpu: "16"
+    memory: "32Gi"
+  limits:
+    cpu: "32"
+    memory: "64Gi"
+  pods: "30"
+  services: "20"
+  secrets: "20"
+  configmaps: "20"
+  persistentvolumeclaims: "10"
+
+# Pod placement preferences
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: component
+            operator: In
+            values:
+            - agent
+        topologyKey: kubernetes.io/hostname
+
+# Structured JSON logging in production
+env:
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  RABBITMQ_HOST: "rabbitmq-service"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: "guest"
+  RABBITMQ_VHOST: "/"
+  WEBGUI_HOST: "0.0.0.0"
+  WEBGUI_PORT: "8000"
+  PRIMARY_MODEL_PROVIDER: "openai"
+  ENABLE_SELF_HEALING: "true"
+  ENABLE_FUZZY_VERIFICATION: "true"
+  ENABLE_RISK_BASED_PRIORITIZATION: "true"
+  ENABLE_CONTEXT_AWARE_TESTING: "true"
+  ENVIRONMENT: "production"
+  PYTHONPATH: "/app"

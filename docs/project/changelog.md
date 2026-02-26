@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`pyproject.toml` dependency comment**: Corrected the note on `crewai` and Python 3.14. crewai 1.x (latest 1.9.3) also requires `Python <3.14` because chromadb (a crewai dependency) uses `pydantic.v1.BaseSettings`, which is broken on Python 3.14. Python 3.14 support is blocked upstream; production containers use Python 3.11. Roadmap updated to remove the incorrect claim that a crewai 1.x upgrade would unblock Python 3.14.
+
+### Added
+- **AGNOS OS Integration** (`config/models.json`, `.env.example`, `docs/adr/021-agnosticos-integration.md`, `docs/deployment/agnosticos.md`): Agnostic can now route all LLM inference through the AGNOS OS LLM Gateway (port 8088) when running on agnosticos. Adds `agnos_gateway` provider entry (disabled by default, OpenAI-compatible). Enables per-agent token accounting, shared response cache, OS-level rate limiting, and the unified AGNOS audit trail. No changes to Python agent code — pure configuration. (ADR-021)
+  - `config/models.json`: new `agnos_gateway` provider entry
+  - `.env.example`: `AGNOS_LLM_GATEWAY_ENABLED`, `AGNOS_LLM_GATEWAY_URL`, `AGNOS_LLM_GATEWAY_API_KEY`, `AGNOS_LLM_GATEWAY_MODEL`
+  - `docs/adr/021-agnosticos-integration.md`: integration architecture and implementation checklist
+  - `docs/deployment/agnosticos.md`: deployment guide for running Agnostic on AGNOS OS
+  - `tests/unit/test_model_manager.py`: 41 unit tests covering `models.json` schema, `agnos_gateway` provider structure, `ModelManager` provider creation, `OpenAIProvider` with gateway URL, env-var routing, and disabled-by-default guard
+
+### Added
+- **Kubernetes Production Readiness** (`k8s/`): Full production-ready controls for both raw manifests and Helm chart (ADR-020):
+  - **HorizontalPodAutoscalers** (`k8s/manifests/horizontal-pod-autoscalers.yaml`, `k8s/helm/.../hpa.yaml`): `autoscaling/v2` HPAs for all 6 agents + WebGUI. Junior QA and WebGUI scale to 5 replicas; all others to 3. CPU/memory targets at 80%, conservative scale-down (300 s stabilization window).
+  - **PodDisruptionBudgets** (`k8s/manifests/pod-disruption-budgets.yaml`, `k8s/helm/.../pdb.yaml`): `policy/v1` PDBs with `minAvailable: 1` for all 7 deployments — prevents evicting the last pod during node drains and rolling upgrades.
+  - **NetworkPolicies** (`k8s/manifests/network-policies.yaml`, `k8s/helm/.../network-policy.yaml`): Least-privilege ingress/egress rules for agents, Redis, RabbitMQ, and WebGUI. Agents may reach public internet (LLM API calls) but not private CIDRs.
+  - **ResourceQuota** (`k8s/manifests/resource-quota.yaml`, `k8s/helm/.../resource-quota.yaml`): Namespace quota capping total CPU (32 cores), RAM (64 Gi), pods (20), services (20), secrets (20), ConfigMaps (20), PVCs (10). Enabled by default in raw manifests; opt-in in Helm (`resourceQuota.enabled: false`).
+- **Helm chart templates**: `hpa.yaml`, `pdb.yaml`, `resource-quota.yaml` — all conditioned on `values.yaml` feature flags.
+- **`values.yaml` additions**: `networkPolicy.enabled`, `podDisruptionBudget.enabled/minAvailable`, `resourceQuota.*` blocks.
+- **`kustomization.yaml` fix**: Added the four new production-readiness manifests to the Kustomize resource list (they were present on disk but not applied by `kubectl apply -k k8s/`).
+- **ADR-020**: Kubernetes Production Readiness
+- **Environment-specific values**: `k8s/helm/agentic-qa/values-dev.yaml` and `values-prod.yaml` as annotated starting points.
+- **K8s test suite** (`tests/k8s/`): YAML syntax and structural validation tests for all manifests and Helm values.
+
 ### Added
 - **A2A Protocol Integration** (`webgui/api.py`): `POST /api/v1/a2a/receive` and `GET /api/v1/a2a/capabilities` — enables Agnostic to act as a first-class peer in YEOMAN's agent delegation tree. Handles `a2a:delegate` (routes to task submission), `a2a:heartbeat`, and unknown types (forward-compatible). (ADR-019)
 - **ADR-019**: A2A Protocol Integration

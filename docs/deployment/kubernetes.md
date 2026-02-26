@@ -56,7 +56,15 @@ kubectl apply -f k8s/manifests/webgui.yaml
 
 # Optional: Add ingress for external access
 kubectl apply -f k8s/manifests/ingress.yaml
+
+# Production readiness (apply after agents are running)
+kubectl apply -f k8s/manifests/network-policies.yaml
+kubectl apply -f k8s/manifests/horizontal-pod-autoscalers.yaml
+kubectl apply -f k8s/manifests/pod-disruption-budgets.yaml
+kubectl apply -f k8s/manifests/resource-quota.yaml
 ```
+
+> **Tip**: When using `kubectl apply -k k8s/`, all of the above including production-readiness manifests are applied in one step.
 
 ### Step 4: Verify Deployment
 
@@ -129,19 +137,27 @@ kubectl port-forward service/webgui-service 8000:8000 -n agentic-qa
 
 ### Agent Scaling
 ```bash
-# Scale specific agents
+# Scale specific agents manually
 helm upgrade agentic-qa ./k8s/helm/agentic-qa \
   --namespace agentic-qa \
   --set agents.juniorQa.replicaCount=5 \
   --set agents.seniorQa.replicaCount=2
 
-# Enable autoscaling
+# HPA is enabled by default (autoscaling.enabled=true)
+# Adjust thresholds:
 helm upgrade agentic-qa ./k8s/helm/agentic-qa \
   --namespace agentic-qa \
-  --set autoscaling.enabled=true \
   --set autoscaling.minReplicas=2 \
-  --set autoscaling.maxReplicas=10
+  --set autoscaling.maxReplicas=10 \
+  --set autoscaling.juniorQaMaxReplicas=10
+
+# Disable HPA (use fixed replicas only):
+helm upgrade agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --set autoscaling.enabled=false
 ```
+
+> **Note**: HPA requires the [Kubernetes Metrics Server](https://github.com/kubernetes-sigs/metrics-server) to be installed. For kind/minikube, enable it with `minikube addons enable metrics-server`.
 
 ### Resource Configuration
 ```yaml
@@ -260,6 +276,59 @@ networkPolicy:
   enabled: true
 ```
 
+### High Availability (PodDisruptionBudgets)
+
+PDBs are enabled by default and ensure at least one pod is always available during voluntary disruptions (node drains, cluster upgrades):
+
+```bash
+# View PDB status
+kubectl get pdb -n agentic-qa
+
+# Disable PDBs (not recommended in production)
+helm upgrade agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --set podDisruptionBudget.enabled=false
+```
+
+> **Note**: A `minAvailable: 1` PDB on a single-replica deployment will block `kubectl drain` until the pod is rescheduled. Ensure your cluster has spare capacity or temporarily scale to 2 replicas before draining.
+
+### Network Policies
+
+NetworkPolicies enforce least-privilege traffic between pods:
+
+| Policy | Allows Ingress From | Allows Egress To |
+|---|---|---|
+| `qa-agents-network-policy` | Other agents, WebGUI, ingress-nginx | Redis, RabbitMQ, DNS, public internet (LLM APIs) |
+| `redis-network-policy` | Agents, WebGUI | None |
+| `rabbitmq-network-policy` | Agents, WebGUI | None |
+| `webgui-network-policy` | ingress-nginx | Redis, RabbitMQ, agents (health), DNS, public internet |
+
+```bash
+# View network policies
+kubectl get networkpolicies -n agentic-qa
+
+# Disable network policies (e.g., on clusters without CNI support)
+helm upgrade agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --set networkPolicy.enabled=false
+```
+
+> **CNI requirement**: NetworkPolicies require a CNI plugin that supports them (Calico, Cilium, WeaveNet, GKE Dataplane V2, AWS VPC CNI with network policy enabled).
+
+### Resource Quotas
+
+Namespace-level quotas cap total resource consumption and prevent runaway pods from starving other services:
+
+```bash
+# View current quota usage
+kubectl describe resourcequota agentic-qa-quota -n agentic-qa
+
+# Enable quota via Helm (disabled by default to allow minimal local deployments)
+helm upgrade agentic-qa ./k8s/helm/agentic-qa \
+  --namespace agentic-qa \
+  --set resourceQuota.enabled=true
+```
+
 ### Backup and Recovery
 ```bash
 # Backup Redis data
@@ -271,19 +340,27 @@ kubectl get pvc -n agentic-qa
 ```
 
 ### Multi-Environment Deployment
+
+Example values files are provided for common deployment scenarios:
+
 ```bash
-# Development
+# Development (reduced resources, no HPA, no quota)
 helm install agentic-qa-dev ./k8s/helm/agentic-qa \
   --namespace agentic-qa-dev \
   --create-namespace \
-  -f values-dev.yaml
+  -f k8s/helm/agentic-qa/values-dev.yaml \
+  --set secrets.openaiApiKey=$(echo -n "your-key" | base64)
 
-# Production
+# Production (full HA, HPA, quota, TLS ingress)
 helm install agentic-qa-prod ./k8s/helm/agentic-qa \
   --namespace agentic-qa-prod \
   --create-namespace \
-  -f values-prod.yaml
+  -f k8s/helm/agentic-qa/values-prod.yaml \
+  --set secrets.openaiApiKey=$(echo -n "your-key" | base64) \
+  --set secrets.rabbitmqPasswordPlain=your-password
 ```
+
+See `k8s/helm/agentic-qa/values-dev.yaml` and `values-prod.yaml` for full annotated examples.
 
 ## Upgrades and Maintenance
 

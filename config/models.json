@@ -65,6 +65,18 @@
         "Authorization": "Bearer ${CUSTOM_LLM_API_KEY}"
       },
       "enabled": false
+    },
+    "agnos_gateway": {
+      "type": "openai",
+      "provider_type": "agnos_gateway",
+      "name": "AGNOS LLM Gateway",
+      "base_url": "${AGNOS_LLM_GATEWAY_URL:-http://localhost:8088}/v1",
+      "api_key": "${AGNOS_LLM_GATEWAY_API_KEY:-agnos-local}",
+      "model": "${AGNOS_LLM_GATEWAY_MODEL:-default}",
+      "temperature": 0.1,
+      "max_tokens": 4000,
+      "enabled": false,
+      "_comment": "Routes all LLM calls through the AGNOS OS LLM Gateway (port 8088) for per-agent token accounting, rate limiting, caching, and model sharing. Exposes an OpenAI-compatible /v1 API. Enable by setting AGNOS_LLM_GATEWAY_ENABLED=true and pointing AGNOS_LLM_GATEWAY_URL to the running agnosticos llm-gateway daemon."
     }
   },
   "primary_provider": "openai",

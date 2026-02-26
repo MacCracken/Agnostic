@@ -1,0 +1,142 @@
+# values-dev.yaml — Development environment overrides
+#
+# Use with:
+#   helm install agentic-qa ./k8s/helm/agentic-qa \
+#     --namespace agentic-qa-dev --create-namespace \
+#     -f values-dev.yaml \
+#     --set secrets.openaiApiKey=$(echo -n "your-key" | base64)
+
+# Namespace
+namespace:
+  name: "agentic-qa-dev"
+
+# Reduced resources for local/dev clusters
+agents:
+  qaManager:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+  seniorQa:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+  juniorQa:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+  qaAnalyst:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+  securityCompliance:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+  performance:
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
+      limits:
+        memory: "1Gi"
+        cpu: "500m"
+
+# Reduced infrastructure
+redis:
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "256Mi"
+      cpu: "200m"
+  persistence:
+    size: 500Mi
+
+rabbitmq:
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "200m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  persistence:
+    size: 1Gi
+
+# WebGUI as NodePort for easy local access
+webgui:
+  service:
+    type: NodePort
+
+# No ingress needed locally
+ingress:
+  enabled: false
+
+# No autoscaling in dev (fixed single replicas)
+autoscaling:
+  enabled: false
+
+# NetworkPolicies may be disabled on clusters without CNI support (e.g., Docker Desktop)
+networkPolicy:
+  enabled: false
+
+# PDBs are safe to keep on but not strictly necessary in dev
+podDisruptionBudget:
+  enabled: false
+
+# No resource quota in dev
+resourceQuota:
+  enabled: false
+
+# Startup probe with longer tolerances for slow dev machines
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 60
+  timeoutSeconds: 5
+
+# Verbose logging in dev
+env:
+  LOG_LEVEL: "DEBUG"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  RABBITMQ_HOST: "rabbitmq-service"
+  RABBITMQ_PORT: "5672"
+  RABBITMQ_USER: "guest"
+  RABBITMQ_VHOST: "/"
+  WEBGUI_HOST: "0.0.0.0"
+  WEBGUI_PORT: "8000"
+  PRIMARY_MODEL_PROVIDER: "openai"
+  ENABLE_SELF_HEALING: "true"
+  ENABLE_FUZZY_VERIFICATION: "true"
+  ENABLE_RISK_BASED_PRIORITIZATION: "true"
+  ENABLE_CONTEXT_AWARE_TESTING: "true"
+  PYTHONPATH: "/app"

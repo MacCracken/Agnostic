@@ -25,6 +25,8 @@ This directory contains Architecture Decision Records (ADRs) for the Agentic QA 
 | [ADR-017](017-rest-task-submission-api-keys.md) | REST Task Submission and API Key Authentication | Accepted |
 | [ADR-018](018-webhook-callbacks-cors.md) | Webhook Callbacks and CORS Configuration | Accepted |
 | [ADR-019](019-a2a-protocol.md) | A2A Protocol Integration | Accepted |
+| [ADR-020](020-kubernetes-production-readiness.md) | Kubernetes Production Readiness | Accepted |
+| [ADR-021](021-agnosticos-integration.md) | AGNOS OS Integration | Proposed |
 
 ## ADR Template
 

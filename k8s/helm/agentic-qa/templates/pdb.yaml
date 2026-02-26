@@ -1,0 +1,106 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if .Values.agents.qaManager.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: qa-manager-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: qa-manager
+{{- end }}
+---
+{{- if .Values.agents.seniorQa.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: senior-qa-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: senior-qa
+{{- end }}
+---
+{{- if .Values.agents.juniorQa.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: junior-qa-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: junior-qa
+{{- end }}
+---
+{{- if .Values.agents.qaAnalyst.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: qa-analyst-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: qa-analyst
+{{- end }}
+---
+{{- if .Values.agents.securityCompliance.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: security-compliance-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: security-compliance
+{{- end }}
+---
+{{- if .Values.agents.performance.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: performance-agent-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: performance-agent
+{{- end }}
+---
+{{- if .Values.webgui.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: webgui-pdb
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "agentic-qa.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app: webgui
+{{- end }}
+{{- end }}

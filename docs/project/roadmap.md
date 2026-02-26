@@ -115,6 +115,19 @@ This roadmap outlines the strategic direction and upcoming enhancements for the 
 - `retry_async` decorator with exponential backoff
 - See ADR-016
 
+### Recently Completed (2026-02-22 Phase 5)
+
+#### Kubernetes Production Readiness
+- **Status**: Completed
+- HorizontalPodAutoscalers (`autoscaling/v2`) for all 6 agents + WebGUI — CPU/memory-based, conservative scale-down
+- PodDisruptionBudgets (`policy/v1`, `minAvailable: 1`) for all 7 deployments — zero-downtime node maintenance
+- NetworkPolicies for least-privilege traffic isolation — agents, Redis, RabbitMQ, WebGUI scoped separately
+- ResourceQuota at namespace level — caps total CPU, RAM, pods, services, secrets, PVCs
+- Helm chart: new `hpa.yaml`, `pdb.yaml`, `resource-quota.yaml` templates; `values.yaml` feature flags for all four controls
+- Kustomize: fixed `kustomization.yaml` to include all new production manifests
+- Environment-specific values files: `values-dev.yaml` and `values-prod.yaml`
+- See ADR-020
+
 ### Recently Completed (2026-02-21 Phase 4)
 
 #### REST Task Submission API
@@ -166,11 +179,30 @@ This roadmap outlines the strategic direction and upcoming enhancements for the 
 
 ### Immediate (Next 3 Months)
 
-#### 4. Kubernetes Production Readiness
-- **Priority**: High (next up)
-- **Scope**: NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, resource quotas, startup probes
+#### CrewAI / LangChain Stack Upgrade
+- **Priority**: High
+- **Scope**: Upgrade `crewai 0.11.x → ≥1.0` to eliminate pydantic v1 compatibility shim warnings and align with the actively-maintained crewai API. The project's own code is already pydantic v2 native; the shim is a transitive dependency from langchain 0.1.x.
+- **Note on Python 3.14**: crewai 1.x still requires `Python <3.14` (chromadb dependency uses `pydantic.v1.BaseSettings`). Python 3.14 support is not achievable until chromadb migrates to `pydantic-settings`. The upgrade to crewai 1.x is still worthwhile for API modernisation and dropping LangChain, but will not unlock Python 3.14.
+- **Breaking changes**: crewai 1.x dropped LangChain and LangChain-OpenAI in favour of litellm; `Crew`, `Agent`, and `Task` constructors changed. All six agent implementations (`agents/*/`) plus `config/universal_llm_adapter.py` will need updating.
+- **Side effects**: `langchain`, `langchain-openai`, and `langchain-community` deps removed; `numpy <2.0` cap in `ml` extras can be removed once langchain is gone.
+
+#### Grafana / Prometheus Observability Stack
+- **Priority**: High
+- **Scope**: `ServiceMonitor` CRD for Prometheus scraping, Grafana dashboard JSON for agent metrics (tasks, LLM calls, circuit breaker state), AlertManager rules for critical thresholds
+
+#### GitOps / ArgoCD Integration
+- **Priority**: Medium-High
+- **Scope**: ArgoCD `ApplicationSet` for multi-environment promotion, Sealed Secrets or External Secrets Operator for secret rotation, chart published to OCI registry
 
 ### Medium Term (3-6 Months)
+
+#### AGNOS OS Deep Integration
+- **Priority**: High (foundational)
+- **Status**: Phase 1 in progress (LLM Gateway routing — config done, agnosticos HTTP server pending)
+- **Phase 1** (current): Route LLM calls through AGNOS LLM Gateway (port 8088, OpenAI-compatible API). Config-only change — no Python code changes. See ADR-021.
+- **Phase 2**: Register Agnostic CrewAI agents as agnosticos agents via `agnos-sys` SDK. Surfaces agents in AGNOS Agent HUD and security UI.
+- **Phase 3**: Agnostic messaging (Redis/RabbitMQ) optionally replaced by agnosticos MessageBus for native OS IPC.
+- See [ADR-021](../adr/021-agnosticos-integration.md) and [agnosticos ADR-007](../../../agnosticos/docs/adr/adr-007-agnostic-integration.md).
 
 #### 7. Multi-Tenant WebGUI
 - **Priority**: Medium
