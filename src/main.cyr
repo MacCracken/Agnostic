@@ -13,6 +13,7 @@ include "src/http/status.cyr"
 include "src/http/response.cyr"
 include "src/http/codec.cyr"
 include "src/routes/health.cyr"
+include "src/http/router.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.
 fn main() {

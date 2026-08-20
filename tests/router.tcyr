@@ -1,0 +1,199 @@
+# agnostic/http/router — matching, resolution, and the dispatch ladder.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+include "src/routes/health.cyr"
+include "src/http/router.cyr"
+
+fn _t_has(s: Str, needle): i64 {
+    var n = str_len(s);
+    var d = str_data(s);
+    var m = 0;
+    while ((load8(needle + m) & 0xFF) != 0) { m = m + 1; }
+    if (m > n) { return 0; }
+    var i = 0;
+    while (i <= n - m) {
+        var j = 0;
+        while (j < m) {
+            if ((load8(d + i + j) & 0xFF) != (load8(needle + j) & 0xFF)) { break; }
+            j = j + 1;
+        }
+        if (j == m) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_method_parse() {
+    test_group("router/method");
+
+    assert_eq(agnostic_method_from(str_from("GET")), AGNOSTIC_METHOD_GET, "GET");
+    assert_eq(agnostic_method_from(str_from("POST")), AGNOSTIC_METHOD_POST, "POST");
+    assert_eq(agnostic_method_from(str_from("PUT")), AGNOSTIC_METHOD_PUT, "PUT");
+    assert_eq(agnostic_method_from(str_from("DELETE")), AGNOSTIC_METHOD_DELETE, "DELETE");
+
+    # An unknown verb maps to NONE, which the table can never match — so it 404s
+    # rather than being silently treated as GET.
+    assert_eq(agnostic_method_from(str_from("PATCH")), AGNOSTIC_METHOD_NONE, "unknown verb is NONE");
+    assert_eq(agnostic_method_from(str_from("get")), AGNOSTIC_METHOD_NONE, "methods are case-sensitive per RFC");
+    assert_eq(agnostic_method_from(str_from("")), AGNOSTIC_METHOD_NONE, "empty is NONE");
+}
+
+fn test_path_matching() {
+    test_group("router/match");
+
+    var a = arena_allocator(65536);
+    var param = 0;
+
+    assert_eq(agnostic_path_matches_a(a, str_from("/health"), "/health", &param), 1, "exact match");
+    assert_eq(agnostic_path_matches_a(a, str_from("/ready"), "/health", &param), 0, "different literal");
+    assert_eq(agnostic_path_matches_a(a, str_from("/health/x"), "/health", &param), 0, "extra segment does not match");
+    assert_eq(agnostic_path_matches_a(a, str_from("/heal"), "/health", &param), 0, "prefix does not match");
+    assert_eq(agnostic_path_matches_a(a, str_from("/healthy"), "/health", &param), 0, "longer literal does not match");
+
+    # ⚠ A trailing separator introduces one more, EMPTY, segment. Treating
+    # "bytes remain" as "another segment" would make /health/ match /health.
+    assert_eq(agnostic_path_matches_a(a, str_from("/health/"), "/health", &param), 0,
+      "trailing slash is a distinct path");
+}
+
+fn test_named_param() {
+    test_group("router/param");
+
+    var a = arena_allocator(65536);
+    var param = 0;
+
+    assert_eq(agnostic_path_matches_a(a, str_from("/crews/abc"), "/crews/:id", &param), 1, "named param matches");
+    assert_neq(param, 0, "param captured");
+    assert_eq(str_eq_cstr(param, "abc"), 1, "captured value is correct");
+
+    # An empty segment is not a value.
+    assert_eq(agnostic_path_matches_a(a, str_from("/crews/"), "/crews/:id", &param), 0, "empty segment does not fill a param");
+
+    # The param binds exactly one segment, not the remainder.
+    assert_eq(agnostic_path_matches_a(a, str_from("/crews/abc/cancel"), "/crews/:id", &param), 0,
+      "a param binds one segment, not the rest of the path");
+
+    assert_eq(agnostic_path_matches_a(a, str_from("/crews/abc/cancel"), "/crews/:id/cancel", &param), 1,
+      "param mid-pattern matches");
+    assert_eq(str_eq_cstr(param, "abc"), 1, "mid-pattern capture is correct");
+
+    # ⭐ The capture is remembered and materialised only on a full match. A
+    # pattern that matches its param then fails a later segment must leave
+    # nothing behind — this asserts the observable half: no stale capture.
+    var stale = str_from("sentinel");
+    param = stale;
+    assert_eq(agnostic_path_matches_a(a, str_from("/crews/abc/other"), "/crews/:id/cancel", &param), 0,
+      "fails on the trailing segment");
+    assert_eq(param, 0, "a failed match clears the out-param rather than leaving a partial capture");
+}
+
+fn test_query_stripping() {
+    test_group("router/query");
+
+    var a = arena_allocator(65536);
+
+    # ⚠ Without stripping, GET /health?probe=1 404s. AgnosAI never strips, so its
+    # own health endpoint 404s for any caller appending a cache-buster.
+    assert_eq(str_eq_cstr(agnostic_path_only_a(a, str_from("/health?probe=1")), "/health"), 1, "query stripped");
+    assert_eq(str_eq_cstr(agnostic_path_only_a(a, str_from("/health#frag")), "/health"), 1, "fragment stripped");
+    assert_eq(str_eq_cstr(agnostic_path_only_a(a, str_from("/health")), "/health"), 1, "no query is unchanged");
+    assert_eq(str_eq_cstr(agnostic_path_only_a(a, str_from("/health?")), "/health"), 1, "empty query stripped");
+}
+
+fn test_resolve() {
+    test_group("router/resolve");
+
+    var a = arena_allocator(65536);
+
+    var m = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/health"));
+    assert_eq(agnostic_route_match_id(m), AGNOSTIC_ROUTE_HEALTH, "GET /health resolves");
+
+    m = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/ready"));
+    assert_eq(agnostic_route_match_id(m), AGNOSTIC_ROUTE_READY, "GET /ready resolves");
+
+    m = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/health?x=1"));
+    assert_eq(agnostic_route_match_id(m), AGNOSTIC_ROUTE_HEALTH, "query string does not prevent resolution");
+
+    m = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"));
+    assert_eq(agnostic_route_match_id(m), AGNOSTIC_ROUTE_NONE, "unknown path does not resolve");
+    assert_eq(agnostic_route_match_method_mismatch(m), 0, "unknown path is not a method mismatch");
+
+    # ⭐ 405 vs 404. The path exists, the method does not — telling the client
+    # "not found" would say the resource does not exist when it does.
+    m = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_POST, str_from("/health"));
+    assert_eq(agnostic_route_match_id(m), AGNOSTIC_ROUTE_NONE, "wrong method does not resolve");
+    assert_eq(agnostic_route_match_method_mismatch(m), 1, "wrong method is flagged as a mismatch, not a miss");
+}
+
+fn test_needs_auth() {
+    test_group("router/auth-seam");
+
+    # Probes stay public: an orchestrator cannot present a credential, and a
+    # readiness check behind auth fails closed for the wrong reason.
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_HEALTH), 0, "health is public");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_READY), 0, "ready is public");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_NONE), 0, "no route needs no auth");
+
+    # ⭐ Anything not explicitly classified requires auth, so forgetting to
+    # classify a future route fails SAFE rather than exposing it.
+    assert_eq(agnostic_route_needs_auth(99), 1, "an unclassified route id defaults to requiring auth");
+}
+
+fn test_dispatch() {
+    test_group("router/dispatch");
+
+    var a = arena_allocator(65536);
+    var empty = str_from("");
+    agnostic_ready_reset();
+
+    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/health"), empty, 1048576);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "GET /health dispatches to 200");
+
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/ready"), empty, 1048576);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "GET /ready dispatches to 200");
+
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"), empty, 1048576);
+    assert_eq(agnostic_response_status(r), HTTP_NOT_FOUND, "unknown path is 404");
+
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/health"), empty, 1048576);
+    assert_eq(agnostic_response_status(r), HTTP_METHOD_NOT_ALLOWED, "wrong method is 405, not 404");
+}
+
+fn test_body_limit() {
+    test_group("router/body-limit");
+
+    var a = arena_allocator(65536);
+    var big = str_from("0123456789");
+
+    # ⭐ The size check runs BEFORE routing. A 20 MB body aimed at a bad path
+    # should be rejected on size, not parsed to discover it has nowhere to go.
+    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"), big, 5);
+    assert_eq(agnostic_response_status(r), HTTP_PAYLOAD_TOO_LARGE,
+      "oversize body is 413 even for a path that would 404");
+
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/health"), big, 10);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "a body exactly at the limit is accepted");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_method_parse();
+    test_path_matching();
+    test_named_param();
+    test_query_stripping();
+    test_resolve();
+    test_needs_auth();
+    test_dispatch();
+    test_body_limit();
+    return assert_summary();
+}
+
+var _agnostic_router_test_exit = main();
+if (_agnostic_router_test_exit > 0) { _agnostic_router_test_exit = 1; }
+sys_exit_group(_agnostic_router_test_exit);

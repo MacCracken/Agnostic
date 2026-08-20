@@ -1,0 +1,258 @@
+# agnostic/http/router — the route table, the `:name` matcher, and dispatch.
+#
+# ## Kept separable from handler logic, on purpose
+#
+# The route table and request decoding stay independent of the handlers so an
+# alternate surface can be mounted over the same handlers without touching
+# either. That is the "keep the seam shim-able" obligation from
+# `CYRIUS-PORT-BRIEF.md` §7.3: SecureYeoman consumes AgnosAI directly today, but
+# if it is ever pointed at Agnostic the answer is an additive compatibility shim,
+# not a core API bent to fit an existing client. Cheap to preserve now,
+# expensive to retrofit.
+#
+# ## `:name` rather than `*`
+#
+# AgnosAI's matcher spells a path parameter `*`. This one spells it `:name`,
+# which matches sandhi's own spelling — so if the table later moves to
+# `sandhi_server_route_match` it is a rename rather than a rewrite — and carries
+# the parameter's name as documentation at the point of use.
+#
+# ## A flat table, deliberately
+#
+# AgnosAI builds a two-level index (`_agnosai_path_prefix_end` / `_agnosai_seg_is`)
+# to amortise sixteen table attempts. Agnostic has two routes. A flat scan in
+# table order is correct, simpler, and faster at this size; the index becomes
+# worth copying if the table grows past roughly a dozen.
+
+enum AgnosticRouteId {
+    AGNOSTIC_ROUTE_NONE   = 0;
+    AGNOSTIC_ROUTE_HEALTH = 1;
+    AGNOSTIC_ROUTE_READY  = 2;
+}
+
+var AGNOSTIC_METHOD_NONE   = 0;
+var AGNOSTIC_METHOD_GET    = 1;
+var AGNOSTIC_METHOD_POST   = 2;
+var AGNOSTIC_METHOD_PUT    = 3;
+var AGNOSTIC_METHOD_DELETE = 4;
+
+enum AgnosticRouteMatchOff {
+    AGNOSTIC_RM_ID              = 0;
+    AGNOSTIC_RM_PARAM           = 8;
+    AGNOSTIC_RM_METHOD_MISMATCH = 16;
+    AGNOSTIC_RM_SIZE            = 24;
+}
+
+# Map an HTTP method name to its constant. Unknown methods are NONE, which the
+# table can never match — so an exotic verb 404s rather than being treated as GET.
+fn agnostic_method_from(name: Str): i64 {
+    if (str_eq_cstr(name, "GET") == 1) { return AGNOSTIC_METHOD_GET; }
+    if (str_eq_cstr(name, "POST") == 1) { return AGNOSTIC_METHOD_POST; }
+    if (str_eq_cstr(name, "PUT") == 1) { return AGNOSTIC_METHOD_PUT; }
+    if (str_eq_cstr(name, "DELETE") == 1) { return AGNOSTIC_METHOD_DELETE; }
+    return AGNOSTIC_METHOD_NONE;
+}
+
+# Build a match record in `a`.
+fn _agnostic_rm_new_a(a, id, param, mismatch): i64 {
+    var m = alloc_via(a, AGNOSTIC_RM_SIZE);
+    if (m == 0) { return 0; }
+    store64(m + AGNOSTIC_RM_ID, id);
+    store64(m + AGNOSTIC_RM_PARAM, param);
+    store64(m + AGNOSTIC_RM_METHOD_MISMATCH, mismatch);
+    return m;
+}
+
+# The matched route id, or AGNOSTIC_ROUTE_NONE.
+fn agnostic_route_match_id(m): i64 {
+    if (m == 0) { return AGNOSTIC_ROUTE_NONE; }
+    return load64(m + AGNOSTIC_RM_ID);
+}
+
+# The captured `:name` segment as a Str, or 0 when the pattern had none.
+fn agnostic_route_match_param(m): i64 {
+    if (m == 0) { return 0; }
+    return load64(m + AGNOSTIC_RM_PARAM);
+}
+
+# 1 when the path matched a known route but the method did not — the 405-vs-404
+# split. Without it every wrong-method request 404s, which tells a client the
+# resource does not exist when it does.
+fn agnostic_route_match_method_mismatch(m): i64 {
+    if (m == 0) { return 0; }
+    return load64(m + AGNOSTIC_RM_METHOD_MISMATCH);
+}
+
+# Whether `path`, starting at byte `start`, matches `pattern`.
+#
+# `pattern` is a NUL-terminated cstring; a segment beginning `:` matches any one
+# non-empty segment and is captured into `out_param`.
+#
+# Transcribed from `_agnosai_path_matches_at` with the wildcard test changed from
+# `*` to `:` — dropping the `qlen == 1` requirement so `:id` works — and the
+# capture kept as remember-then-materialise.
+#
+# ⚠ **The capture is REMEMBERED, not materialised.** `str_sub_a` runs once, at
+# the bottom, only if the whole pattern matched. Allocating at the capture site
+# leaks a Str for every pattern that matches its parameter and then fails a later
+# segment — `/health/x` tried against `/health/:id/detail` captures `x`, fails on
+# the trailing segment, and allocates again on the next pattern.
+fn _agnostic_path_matches_at(a, path: Str, start, pattern, out_param): i64 {
+    var p = str_data(path);
+    var n = str_len(path);
+    store64(out_param, 0);
+
+    # Skip exactly one leading `/` on each side.
+    var pi = start;
+    if (n > start) { if ((load8(p + start) & 255) == 47) { pi = start + 1; } }
+    var qi = 0;
+    if ((load8(pattern) & 255) == 47) { qi = 1; }
+
+    # `has` is "there is another segment to read", which is NOT "there are bytes
+    # left": after consuming a trailing separator there is one more, empty,
+    # segment. Conflating them makes `/health/` match `/health`.
+    var p_has = 0;
+    if (pi < n) { p_has = 1; }
+    var q_has = 0;
+    if ((load8(pattern + qi) & 255) != 0) { q_has = 1; }
+
+    var cap_at = 0 - 1;
+    var cap_len = 0;
+
+    while (1 == 1) {
+        if (p_has == 0) {
+            if (q_has == 0) {
+                if (cap_at >= 0) { store64(out_param, str_sub_a(a, path, cap_at, cap_len)); }
+                return 1;
+            }
+            return 0;
+        }
+        if (q_has == 0) { return 0; }
+
+        var pe = pi;
+        while (pe < n) {
+            if ((load8(p + pe) & 255) == 47) { break; }
+            pe = pe + 1;
+        }
+        var qe = qi;
+        while ((load8(pattern + qe) & 255) != 0) {
+            if ((load8(pattern + qe) & 255) == 47) { break; }
+            qe = qe + 1;
+        }
+        var plen = pe - pi;
+        var qlen = qe - qi;
+
+        if ((load8(pattern + qi) & 255) == 58) {
+            # `:name` — matches one non-empty segment.
+            if (plen == 0) { return 0; }
+            cap_at = pi;
+            cap_len = plen;
+        } else {
+            if (plen != qlen) { return 0; }
+            var k = 0;
+            while (k < plen) {
+                if ((load8(p + pi + k) & 255) != (load8(pattern + qi + k) & 255)) { return 0; }
+                k = k + 1;
+            }
+        }
+
+        if (pe >= n) { p_has = 0; } else { pi = pe + 1; }
+        if ((load8(pattern + qe) & 255) == 0) { q_has = 0; } else { qi = qe + 1; }
+    }
+    return 0;
+}
+
+# Whether `path` matches `pattern`, capturing any `:name` segment.
+fn agnostic_path_matches_a(a, path: Str, pattern, out_param): i64 {
+    return _agnostic_path_matches_at(a, path, 0, pattern, out_param);
+}
+
+# Strip a query string, returning the path alone.
+#
+# ⚠ Without this `GET /health?probe=1` does not match `/health` and 404s.
+# AgnosAI never strips (`grep -rn path_only agnosai/src/` finds nothing), so its
+# own health endpoint 404s for any caller that appends a cache-buster. bote does
+# strip, and is the better precedent.
+fn agnostic_path_only_a(a, path: Str): i64 {
+    var n = str_len(path);
+    var d = str_data(path);
+    var i = 0;
+    while (i < n) {
+        var c = load8(d + i) & 255;
+        if (c == 63) { return str_sub_a(a, path, 0, i); }   # '?'
+        if (c == 35) { return str_sub_a(a, path, 0, i); }   # '#'
+        i = i + 1;
+    }
+    return path;
+}
+
+# Resolve a method and path to a route.
+#
+# Returns a match record. When no route matches, the id is AGNOSTIC_ROUTE_NONE
+# and `method_mismatch` distinguishes 405 from 404.
+fn agnostic_route_resolve_a(a, method, path: Str): i64 {
+    var clean = agnostic_path_only_a(a, path);
+    var param = 0;
+    var path_hit = 0;
+
+    if (agnostic_path_matches_a(a, clean, "/health", &param) == 1) {
+        path_hit = 1;
+        if (method == AGNOSTIC_METHOD_GET) {
+            return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_HEALTH, param, 0);
+        }
+    }
+    if (agnostic_path_matches_a(a, clean, "/ready", &param) == 1) {
+        path_hit = 1;
+        if (method == AGNOSTIC_METHOD_GET) {
+            return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_READY, param, 0);
+        }
+    }
+
+    return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_NONE, 0, path_hit);
+}
+
+# Whether a route requires authentication.
+#
+# The seam M5 fills. `/health` and `/ready` stay public — an orchestrator probe
+# cannot present a credential, and a readiness check behind auth is a readiness
+# check that fails closed for the wrong reason. Every future route defaults to
+# requiring auth, so forgetting to classify one fails safe.
+fn agnostic_route_needs_auth(id): i64 {
+    if (id == AGNOSTIC_ROUTE_NONE) { return 0; }
+    if (id == AGNOSTIC_ROUTE_HEALTH) { return 0; }
+    if (id == AGNOSTIC_ROUTE_READY) { return 0; }
+    return 1;
+}
+
+# Resolve and run a request, returning a response.
+#
+# The ladder order is load-bearing:
+#   1. Body size, before routing — a 20 MB body to a bad path should be rejected
+#      on size, not parsed to discover it has nowhere to go.
+#   2. Route resolution; 405 when the path matched but the method did not,
+#      404 otherwise.
+#   3. [M5: authentication lands here, after routing so the 401 does not leak
+#      which paths exist, and before the handler.]
+#   4. Dispatch.
+fn agnostic_route_dispatch_a(a, method, path: Str, body: Str, max_body): i64 {
+    if (str_len(body) > max_body) {
+        return agnostic_response_error_a(a, HTTP_PAYLOAD_TOO_LARGE, str_from("request body too large"));
+    }
+
+    var m = agnostic_route_resolve_a(a, method, path);
+    var id = agnostic_route_match_id(m);
+
+    if (id == AGNOSTIC_ROUTE_NONE) {
+        if (agnostic_route_match_method_mismatch(m) == 1) {
+            return agnostic_response_error_a(a, HTTP_METHOD_NOT_ALLOWED, str_from("method not allowed"));
+        }
+        return agnostic_response_error_a(a, HTTP_NOT_FOUND, str_from("not found"));
+    }
+
+    if (id == AGNOSTIC_ROUTE_HEALTH) { return agnostic_route_health_a(a); }
+    if (id == AGNOSTIC_ROUTE_READY) { return agnostic_route_ready_a(a); }
+
+    # A resolved id with no dispatch arm is a table/ladder mismatch, not a client
+    # error — report it as one rather than as a 404.
+    return agnostic_response_error_a(a, HTTP_INTERNAL, str_from("route resolved with no handler"));
+}
