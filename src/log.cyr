@@ -1,0 +1,242 @@
+# agnostic/log — sakshi wiring and a structured JSON emitter.
+#
+# ## Shape
+#
+# sakshi owns levels, call sites and the hot path. This module supplies an emit
+# hook that renders each event as one JSON object, and splits the formatter out
+# as a pure function so a `.tcyr` can assert the bytes without a pipe or a
+# subprocess.
+#
+# ## One line, one write
+#
+# The line buffer is 4096 bytes — PIPE_BUF on Linux. A `write(2)` of at most
+# PIPE_BUF to a pipe is atomic, so concurrent workers cannot interleave halves
+# of two lines. Larger would be faster per byte and produce corrupt output the
+# moment two workers log at once, which is the failure you find in production
+# and not in a test.
+#
+# ## The fields block
+#
+# `sakshi_log_kv` hands the hook a pointer to a stack block: an i64 count, then
+# that many 32-byte `{key, key_len, val, val_len}` records
+# (`lib/sakshi.cyr:1438-1445`). Two consequences:
+#
+#   - It is the CALLER's stack. Copy bytes out; never retain the pointer.
+#   - A hook that ignores the sixth argument silently drops every kv field.
+#     Since sakshi 2.4.10 they are no longer flattened into `msg`, so ignoring
+#     the block loses the data outright rather than degrading it.
+
+var AGNOSTIC_LOG_LINE_CAP = 4096;
+
+# Level name for the JSON `level` member.
+fn _agnostic_log_level_name(level): i64 {
+    if (level == SK_FATAL) { return "fatal"; }
+    if (level == SK_ERROR) { return "error"; }
+    if (level == SK_WARN)  { return "warn"; }
+    if (level == SK_INFO)  { return "info"; }
+    if (level == SK_DEBUG) { return "debug"; }
+    if (level == SK_TRACE) { return "trace"; }
+    return "unknown";
+}
+
+# Append one byte if it fits. Returns the new position, which may exceed `cap`
+# by zero — callers compare against `cap` to detect truncation.
+fn _agnostic_log_put(dst, cap, pos, b): i64 {
+    if (pos >= cap) { return pos; }
+    store8(dst + pos, b);
+    return pos + 1;
+}
+
+# Append `n` bytes of a JSON string body, escaping per RFC 8259.
+#
+# ⚠ Not optional. An unescaped `"` in a log message ends the JSON string early
+# and produces a line no consumer can parse; a `\n` splits one event into two.
+# Both are reachable from request-derived data, which makes this a log-injection
+# boundary rather than a cosmetic concern. Control bytes below 0x20 go out as
+# \u00XX because JSON forbids them raw.
+fn _agnostic_log_put_escaped(dst, cap, pos, src, n): i64 {
+    var p = pos;
+    var i = 0;
+    while (i < n) {
+        var c = load8(src + i) & 0xFF;
+        if (c == 34) {            # "
+            p = _agnostic_log_put(dst, cap, p, 92);
+            p = _agnostic_log_put(dst, cap, p, 34);
+        } elif (c == 92) {        # backslash
+            p = _agnostic_log_put(dst, cap, p, 92);
+            p = _agnostic_log_put(dst, cap, p, 92);
+        } elif (c == 10) {        # newline
+            p = _agnostic_log_put(dst, cap, p, 92);
+            p = _agnostic_log_put(dst, cap, p, 110);
+        } elif (c == 13) {        # carriage return
+            p = _agnostic_log_put(dst, cap, p, 92);
+            p = _agnostic_log_put(dst, cap, p, 114);
+        } elif (c == 9) {         # tab
+            p = _agnostic_log_put(dst, cap, p, 92);
+            p = _agnostic_log_put(dst, cap, p, 116);
+        } elif (c < 32) {
+            p = _agnostic_log_put(dst, cap, p, 92);
+            p = _agnostic_log_put(dst, cap, p, 117);   # u
+            p = _agnostic_log_put(dst, cap, p, 48);
+            p = _agnostic_log_put(dst, cap, p, 48);
+            var hi = (c >> 4) & 0xF;
+            var lo = c & 0xF;
+            if (hi < 10) { p = _agnostic_log_put(dst, cap, p, 48 + hi); }
+            else { p = _agnostic_log_put(dst, cap, p, 87 + hi); }
+            if (lo < 10) { p = _agnostic_log_put(dst, cap, p, 48 + lo); }
+            else { p = _agnostic_log_put(dst, cap, p, 87 + lo); }
+        } else {
+            p = _agnostic_log_put(dst, cap, p, c);
+        }
+        i = i + 1;
+    }
+    return p;
+}
+
+# Append a NUL-terminated cstring VERBATIM, without escaping.
+#
+# ⚠ For structural JSON only — braces, quotes, member names this module writes
+# itself. Passing caller data here is a log-injection hole. The escaping twin
+# below is what request-derived bytes go through.
+#
+# The distinction is not cosmetic: routing the format string through the
+# escaping appender turns every structural `"` into `\"`, producing
+# `{\"ts\":1}` — syntactically valid as a JSON *string* and useless as a JSON
+# object. That is exactly the bug tests/log.tcyr caught on first run.
+fn _agnostic_log_put_raw(dst, cap, pos, s): i64 {
+    if (s == 0) { return pos; }
+    var p = pos;
+    var i = 0;
+    while ((load8(s + i) & 0xFF) != 0) {
+        p = _agnostic_log_put(dst, cap, p, load8(s + i) & 0xFF);
+        i = i + 1;
+    }
+    return p;
+}
+
+# Append a NUL-terminated cstring, escaped. For caller-supplied data.
+fn _agnostic_log_put_cstr(dst, cap, pos, s): i64 {
+    if (s == 0) { return pos; }
+    var n = 0;
+    while ((load8(s + n) & 0xFF) != 0) { n = n + 1; }
+    return _agnostic_log_put_escaped(dst, cap, pos, s, n);
+}
+
+# Append a base-10 integer.
+fn _agnostic_log_put_int(dst, cap, pos, v): i64 {
+    var p = pos;
+    if (v < 0) { p = _agnostic_log_put(dst, cap, p, 45); v = 0 - v; }
+    if (v == 0) { return _agnostic_log_put(dst, cap, p, 48); }
+    var tmp[24];
+    var n = 0;
+    while (v > 0) {
+        store8(&tmp + n, 48 + (v % 10));
+        v = v / 10;
+        n = n + 1;
+    }
+    while (n > 0) {
+        n = n - 1;
+        p = _agnostic_log_put(dst, cap, p, load8(&tmp + n) & 0xFF);
+    }
+    return p;
+}
+
+# Render one event as a JSON object into `dst`, returning the byte count.
+#
+# Pure and side-effect free so tests can assert the exact bytes. Never writes
+# past `cap`; a line that would exceed it is truncated rather than overrunning,
+# and the returned length is clamped to `cap`.
+#
+# `trace` is a Str or 0. `fields` is sakshi's count-prefixed block or 0.
+fn agnostic_log_format_json(dst, cap, epoch_ns, level, msg, msg_len, fields, trace): i64 {
+    var p = 0;
+    p = _agnostic_log_put_raw(dst, cap, p, "{\"ts\":");
+    p = _agnostic_log_put_int(dst, cap, p, epoch_ns);
+
+    p = _agnostic_log_put_raw(dst, cap, p, ",\"level\":\"");
+    p = _agnostic_log_put_raw(dst, cap, p, _agnostic_log_level_name(level));
+    p = _agnostic_log_put(dst, cap, p, 34);
+
+    p = _agnostic_log_put_raw(dst, cap, p, ",\"msg\":\"");
+    p = _agnostic_log_put_escaped(dst, cap, p, msg, msg_len);
+    p = _agnostic_log_put(dst, cap, p, 34);
+
+    if (trace != 0) {
+        p = _agnostic_log_put_raw(dst, cap, p, ",\"trace\":\"");
+        p = _agnostic_log_put_escaped(dst, cap, p, str_data(trace), str_len(trace));
+        p = _agnostic_log_put(dst, cap, p, 34);
+    }
+
+    # Each kv record becomes its OWN JSON member, not text appended to msg.
+    # Flattening them into the message is what makes structured logs unqueryable.
+    if (fields != 0) {
+        var count = load64(fields);
+        var i = 0;
+        while (i < count) {
+            var rec = fields + 8 + (i * 32);
+            var key = load64(rec);
+            var key_len = load64(rec + 8);
+            var val = load64(rec + 16);
+            var val_len = load64(rec + 24);
+            p = _agnostic_log_put(dst, cap, p, 44);   # ,
+            p = _agnostic_log_put(dst, cap, p, 34);   # "
+            p = _agnostic_log_put_escaped(dst, cap, p, key, key_len);
+            p = _agnostic_log_put_raw(dst, cap, p, "\":\"");
+            p = _agnostic_log_put_escaped(dst, cap, p, val, val_len);
+            p = _agnostic_log_put(dst, cap, p, 34);
+            i = i + 1;
+        }
+    }
+
+    p = _agnostic_log_put(dst, cap, p, 125);  # }
+    p = _agnostic_log_put(dst, cap, p, 10);   # newline
+    if (p > cap) { return cap; }
+    return p;
+}
+
+# sakshi emit hook. Signature is sakshi's `fncall6(ts, level, category, msg,
+# msg_len, fields)`.
+#
+# ⚠ **Spans must be filtered out first.** For a span event sakshi passes
+# `elapsed_ns` in the sixth argument, not a fields pointer
+# (`lib/sakshi.cyr:1150`). Treating that integer as a block pointer dereferences
+# a duration as an address. Span levels are >= SK_SPAN_ENTER, so the guard is
+# one comparison — and without it the first `sakshi_span_enter` call faults.
+#
+# `ts` is deliberately ignored: it is `_sk_now_ns()`, a monotonic clock with no
+# epoch meaning. A log line needs wall time, so the hook reads it itself.
+fn _agnostic_log_json_hook(ts, level, category, msg, msg_len, fields): i64 {
+    if (level >= SK_SPAN_ENTER) { return 0; }
+    var buf[4096];
+    var n = agnostic_log_format_json(&buf, AGNOSTIC_LOG_LINE_CAP, clock_epoch_ns(),
+      level, msg, msg_len, fields, agnostic_trace_current());
+    sys_write(2, &buf, n);
+    return 0;
+}
+
+# Apply the configured level, and install the JSON hook when the operator asked
+# for structured output. Text output is sakshi's own default and needs no hook.
+fn agnostic_log_init(cfg): i64 {
+    sakshi_set_level(agnostic_config_log_level(cfg));
+    if (agnostic_config_log_json(cfg) == 1) {
+        sakshi_set_emit_hook(&_agnostic_log_json_hook);
+    }
+    return 0;
+}
+
+# Log one string-valued key alongside a message.
+#
+# Gated on the level before any work so a suppressed line costs one comparison.
+fn agnostic_log_kv_str(level, msg, msg_len, key, key_len, val: Str): i64 {
+    if (level > sakshi_get_level()) { return 0; }
+    return sakshi_log_kv(level, msg, msg_len, key, key_len, str_data(val), str_len(val));
+}
+
+# Log one integer-valued key alongside a message. The integer is rendered into a
+# stack buffer rather than allocated.
+fn agnostic_log_kv_int(level, msg, msg_len, key, key_len, n): i64 {
+    if (level > sakshi_get_level()) { return 0; }
+    var num[24];
+    var len = _agnostic_log_put_int(&num, 24, 0, n);
+    return sakshi_log_kv(level, msg, msg_len, key, key_len, &num, len);
+}

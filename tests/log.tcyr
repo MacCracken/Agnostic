@@ -1,0 +1,177 @@
+# agnostic/log — the JSON formatter.
+#
+# The formatter is a pure function precisely so this suite can assert the exact
+# bytes without a pipe, a subprocess, or capturing fd 2.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+
+# Whether `hay` (n bytes) contains the NUL-terminated `needle`.
+fn _t_contains(hay, n, needle): i64 {
+    var m = 0;
+    while ((load8(needle + m) & 0xFF) != 0) { m = m + 1; }
+    if (m == 0) { return 1; }
+    if (m > n) { return 0; }
+    var i = 0;
+    while (i <= n - m) {
+        var j = 0;
+        while (j < m) {
+            if ((load8(hay + i + j) & 0xFF) != (load8(needle + j) & 0xFF)) { break; }
+            j = j + 1;
+        }
+        if (j == m) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_basic_shape() {
+    test_group("log/shape");
+
+    var buf[4096];
+    var msg = "server started";
+    var n = agnostic_log_format_json(&buf, 4096, 1700000000000000000, SK_INFO, msg, 14, 0, 0);
+
+    assert_gt(n, 0, "formatter produced bytes");
+    assert_eq(load8(&buf) & 0xFF, 123, "opens with {");
+    assert_eq(load8(&buf + n - 1) & 0xFF, 10, "ends with a newline");
+    assert_eq(load8(&buf + n - 2) & 0xFF, 125, "closes with }");
+
+    assert_eq(_t_contains(&buf, n, "\"level\":\"info\""), 1, "level name rendered");
+    assert_eq(_t_contains(&buf, n, "\"msg\":\"server started\""), 1, "message rendered");
+    assert_eq(_t_contains(&buf, n, "\"ts\":1700000000000000000"), 1, "epoch timestamp rendered");
+
+    # No trace id was supplied, so the member must be absent rather than empty —
+    # an empty string would read as "traced, id unknown".
+    assert_eq(_t_contains(&buf, n, "\"trace\""), 0, "trace member omitted when there is none");
+}
+
+fn test_level_names() {
+    test_group("log/levels");
+    var buf[4096];
+    var m = "x";
+
+    var n = agnostic_log_format_json(&buf, 4096, 1, SK_FATAL, m, 1, 0, 0);
+    assert_eq(_t_contains(&buf, n, "\"level\":\"fatal\""), 1, "fatal");
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_ERROR, m, 1, 0, 0);
+    assert_eq(_t_contains(&buf, n, "\"level\":\"error\""), 1, "error");
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_WARN, m, 1, 0, 0);
+    assert_eq(_t_contains(&buf, n, "\"level\":\"warn\""), 1, "warn");
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_DEBUG, m, 1, 0, 0);
+    assert_eq(_t_contains(&buf, n, "\"level\":\"debug\""), 1, "debug");
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_TRACE, m, 1, 0, 0);
+    assert_eq(_t_contains(&buf, n, "\"level\":\"trace\""), 1, "trace");
+}
+
+fn test_escaping() {
+    test_group("log/escaping");
+
+    var buf[4096];
+
+    # ⭐ THE LOG-INJECTION BOUNDARY. A quote in request-derived text would close
+    # the JSON string early and let the rest of the message forge members; a
+    # newline would split one event into two records. Both are reachable from
+    # user input, so this is a correctness AND a security assertion.
+    var q = "he said \"hi\"";
+    var n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, q, 12, 0, 0);
+    assert_eq(_t_contains(&buf, n, "he said \\\"hi\\\""), 1, "double quotes are escaped");
+
+    var nl = "line1\nline2";
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, nl, 11, 0, 0);
+    assert_eq(_t_contains(&buf, n, "line1\\nline2"), 1, "newline escaped as \\n");
+    # Exactly one raw newline — the terminator. A second would be a split record.
+    var raw_nl = 0;
+    var i = 0;
+    while (i < n) {
+        if ((load8(&buf + i) & 0xFF) == 10) { raw_nl = raw_nl + 1; }
+        i = i + 1;
+    }
+    assert_eq(raw_nl, 1, "only the line terminator is a raw newline");
+
+    var bs = "a\\b";
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, bs, 3, 0, 0);
+    assert_eq(_t_contains(&buf, n, "a\\\\b"), 1, "backslash escaped");
+
+    var tab = "a\tb";
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, tab, 3, 0, 0);
+    assert_eq(_t_contains(&buf, n, "a\\tb"), 1, "tab escaped as \\t");
+
+    # A raw control byte is forbidden in JSON strings and must become \u00XX.
+    var ctl[4];
+    store8(&ctl, 97); store8(&ctl + 1, 1); store8(&ctl + 2, 98); store8(&ctl + 3, 0);
+    n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, &ctl, 3, 0, 0);
+    assert_eq(_t_contains(&buf, n, "a\\u0001b"), 1, "control byte becomes \\u0001");
+}
+
+fn test_trace_member() {
+    test_group("log/trace");
+
+    var buf[4096];
+    var tp = str_from("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+    var msg = "handled";
+    var n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, msg, 7, 0, tp);
+
+    assert_eq(_t_contains(&buf, n, "\"trace\":\"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01\""),
+      1, "trace id rendered when present");
+}
+
+fn test_fields_block() {
+    test_group("log/fields");
+
+    # ⭐ Build sakshi's block by hand, exactly as lib/sakshi.cyr:1438-1445 does:
+    # an i64 count then 32-byte {key, key_len, val, val_len} records.
+    #
+    # Since sakshi 2.4.10 kv fields are NOT flattened into msg, so a hook that
+    # ignores this argument drops them outright. Each must land as its own JSON
+    # member — appending them to msg is what makes structured logs unqueryable.
+    var buf[4096];
+    var k1 = "route";
+    var v1 = "/health";
+    var k2 = "status";
+    var v2 = "200";
+
+    var fields[72];
+    store64(&fields, 2);
+    store64(&fields + 8, k1);  store64(&fields + 16, 5); store64(&fields + 24, v1); store64(&fields + 32, 7);
+    store64(&fields + 40, k2); store64(&fields + 48, 6); store64(&fields + 56, v2); store64(&fields + 64, 3);
+
+    var msg = "request";
+    var n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, msg, 7, &fields, 0);
+
+    assert_eq(_t_contains(&buf, n, "\"route\":\"/health\""), 1, "first kv is its own member");
+    assert_eq(_t_contains(&buf, n, "\"status\":\"200\""), 1, "second kv is its own member");
+    assert_eq(_t_contains(&buf, n, "\"msg\":\"request\""), 1, "message unchanged by the fields");
+}
+
+fn test_truncation() {
+    test_group("log/truncation");
+
+    # A message far larger than the buffer must truncate, never overrun. The
+    # returned length is clamped to cap so a caller writing `n` bytes cannot be
+    # induced to read past the buffer.
+    var big[8192];
+    var i = 0;
+    while (i < 8192) { store8(&big + i, 65); i = i + 1; }
+
+    var buf[4096];
+    var n = agnostic_log_format_json(&buf, 4096, 1, SK_INFO, &big, 8192, 0, 0);
+    assert_lte(n, 4096, "truncated to the cap, never beyond");
+    assert_gt(n, 0, "still produced a line");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_basic_shape();
+    test_level_names();
+    test_escaping();
+    test_trace_member();
+    test_fields_block();
+    test_truncation();
+    return assert_summary();
+}
+
+var _agnostic_log_test_exit = main();
+if (_agnostic_log_test_exit > 0) { _agnostic_log_test_exit = 1; }
+sys_exit_group(_agnostic_log_test_exit);

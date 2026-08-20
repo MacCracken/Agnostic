@@ -8,6 +8,7 @@
 include "src/strcase.cyr"
 include "src/config.cyr"
 include "src/trace.cyr"
+include "src/log.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.
 fn main() {
