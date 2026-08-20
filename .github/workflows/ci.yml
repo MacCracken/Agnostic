@@ -11,40 +11,270 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-test:
+  # ==========================================================================
+  # build — cyrius deps + fmt + lint + vet + build + test + bench
+  # first-party-standards.md:364
+  # ==========================================================================
+  build:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
 
       - name: Install Cyrius toolchain
-        # The cyrius.cyml [package].cyrius pin is the single source of
-        # truth for the toolchain version — never hardcode it here. Read
-        # the pin and hand it to the canonical upstream installer, which
-        # fetches + lays out $HOME/.cyrius/{bin,lib}. Do NOT hand-roll
-        # curl+tar+cp — scripts/install.sh is the supported entry point
-        # (matches patra / sigil).
+        # The cyrius.cyml [package].cyrius pin is the single source of truth for
+        # the toolchain version — never hardcode it here. Read the pin and hand
+        # it to the canonical upstream installer, which fetches + lays out
+        # $HOME/.cyrius/{bin,lib}. Do NOT hand-roll curl+tar+cp.
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
-          echo "Installing Cyrius $CYRIUS_VERSION"
+          echo "Installing Cyrius $CYRIUS_VERSION (from cyrius.cyml pin)"
           curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
+      - name: Verify toolchain matches the pin
+        # ⛔ THE GATE THAT WOULD HAVE CAUGHT THE agnosai 2.0.2 BREAK.
+        #
+        # `cyrius lib sync --full` and `cyrius deps` provision from the
+        # *installed* toolchain, not from the manifest pin. A developer whose
+        # wrapper has drifted ahead of the pin therefore writes a lib/ and a
+        # cyrius.lock describing a version CI will never install, and every
+        # local build stays green because the polluted lib/ agrees with the
+        # polluted lock. The mismatch is observable only where the pin is
+        # honoured — here.
+        #
+        # The CLI already prints `manifest-pin: X (drift — wrapper is Y)`.
+        # Treat that line as fatal rather than advisory.
+        run: |
+          set -e
+          cyrius --version
+          if cyrius --version 2>&1 | grep -q 'drift'; then
+            echo "::error::toolchain drift — the installed wrapper does not match the cyrius.cyml pin"
+            cyrius --version 2>&1 | sed 's/^/  /'
+            exit 1
+          fi
+          echo "toolchain matches the pin"
+
+      - name: Sync the pinned stdlib snapshot
+        # `lib sync --full` provisions ./lib/ from the pinned snapshot; `cyrius
+        # deps` only OVERLAYS [deps.NAME] on top. deps alone against an empty
+        # ./lib/ fails on the stdlib leaves each dep's dist/<pkg>.deps sidecar
+        # names, with an error claiming the module "is not in the cyrius
+        # stdlib" — which is false and sends you the wrong way.
+        run: cyrius lib sync --full
+
       - name: Resolve dependencies
         run: cyrius deps
 
-      - name: Build
+      - name: Lockfile agrees with a clean resolution
+        # Only meaningful once [deps.NAME] git deps exist — with none declared
+        # there is no lockfile, which is the documented default
+        # (first-party-standards.md:135, "No lockfile by default").
+        #
+        # When a lock IS committed it must match what CI just resolved. agnosai
+        # emitted a ::notice here and shipped anyway; that is precisely how a
+        # lock written by a drifted machine reached main and broke the build.
+        # Fail instead.
+        run: |
+          set -e
+          if [ ! -f cyrius.lock ]; then
+            if grep -qE '^\[deps\.[a-z0-9_-]+\]' cyrius.cyml; then
+              echo "::error::cyrius.cyml declares git deps but no cyrius.lock was produced"
+              exit 1
+            fi
+            echo "no git deps declared — no lockfile expected"
+            exit 0
+          fi
+          if ! git diff --quiet -- cyrius.lock; then
+            echo "::error::the committed cyrius.lock does not match a clean resolution at this pin"
+            echo "  run 'cyrius lib sync --full && cyrius deps' on a machine whose toolchain matches"
+            echo "  the cyrius.cyml pin, then commit the result."
+            git diff --stat -- cyrius.lock | sed 's/^/  /'
+            exit 1
+          fi
+          echo "cyrius.lock matches ($(grep -c '^commit' cyrius.lock || echo 0) commit-pinned dep(s))"
+
+      - name: Symbol check
+        # Cyrius has ONE flat symbol table and last-definition-wins. The
+        # compiler warns on a duplicate `fn` and is SILENT on a duplicate `var`
+        # or enum member, so grepping the build log cannot catch the worst case.
+        run: ./scripts/check-symbols.sh
+
+      - name: Cleanliness check
+        # fmt, lint, doc, vet, deny, deps --verify, lib snapshot. Each of
+        # cyrius fmt/lint/doc takes a FILE — written bare they print usage and
+        # exit 1, so the script loops rather than invoking them once.
+        run: ./scripts/check-clean.sh
+
+      - name: Build (DCE)
+        # Dead-code elimination for production parity — first-party-standards.md:400
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/agnostic
+
+      - name: Verify ELF
+        run: |
+          test -s build/agnostic || { echo "::error::no binary produced"; exit 1; }
+          xxd -l 4 build/agnostic | grep -q "7f45 4c46" \
+            || { echo "::error::output is not an ELF binary"; exit 1; }
+          echo "ELF OK — $(stat -c%s build/agnostic) bytes"
+
+      - name: Cross-build aarch64
+        # Conditional per first-party-standards.md:371 — "where the toolchain
+        # supports it". Skips rather than fails when the cross compiler is not
+        # in the installed bundle, so the gate does not go red on a toolchain
+        # that legitimately cannot produce it.
+        run: |
+          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ] && [ ! -x "$HOME/.cyrius/bin/cycc-native-aarch64" ]; then
+            echo "::notice::no aarch64 cross compiler in this bundle — skipping"
+            exit 0
+          fi
+          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/agnostic-aarch64 \
+            || { echo "::error::aarch64 cross-build failed"; exit 1; }
+          echo "aarch64 OK — $(stat -c%s build/agnostic-aarch64) bytes"
 
       - name: Test
-        # v5.6.28: bare `cyrius test` picks up the [build].test entry
-        # AND auto-discovers tests/*.tcyr — avoids the previous
-        # `cyrius test src/test.cyr` form that hard-failed when the
-        # stub didn't exist (Issue 1) and also wouldn't ever exercise
-        # tests/${proj}.tcyr.
-        run: cyrius test
+        # ⚠ Print WHICH suite failed. `cyrius test` exits non-zero but does not
+        # name the failing .tcyr, so a bare invocation leaves you bisecting by
+        # hand. Capture the log and echo it on failure.
+        #
+        # ⚠ GitHub runs `run:` under `bash -e`, so an unguarded failing pipeline
+        # aborts before the reporting can happen — hence the `|| rc=$?` guard.
+        run: |
+          rc=0
+          cyrius test 2>&1 | tee /tmp/agnostic-test.log || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::test suite failed"
+            grep -aE "FAIL|failed|error" /tmp/agnostic-test.log | head -40
+            exit "$rc"
+          fi
+          grep -aE "^[0-9]+ passed" /tmp/agnostic-test.log | tail -1
+
+      - name: Benchmarks
+        # continue-on-error per first-party-standards.md:372 — bench numbers
+        # vary by runner, so a regression here is signal, not a gate.
+        continue-on-error: true
+        run: |
+          if ! ls benches/*.bcyr tests/*.bcyr >/dev/null 2>&1; then
+            echo "no benchmarks yet"
+            exit 0
+          fi
+          cyrius bench
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agnostic-linux
+          path: |
+            build/agnostic
+            build/agnostic-aarch64
+          if-no-files-found: error
+
+  # ==========================================================================
+  # security — pattern scan for dangerous constructs
+  # first-party-standards.md:377
+  # ==========================================================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
+
+      - name: Scan for dangerous patterns
+        # The four classes the standard names. Comment lines are excluded so a
+        # doc comment describing a hazard does not trip the gate that guards it.
+        run: |
+          FAIL=0
+          scan() {  # scan <label> <grep-args...>
+            label="$1"; shift
+            if hits=$(grep -rnE "$@" src/ 2>/dev/null | grep -vE '^\s*[^:]+:[0-9]+:\s*#'); then
+              echo "::error::$label"
+              printf '%s\n' "$hits" | sed 's/^/    /'
+              FAIL=1
+            fi
+          }
+
+          # 1. Raw execve / exit syscalls. sys_exit_group is the sanctioned
+          #    process exit; syscall(59)/syscall(60) bypass it and, for 60, end
+          #    only the calling thread — a hang once workers exist.
+          scan "raw execve/exit syscall — use the sys_* wrappers" 'syscall\(\s*(59|60)\b'
+
+          # 2. Unbounded stack buffers >= 64KB. Cyrius has a per-fn stack
+          #    budget; an oversized local is silently promoted to a shared
+          #    global, which is not per-thread.
+          if hits=$(grep -rnE 'var [A-Za-z_][A-Za-z0-9_]*\[[0-9]{5,}\]' src/ 2>/dev/null | grep -vE ':[0-9]+:\s*#'); then
+            while IFS= read -r line; do
+              n=$(printf '%s' "$line" | grep -oE '\[[0-9]+\]' | tr -d '[]')
+              [ "${n:-0}" -ge 65536 ] && { echo "::error::stack buffer >= 64KB — use alloc()"; echo "    $line"; FAIL=1; }
+            done <<< "$hits"
+          fi
+
+          # 3. Shell injection. sys_system() with anything but a literal is a
+          #    command-injection sink.
+          scan "sys_system() — shell injection sink, use process spawn APIs" 'sys_system\('
+
+          # 4. fd hygiene: every sys_open needs a matching sys_close.
+          opens=$(grep -rcE 'sys_open\(' src/ 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+          closes=$(grep -rcE 'sys_close\(' src/ 2>/dev/null | awk -F: '{s+=$2} END {print s+0}')
+          echo "fd hygiene: $opens sys_open / $closes sys_close"
+          if [ "$opens" -gt "$closes" ]; then
+            echo "::warning::more sys_open than sys_close — check for leaked descriptors"
+          fi
+
+          [ "$FAIL" -eq 0 ] && echo "security scan clean"
+          exit $FAIL
+
+  # ==========================================================================
+  # docs — required files exist, VERSION is consistent
+  # first-party-standards.md:383
+  # ==========================================================================
+  docs:
+    name: Docs & Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 (pinned — CVE-21)
+
+      - name: Check required docs
+        run: |
+          MISSING=0
+          for doc in README.md CHANGELOG.md CLAUDE.md CONTRIBUTING.md \
+                     SECURITY.md CODE_OF_CONDUCT.md LICENSE VERSION cyrius.cyml; do
+            if [ -f "$doc" ]; then echo "  OK: $doc"; else echo "  MISSING: $doc"; MISSING=1; fi
+          done
+          exit $MISSING
+
+      - name: Verify version consistency
+        run: |
+          FILE_VERSION=$(tr -d '[:space:]' < VERSION)
+          CYML_VERSION=$(grep '^version = ' cyrius.cyml | head -1 | sed -E 's/version = "([^"]+)".*/\1/')
+          # cyrius.cyml uses ${file:VERSION} — treat the literal as "match"
+          if [ "$CYML_VERSION" != '${file:VERSION}' ] && [ "$CYML_VERSION" != "$FILE_VERSION" ]; then
+            echo "::error::VERSION ($FILE_VERSION) != cyrius.cyml ($CYML_VERSION)"
+            exit 1
+          fi
+          grep -q "\[$FILE_VERSION\]" CHANGELOG.md \
+            || { echo "::error::version $FILE_VERSION has no CHANGELOG.md section"; exit 1; }
+          echo "version consistent: $FILE_VERSION"
+
+      - name: Licence is GPL-3.0-only
+        # first-party-standards.md:321 — "All AGNOS projects use GPL-3.0-only.
+        # No exceptions." The -only suffix is required; GPL-3.0 / GPL-3.0+ are
+        # not acceptable spellings. The Python oracle shipped a GPL-3.0 LICENSE
+        # file while its metadata claimed MIT, which is the drift this catches.
+        run: |
+          DECLARED=$(grep '^license = ' cyrius.cyml | head -1 | sed -E 's/license = "([^"]+)".*/\1/')
+          if [ "$DECLARED" != "GPL-3.0-only" ]; then
+            echo "::error::cyrius.cyml licence is '$DECLARED', expected GPL-3.0-only"
+            exit 1
+          fi
+          grep -q "GNU GENERAL PUBLIC LICENSE" LICENSE \
+            || { echo "::error::LICENSE is not the GPL text"; exit 1; }
+          grep -q "Version 3" LICENSE \
+            || { echo "::error::LICENSE is not GPL version 3"; exit 1; }
+          echo "licence OK: GPL-3.0-only, LICENSE matches"

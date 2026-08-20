@@ -13,3 +13,11 @@ output = "agnostic"
 
 [deps]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+
+# Release artifacts. `bins` is the native build; `cross_bins` is what the
+# release workflow cross-compiles. first-party-standards.md:956 makes both
+# x86_64-linux and aarch64-linux artifacts a release-checklist item, so the
+# aarch64 entry is not optional once a tag is cut.
+[release]
+bins = ["agnostic"]
+cross_bins = ["agnostic-aarch64"]

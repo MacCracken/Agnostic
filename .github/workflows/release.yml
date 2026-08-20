@@ -46,13 +46,56 @@ jobs:
             CYRIUS_VERSION="$CYRIUS_VERSION" sh
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
+      - name: Verify toolchain matches the pin
+        # A release must never be cut by a toolchain other than the pinned one.
+        # See ci.yml for why this is fatal rather than advisory.
+        run: |
+          set -e
+          cyrius --version
+          if cyrius --version 2>&1 | grep -q 'drift'; then
+            echo "::error::toolchain drift — refusing to cut a release off-pin"
+            exit 1
+          fi
+
+      - name: Sync the pinned stdlib snapshot
+        # `cyrius deps` only OVERLAYS [deps.NAME]; against an empty lib/ it fails.
+        run: cyrius lib sync --full
+
       - name: Resolve dependencies
         run: cyrius deps
 
-      - name: Build
+      - name: Build x86_64 (DCE)
         run: |
           mkdir -p build
-          cyrius build src/main.cyr build/${{ github.event.repository.name }}
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/agnostic
+          xxd -l 4 build/agnostic | grep -q "7f45 4c46" \
+            || { echo "::error::x86_64 output is not an ELF binary"; exit 1; }
+
+      - name: Build aarch64 (DCE)
+        # first-party-standards.md:963 DON'T — "Release without aarch64 builds
+        # (where the toolchain supports it)". Fatal here, unlike CI's skip:
+        # a tagged release that silently ships one architecture is the failure
+        # the checklist is guarding against.
+        run: |
+          if [ ! -x "$HOME/.cyrius/bin/cycc_aarch64" ] && [ ! -x "$HOME/.cyrius/bin/cycc-native-aarch64" ]; then
+            echo "::error::no aarch64 cross compiler in the pinned bundle — cannot satisfy the release checklist"
+            exit 1
+          fi
+          CYRIUS_DCE=1 cyrius build --aarch64 src/main.cyr build/agnostic-aarch64
+          file build/agnostic-aarch64 | grep -q "ARM aarch64" \
+            || { echo "::error::aarch64 output is not an ARM binary"; exit 1; }
+
+      - name: Benchmarks
+        # first-party-standards.md:419 — "every tagged release runs cyrius bench
+        # and attaches results as release assets. Every version gets a
+        # permanent, reproducible performance snapshot."
+        continue-on-error: true
+        run: |
+          if ls benches/*.bcyr tests/*.bcyr >/dev/null 2>&1; then
+            cyrius bench 2>&1 | tee bench-results.txt
+          else
+            echo "no benchmarks yet" > bench-results.txt
+          fi
 
       - name: Extract changelog
         # Pull the tagged section out of CHANGELOG.md for the release body.
@@ -71,8 +114,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           NAME="${{ github.event.repository.name }}"
           git archive --format=tar.gz --prefix="$NAME-$TAG/" -o "$NAME-$TAG.tar.gz" HEAD
-          sha256sum "$NAME-$TAG.tar.gz" build/"$NAME" > SHA256SUMS 2>/dev/null \
-            || sha256sum "$NAME-$TAG.tar.gz" > SHA256SUMS
+          sha256sum "$NAME-$TAG.tar.gz" build/agnostic build/agnostic-aarch64 > SHA256SUMS
 
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2 (pinned — CVE-21)
@@ -82,4 +124,6 @@ jobs:
           files: |
             ${{ github.event.repository.name }}-${{ github.ref_name }}.tar.gz
             SHA256SUMS
-            build/${{ github.event.repository.name }}
+            build/agnostic
+            build/agnostic-aarch64
+            bench-results.txt
