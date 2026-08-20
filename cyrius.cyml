@@ -27,6 +27,15 @@ stdlib = [
 # release workflow cross-compiles. first-party-standards.md:956 makes both
 # x86_64-linux and aarch64-linux artifacts a release-checklist item, so the
 # aarch64 entry is not optional once a tag is cut.
+# AgnosAI — the engine tier, linked in-process rather than called over HTTP.
+# Agnostic owns the product tier; everything crew/task/agent/scheduling-shaped
+# lives here. See CYRIUS-PORT-BRIEF.md §3.
+[deps.agnosai]
+git = "https://github.com/MacCracken/agnosai.git"
+path = "../agnosai"
+tag = "2.0.3"
+modules = ["dist/agnosai.cyr"]
+
 [release]
 bins = ["agnostic"]
 cross_bins = ["agnostic-aarch64"]

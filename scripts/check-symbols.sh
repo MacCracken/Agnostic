@@ -115,6 +115,51 @@ if [ -n "$unprefixed" ]; then
     fail=1
 fi
 
+# --- Rule 3: no src/ symbol collides with anything lib/ exports ------------
+# Added when agnosai was linked in-process at M2. lib/ is now ~1.6 MB of
+# dependency carrying thousands of top-level names, and Cyrius has ONE flat
+# symbol table with last-definition-wins. The compiler warns on a duplicate
+# `fn` and is SILENT on a duplicate `var` or enum member.
+#
+# Rules 1 and 2 scan src/ ONLY, so a name colliding with lib/ is invisible to
+# them and to every other gate. A src/ definition that shadows a lib/ one does
+# not fail the build — it silently replaces the dependency's implementation for
+# the whole program.
+#
+# The agnostic_* prefix makes this unlikely, not impossible: lib/ also carries
+# ~180 unprefixed names from folded distlibs.
+collisions=$(python3 - <<'PYEOF'
+import re, glob, collections
+
+def tops(paths):
+    out = collections.defaultdict(list)
+    for p in paths:
+        try: text = open(p, errors="ignore").read()
+        except OSError: continue
+        for lineno, line in enumerate(text.split("\n"), 1):
+            m = re.match(r'^(fn|var)\s+([A-Za-z_][A-Za-z0-9_]*)', line)
+            if m: out[m.group(2)].append((p, lineno))
+    return out
+
+src = tops([p for p in glob.glob("src/**/*.cyr", recursive=True) if p != "src/test.cyr"])
+lib = tops(glob.glob("lib/*.cyr") + glob.glob("lib/**/*.cyr", recursive=True))
+
+for name in sorted(set(src) & set(lib)):
+    sp, sl = src[name][0]
+    lp, ll = lib[name][0]
+    print(f"{name}\n    src: {sp}:{sl}\n    lib: {lp}:{ll}")
+PYEOF
+)
+if [ -n "$collisions" ]; then
+    printf '%s\n' "$collisions"
+    echo ""
+    echo "error: a src/ symbol has the same name as one lib/ exports."
+    echo "       Cyrius resolves this last-definition-wins and is SILENT for"
+    echo "       'var' and enum members — the dependency's version is replaced"
+    echo "       for the whole program with no diagnostic. Rename the src/ one."
+    fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
     n=$(find src -name '*.cyr' -exec grep -hcE '^(fn|var|enum) ' {} + | awk '{s+=$1} END {print s}')
     echo "symbol check OK — $n top-level definitions across $(find src -name "*.cyr" | wc -l) files, no duplicates, all prefixed"
