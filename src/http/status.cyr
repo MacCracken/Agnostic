@@ -1,0 +1,56 @@
+# agnostic/http/status — status codes and the shared JSON key vocabulary.
+#
+# ## Only the codes sandhi does not already export
+#
+# `lib/sandhi.cyr` exports HTTP_OK, HTTP_NO_CONTENT, HTTP_BAD_REQUEST,
+# HTTP_UNAUTHORIZED, HTTP_FORBIDDEN, HTTP_NOT_FOUND, HTTP_METHOD_NOT_ALLOWED,
+# HTTP_PAYLOAD_TOO_LARGE, HTTP_REQUEST_TIMEOUT, HTTP_INTERNAL, HTTP_SERVICE_UNAVAILABLE,
+# the 501 constant, and the redirects.
+#
+# ⚠ **Do not redefine any of them.** Cyrius has one flat symbol table and
+# last-definition-wins, and the compiler is SILENT on a duplicate `var`. Worse,
+# `scripts/check-symbols.sh` scans `src/` only — a name that collides with `lib/`
+# is invisible to every gate we have. Only the three codes sandhi lacks are
+# declared here.
+#
+# ## The JSON key vocabulary
+#
+# Response keys are interned once at load time rather than rebuilt per request.
+# `str_from` at top level is safe — verified — because it does not allocate
+# through the bump allocator that `alloc_init()` sets up.
+
+var AGNOSTIC_HTTP_CREATED           = 201;
+var AGNOSTIC_HTTP_UNPROCESSABLE     = 422;
+var AGNOSTIC_HTTP_TOO_MANY_REQUESTS = 429;
+
+var AGNOSTIC_JK_STATUS    = str_from("status");
+var AGNOSTIC_JK_ERROR     = str_from("error");
+var AGNOSTIC_JK_VERSION   = str_from("version");
+var AGNOSTIC_JK_CHECKS    = str_from("checks");
+var AGNOSTIC_JV_OK        = str_from("ok");
+var AGNOSTIC_JV_READY     = str_from("ready");
+var AGNOSTIC_JV_NOT_READY = str_from("not_ready");
+
+# The reason phrase for a status line.
+#
+# ⚠ Every status the router can emit needs an arm here. A missing arm falls
+# through to "Internal Server Error", so a 201 would go out reading
+# `201 Internal Server Error` — a response that looks like a server fault to
+# every log scraper and alerting rule while actually having succeeded. The
+# suite pins one assertion per code for exactly that reason.
+fn agnostic_http_reason(status): i64 {
+    if (status == HTTP_OK) { return "OK"; }
+    if (status == AGNOSTIC_HTTP_CREATED) { return "Created"; }
+    if (status == HTTP_NO_CONTENT) { return "No Content"; }
+    if (status == HTTP_BAD_REQUEST) { return "Bad Request"; }
+    if (status == HTTP_UNAUTHORIZED) { return "Unauthorized"; }
+    if (status == HTTP_FORBIDDEN) { return "Forbidden"; }
+    if (status == HTTP_NOT_FOUND) { return "Not Found"; }
+    if (status == HTTP_METHOD_NOT_ALLOWED) { return "Method Not Allowed"; }
+    if (status == HTTP_PAYLOAD_TOO_LARGE) { return "Payload Too Large"; }
+    if (status == AGNOSTIC_HTTP_UNPROCESSABLE) { return "Unprocessable Entity"; }
+    if (status == AGNOSTIC_HTTP_TOO_MANY_REQUESTS) { return "Too Many Requests"; }
+    if (status == HTTP_NOT_IMPLEMENTED) { return "Not Implemented"; }  #skip-lint: HTTP 501 status code, not a deferral
+    if (status == HTTP_SERVICE_UNAVAILABLE) { return "Service Unavailable"; }
+    return "Internal Server Error";
+}

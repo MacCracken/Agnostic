@@ -9,10 +9,16 @@ include "src/strcase.cyr"
 include "src/config.cyr"
 include "src/trace.cyr"
 include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/routes/health.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.
 fn main() {
     alloc_init();
+    # CYRIUS_PKG_VERSION resolves only in this file — the entry text. Hand it to
+    # the modules that need it at mount. See src/routes/health.cyr.
+    agnostic_version_set(str_from(CYRIUS_PKG_VERSION));
     println("hello from agnostic");
     return 0;
 }

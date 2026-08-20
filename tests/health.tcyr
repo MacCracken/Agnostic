@@ -1,0 +1,213 @@
+# agnostic/routes/health — liveness, readiness, and the status vocabulary.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/routes/health.cyr"
+
+# Render a response body to bytes so assertions can look at real output rather
+# than at the tree that produced it.
+fn _t_body(a, r): i64 {
+    return bayan_json_v_build_a(a, agnostic_response_body(r));
+}
+
+fn _t_has(s: Str, needle): i64 {
+    var n = str_len(s);
+    var d = str_data(s);
+    var m = 0;
+    while ((load8(needle + m) & 0xFF) != 0) { m = m + 1; }
+    if (m > n) { return 0; }
+    var i = 0;
+    while (i <= n - m) {
+        var j = 0;
+        while (j < m) {
+            if ((load8(d + i + j) & 0xFF) != (load8(needle + j) & 0xFF)) { break; }
+            j = j + 1;
+        }
+        if (j == m) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Readiness probes for the tests.
+fn _t_check_ok(): i64 { return 1; }
+fn _t_check_bad(): i64 { return 0; }
+
+fn test_reason_phrases() {
+    test_group("http/reason");
+
+    # ⚠ Every status the router can emit needs an arm. A missing one falls
+    # through to "Internal Server Error", so a 201 would go out reading
+    # "201 Internal Server Error" — which reads as a server fault to every log
+    # scraper and alerting rule while the request actually succeeded.
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_OK)), "OK"), 1, "200");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(AGNOSTIC_HTTP_CREATED)), "Created"), 1, "201");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_NO_CONTENT)), "No Content"), 1, "204");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_BAD_REQUEST)), "Bad Request"), 1, "400");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_UNAUTHORIZED)), "Unauthorized"), 1, "401");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_FORBIDDEN)), "Forbidden"), 1, "403");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_NOT_FOUND)), "Not Found"), 1, "404");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_METHOD_NOT_ALLOWED)), "Method Not Allowed"), 1, "405");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_PAYLOAD_TOO_LARGE)), "Payload Too Large"), 1, "413");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(AGNOSTIC_HTTP_UNPROCESSABLE)), "Unprocessable Entity"), 1, "422");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(AGNOSTIC_HTTP_TOO_MANY_REQUESTS)), "Too Many Requests"), 1, "429");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_INTERNAL)), "Internal Server Error"), 1, "500");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_NOT_IMPLEMENTED)), "Not Implemented"), 1, "501");
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(HTTP_SERVICE_UNAVAILABLE)), "Service Unavailable"), 1, "503");
+
+    # An unmapped code falls back rather than returning 0.
+    assert_eq(str_eq_cstr(str_from(agnostic_http_reason(599)), "Internal Server Error"), 1, "unknown falls back");
+}
+
+fn test_response_constructors() {
+    test_group("http/response");
+
+    var a = arena_allocator(65536);
+
+    var body = bayan_json_v_obj_new_a(a);
+    var r = agnostic_response_json_a(a, HTTP_OK, body);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "json status");
+    assert_eq(agnostic_response_is_text(r), 0, "json is not text");
+    assert_eq(agnostic_response_body(r), body, "json body round-trips");
+
+    var t = agnostic_response_text_a(a, HTTP_OK, str_from("hello"));
+    assert_eq(agnostic_response_is_text(t), 1, "text is text");
+
+    var e = agnostic_response_error_a(a, HTTP_NOT_FOUND, str_from("no such route"));
+    assert_eq(agnostic_response_status(e), HTTP_NOT_FOUND, "error status");
+    var eb = _t_body(a, e);
+    assert_eq(_t_has(eb, "\"error\":\"no such route\""), 1, "error body is {error: msg}");
+
+    # A null response is 500, not a fault. The serve adapter relies on this so
+    # "handler returned 0" needs no special case.
+    assert_eq(agnostic_response_status(0), HTTP_INTERNAL, "null response reads as 500");
+    assert_eq(agnostic_response_body(0), 0, "null response has no body");
+}
+
+fn test_response_arena_exhaustion() {
+    test_group("http/response-exhaustion");
+
+    # ⭐ M1 GATE. A full arena answers 0 and there is no error channel through
+    # the _a families, so every constructor must return 0 rather than a
+    # half-built record that faults on first use.
+    var tiny = arena_allocator(8);
+    assert_eq(agnostic_response_json_a(tiny, HTTP_OK, 0), 0, "json_a returns 0 when the arena is full");
+    assert_eq(agnostic_response_text_a(tiny, HTTP_OK, str_from("x")), 0, "text_a returns 0 when the arena is full");
+}
+
+fn test_health_liveness() {
+    test_group("routes/health");
+
+    var a = arena_allocator(65536);
+    var r = agnostic_route_health_a(a);
+
+    # ⭐ Liveness reads NO dependency and is always 200.
+    #
+    # The oracle's /health pings Redis and TCP-connects RabbitMQ and returns 503
+    # when they are down. Under an orchestrator that manufactures an outage: a
+    # Redis blip fails every pod's liveness probe, all pods restart, and the
+    # restart cannot help because the fault is elsewhere. This assertion is what
+    # stops that behaviour being reintroduced.
+    assert_eq(agnostic_response_status(r), HTTP_OK, "health is always 200");
+    assert_eq(_t_has(_t_body(a, r), "\"status\":\"ok\""), 1, "health body is {status: ok}");
+
+    # Registering a FAILING dependency check must not affect liveness at all.
+    agnostic_ready_reset();
+    agnostic_ready_register(str_from("broken"), &_t_check_bad);
+    var r2 = agnostic_route_health_a(a);
+    assert_eq(agnostic_response_status(r2), HTTP_OK,
+      "health stays 200 even with a failing dependency — that is readiness' job");
+    agnostic_ready_reset();
+}
+
+fn test_ready_no_checks() {
+    test_group("routes/ready-empty");
+
+    var a = arena_allocator(65536);
+    agnostic_ready_reset();
+    assert_eq(agnostic_ready_check_count(), 0, "registry starts empty");
+
+    var r = agnostic_route_ready_a(a);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "no checks means ready");
+    var b = _t_body(a, r);
+    assert_eq(_t_has(b, "\"status\":\"ready\""), 1, "status is ready");
+    assert_eq(_t_has(b, "\"version\""), 1, "version reported");
+    assert_eq(_t_has(b, "\"checks\""), 1, "checks object present even when empty");
+}
+
+fn test_ready_all_pass() {
+    test_group("routes/ready-pass");
+
+    var a = arena_allocator(65536);
+    agnostic_ready_reset();
+    agnostic_ready_register(str_from("agnosai"), &_t_check_ok);
+    agnostic_ready_register(str_from("store"), &_t_check_ok);
+    assert_eq(agnostic_ready_check_count(), 2, "two checks registered");
+
+    var r = agnostic_route_ready_a(a);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "all passing means 200");
+    var b = _t_body(a, r);
+    assert_eq(_t_has(b, "\"status\":\"ready\""), 1, "status ready");
+    assert_eq(_t_has(b, "\"agnosai\":\"ok\""), 1, "first check reported by name");
+    assert_eq(_t_has(b, "\"store\":\"ok\""), 1, "second check reported by name");
+    agnostic_ready_reset();
+}
+
+fn test_ready_one_fails() {
+    test_group("routes/ready-fail");
+
+    var a = arena_allocator(65536);
+    agnostic_ready_reset();
+    agnostic_ready_register(str_from("agnosai"), &_t_check_ok);
+    agnostic_ready_register(str_from("store"), &_t_check_bad);
+
+    var r = agnostic_route_ready_a(a);
+    assert_eq(agnostic_response_status(r), HTTP_SERVICE_UNAVAILABLE, "one failure means 503");
+    var b = _t_body(a, r);
+    assert_eq(_t_has(b, "\"status\":\"not_ready\""), 1, "status not_ready");
+
+    # Naming which check failed is the whole point — a bare 503 makes an
+    # operator guess which dependency is down.
+    assert_eq(_t_has(b, "\"agnosai\":\"ok\""), 1, "passing check still reported ok");
+    assert_eq(_t_has(b, "\"store\":\"error\""), 1, "failing check named in the body");
+    agnostic_ready_reset();
+}
+
+fn test_version_threading() {
+    test_group("routes/version");
+
+    # CYRIUS_PKG_VERSION resolves only in the entry file, so mount threads it in.
+    # Unset, /ready must say "unknown" rather than emit an empty or absent value.
+    agnostic_version_set(0);
+    assert_eq(str_eq_cstr(agnostic_version(), "unknown"), 1, "unset version reads as unknown");
+
+    agnostic_version_set(str_from("9.9.9"));
+    assert_eq(str_eq_cstr(agnostic_version(), "9.9.9"), 1, "set version round-trips");
+
+    var a = arena_allocator(65536);
+    agnostic_ready_reset();
+    var r = agnostic_route_ready_a(a);
+    assert_eq(_t_has(_t_body(a, r), "\"version\":\"9.9.9\""), 1, "ready reports the threaded version");
+    agnostic_version_set(0);
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_reason_phrases();
+    test_response_constructors();
+    test_response_arena_exhaustion();
+    test_health_liveness();
+    test_ready_no_checks();
+    test_ready_all_pass();
+    test_ready_one_fails();
+    test_version_threading();
+    return assert_summary();
+}
+
+var _agnostic_health_test_exit = main();
+if (_agnostic_health_test_exit > 0) { _agnostic_health_test_exit = 1; }
+sys_exit_group(_agnostic_health_test_exit);

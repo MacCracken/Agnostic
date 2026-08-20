@@ -1,0 +1,158 @@
+# agnostic/routes/health — liveness and readiness.
+#
+# ## The two are genuinely different, and the oracle conflated them
+#
+# `/health` is **liveness**: is this process alive and able to serve? It reads
+# no dependency and always answers 200.
+#
+# `/ready` is **readiness**: can this process serve *useful* work right now?
+# It runs the registered dependency checks and answers 503 when any fails.
+#
+# The Python oracle's `/health` pings Redis and TCP-connects RabbitMQ, returning
+# 503 when either is down (`python-port/webgui/routes/health.py`). That is a
+# readiness check wearing a liveness name, and under an orchestrator it
+# manufactures an outage: a Redis blip fails every pod's liveness probe, every
+# pod is killed and restarted, and the restart cannot help because the fault is
+# in a different service. The oracle's own CHANGELOG records patching around
+# this — "`/health` now returns HTTP 200 for degraded state ... Fixes
+# false-negative liveness failures in fresh containers" — which is the right fix
+# reached from the wrong starting point.
+#
+# Recorded in docs/adr/001-health-and-readiness-are-separate.md.
+#
+# ## The check registry
+#
+# `/ready` walks a registry rather than hard-coding dependencies, so M2 (AgnosAI)
+# and M4 (patra) add checks without editing this file.
+#
+# ⚠ **Register at mount time only.** The registry is read lock-free by every
+# worker; `sandhi_server_run_pooled` spawns them after mount, so registration
+# before the run call is safe and registration after it is a data race.
+
+enum AgnosticReadyCheckOff {
+    AGNOSTIC_RC_NAME = 0;
+    AGNOSTIC_RC_FP   = 8;
+    AGNOSTIC_RC_SIZE = 16;
+}
+
+# Vec of check records. Built at mount, read-only thereafter.
+var _agnostic_ready_checks = 0;
+
+# The version string reported by /ready, set once at mount.
+#
+# ⚠ **Why this is not read directly from CYRIUS_PKG_VERSION here.** cbt injects
+# `#@pkgver` at byte 0 and cycc replaces it with the declaration, but the symbol
+# resolves ONLY in the entry file's own text — an `include`d file referencing it
+# fails to compile with "undefined variable". Verified at cyrius 6.5.32 by
+# referencing it from two different included files. So `src/main.cyr` reads it
+# and hands it here at mount.
+#
+# It is still DERIVED from `version = "${file:VERSION}"`, not hand-maintained —
+# which is the point. AgnosAI hardcodes its equivalent and has been reporting
+# 1.1.0 since it shipped 2.0.x.
+var _agnostic_version = 0;
+
+# Set the version reported by /ready. Mount time only.
+fn agnostic_version_set(v: Str): i64 {
+    _agnostic_version = v;
+    return 0;
+}
+
+# The configured version, or "unknown" when mount never set it.
+fn agnostic_version(): i64 {
+    if (_agnostic_version == 0) { return str_from("unknown"); }
+    return _agnostic_version;
+}
+
+# Register a readiness check. `fp` is `fn() -> 1 healthy / 0 unhealthy`.
+# Mount time only — see the module header.
+fn agnostic_ready_register(name: Str, fp): i64 {
+    if (_agnostic_ready_checks == 0) { _agnostic_ready_checks = vec_new(); }
+    var rec = alloc(AGNOSTIC_RC_SIZE);
+    if (rec == 0) { return 0; }
+    store64(rec + AGNOSTIC_RC_NAME, name);
+    store64(rec + AGNOSTIC_RC_FP, fp);
+    vec_push(_agnostic_ready_checks, rec);
+    return 1;
+}
+
+# How many readiness checks are registered.
+fn agnostic_ready_check_count(): i64 {
+    if (_agnostic_ready_checks == 0) { return 0; }
+    return vec_len(_agnostic_ready_checks);
+}
+
+# Drop every registered check. For tests — the server registers once at mount.
+fn agnostic_ready_reset(): i64 {
+    _agnostic_ready_checks = 0;
+    return 0;
+}
+
+# GET /health — liveness. Always 200, reads nothing.
+fn agnostic_route_health_a(a): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+    var ok = bayan_json_v_str_new_a(a, AGNOSTIC_JV_OK);
+    if (ok == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS, ok);
+    return agnostic_response_json_a(a, HTTP_OK, obj);
+}
+
+# GET /health from the global allocator. Not for request paths.
+fn agnostic_route_health(): i64 {
+    return agnostic_route_health_a(default_alloc());
+}
+
+# GET /ready — readiness. Runs every registered check.
+#
+# Answers 200 `{"status":"ready", ...}` when all pass, or 503
+# `{"status":"not_ready", ...}` when any fails. `checks` reports each by name so
+# an operator can see *which* dependency is down without reading logs — the
+# thing a bare 503 makes them guess at.
+#
+# `version` is whatever mount handed to `agnostic_version_set` — derived from
+# `version = "${file:VERSION}"` via CYRIUS_PKG_VERSION in src/main.cyr, never
+# hand-maintained. See the note on `_agnostic_version` for why it is threaded
+# rather than read here.
+fn agnostic_route_ready_a(a): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+
+    var checks = bayan_json_v_obj_new_a(a);
+    if (checks == 0) { return 0; }
+
+    var all_ok = 1;
+    var n = agnostic_ready_check_count();
+    var i = 0;
+    while (i < n) {
+        var rec = vec_get(_agnostic_ready_checks, i);
+        var name = load64(rec + AGNOSTIC_RC_NAME);
+        var fp = load64(rec + AGNOSTIC_RC_FP);
+        var verdict = fncall0(fp);
+        var vs = 0;
+        if (verdict == 1) { vs = bayan_json_v_str_new_a(a, AGNOSTIC_JV_OK); }
+        else { vs = bayan_json_v_str_new_a(a, AGNOSTIC_JK_ERROR); all_ok = 0; }
+        if (vs == 0) { return 0; }
+        bayan_json_v_obj_set_a(a, checks, name, vs);
+        i = i + 1;
+    }
+
+    var state = 0;
+    var status = HTTP_OK;
+    if (all_ok == 1) { state = bayan_json_v_str_new_a(a, AGNOSTIC_JV_READY); }
+    else { state = bayan_json_v_str_new_a(a, AGNOSTIC_JV_NOT_READY); status = HTTP_SERVICE_UNAVAILABLE; }
+    if (state == 0) { return 0; }
+
+    var ver = bayan_json_v_str_new_a(a, agnostic_version());
+    if (ver == 0) { return 0; }
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS, state);
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_VERSION, ver);
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_CHECKS, checks);
+    return agnostic_response_json_a(a, status, obj);
+}
+
+# GET /ready from the global allocator. Not for request paths.
+fn agnostic_route_ready(): i64 {
+    return agnostic_route_ready_a(default_alloc());
+}
