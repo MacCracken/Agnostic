@@ -1,0 +1,131 @@
+# agnostic/trace — a per-request W3C trace id, held thread-locally.
+#
+# ## Why not sakshi's trace id
+#
+# sakshi keeps its trace id in a process global. Under `sandhi_server_run_pooled`
+# every worker is a real OS thread serving a different request, so a process
+# global means concurrent requests overwrite each other's id and the log lines
+# interleave under whichever id wrote last. The id has to be thread-local or it
+# is worse than useless — it actively misattributes.
+#
+# ## Claiming the slot at load time
+#
+# `var AGNOSTIC_TRACE_SLOT = thread_local_alloc();` runs at load, before `main`.
+# That is safe and deliberate:
+#
+#   - `thread_local_alloc` only bumps a counter. It allocates nothing, so it does
+#     not depend on `alloc_init()` having run.
+#   - Claiming before `sandhi_server_run_pooled` spawns workers guarantees every
+#     worker sees the same slot index. Claiming lazily on first use would race.
+#   - Slots are handed out monotonically from 16, so this can never alias the
+#     frozen 0-15 range the stdlib reserves.
+#
+# ⚠ **`thread_local_set` faults on a thread whose table has not been initialised.**
+# The pooled workers are initialised by sandhi; anything else touching a slot —
+# a test, the signal thread, a bare `main()` — must call `thread_local_init()`
+# first or it segfaults. Every reader must also tolerate 0: the accept thread and
+# the signal thread have fresh slots and legitimately have no trace id.
+
+var AGNOSTIC_TRACE_SLOT = thread_local_alloc();
+
+# Length of a W3C traceparent: "00-" + 32 hex + "-" + 16 hex + "-01".
+var AGNOSTIC_TRACE_LEN = 55;
+
+# Monotonic fallback source for id generation, mixed with random bytes so two
+# ids minted in the same nanosecond still differ.
+var _agnostic_trace_counter = 0;
+
+# Write `n` bytes of `v` as lowercase hex into `dst`, most significant first.
+fn _agnostic_trace_hex(dst, v, nybbles): i64 {
+    var i = 0;
+    while (i < nybbles) {
+        var shift = (nybbles - 1 - i) * 4;
+        var nyb = (v >> shift) & 0xF;
+        if (nyb < 10) { store8(dst + i, 48 + nyb); }
+        else { store8(dst + i, 87 + nyb); }
+        i = i + 1;
+    }
+    return nybbles;
+}
+
+# Mint a fresh traceparent into arena `a`. Returns a Str of exactly
+# AGNOSTIC_TRACE_LEN bytes, or 0 if the allocation failed.
+#
+# Format is W3C traceparent: version "00", a 128-bit trace id, a 64-bit span id,
+# and flags "01" (sampled). The trace id is two random 64-bit words; the span id
+# mixes a counter with the clock so ids remain distinct even if the random source
+# degrades.
+fn agnostic_trace_generate_a(a): i64 {
+    var buf = alloc_via(a, AGNOSTIC_TRACE_LEN + 1);
+    if (buf == 0) { return 0; }
+
+    var hi = 0;
+    var lo = 0;
+    random_bytes(&hi, 8);
+    random_bytes(&lo, 8);
+
+    _agnostic_trace_counter = _agnostic_trace_counter + 1;
+    var span = clock_epoch_ns() ^ (_agnostic_trace_counter * 0x9E3779B97F4A7C15);
+
+    store8(buf, 48);      # '0'
+    store8(buf + 1, 48);  # '0'
+    store8(buf + 2, 45);  # '-'
+    _agnostic_trace_hex(buf + 3, hi, 16);
+    _agnostic_trace_hex(buf + 19, lo, 16);
+    store8(buf + 35, 45); # '-'
+    _agnostic_trace_hex(buf + 36, span, 16);
+    store8(buf + 52, 45); # '-'
+    store8(buf + 53, 48); # '0'
+    store8(buf + 54, 49); # '1'  → flags "01", sampled
+    store8(buf + 55, 0);
+
+    # The buffer is NUL-terminated above, so the cstring form is exact. There is
+    # no str_from_len_a in the stdlib — str_from_buf exists but has no arena twin.
+    return str_from_a(a, buf);
+}
+
+# Set the calling thread's trace id. `tp` is a Str, or 0 to clear.
+#
+# ⚠ Faults unless the thread's local table is initialised — see the module
+# header. Under the pooled server sandhi has already done it.
+fn agnostic_trace_set(tp): i64 {
+    thread_local_set(AGNOSTIC_TRACE_SLOT, tp);
+    return 0;
+}
+
+# The calling thread's trace id, or 0 when it has none. Callers must tolerate 0:
+# the accept and signal threads legitimately have no request in flight.
+fn agnostic_trace_current(): i64 {
+    return thread_local_get(AGNOSTIC_TRACE_SLOT);
+}
+
+# Clear the calling thread's trace id. Used between requests and by tests.
+fn agnostic_trace_clear(): i64 {
+    thread_local_set(AGNOSTIC_TRACE_SLOT, 0);
+    return 0;
+}
+
+# Establish the trace id for an inbound request and return it.
+#
+# Honours an inbound `traceparent` header so a trace started upstream continues
+# here rather than being broken into two unrelated traces; mints a fresh one when
+# the header is absent or malformed.
+#
+# ⚠ `sandhi_server_find_header_a` returns a NUL-terminated cstring, not a Str.
+# Wrapping with `str_from_a` is not optional: passing the raw pointer where a Str
+# is expected reads the pointer itself as a Str header, and every downstream
+# length is garbage.
+fn agnostic_trace_begin_a(a, buf, blen): i64 {
+    var tp = 0;
+    var raw = sandhi_server_find_header_a(a, buf, blen, "traceparent");
+    if (raw != 0) {
+        var s = str_from_a(a, raw);
+        # Only accept a well-formed traceparent. A malformed one is discarded
+        # rather than propagated — forwarding garbage corrupts every downstream
+        # span too.
+        if (str_len(s) == AGNOSTIC_TRACE_LEN) { tp = s; }
+    }
+    if (tp == 0) { tp = agnostic_trace_generate_a(a); }
+    agnostic_trace_set(tp);
+    return tp;
+}

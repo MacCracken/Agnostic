@@ -1,0 +1,113 @@
+# agnostic/trace — thread-local request ids.
+#
+# Stdlib is auto-prepended from cyrius.cyml; do NOT include a stdlib module here.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+
+# ⚠ **`thread_local_init()` is not optional in this suite.**
+#
+# `thread_local_set` faults on a thread whose local table has not been
+# initialised. Under the server, sandhi initialises each pooled worker before it
+# runs a handler — but a .tcyr `main()` is a bare thread that nobody initialised,
+# so the FIRST `agnostic_trace_set` here segfaults without this call. The failure
+# is a hard crash with no assertion output, which reads like a compiler problem
+# rather than a missing setup call.
+
+fn test_slot_claimed() {
+    test_group("trace/slot");
+
+    # The slot is claimed at load time, before main(). Slots are handed out
+    # monotonically from 16, so a real slot is >= 16 — 0 would mean the top-level
+    # initialiser silently evaluated to 0, which is the Cyrius failure mode where
+    # a top-level var reads a global declared later.
+    assert_gte(AGNOSTIC_TRACE_SLOT, 16, "slot claimed at load, outside the reserved 0-15 range");
+}
+
+fn test_set_current_roundtrip() {
+    test_group("trace/set-current");
+
+    agnostic_trace_clear();
+    assert_eq(agnostic_trace_current(), 0, "a cleared slot reads 0");
+
+    var tp = str_from("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+    agnostic_trace_set(tp);
+    assert_eq(str_eq(agnostic_trace_current(), tp), 1, "set then current round-trips");
+
+    agnostic_trace_clear();
+    assert_eq(agnostic_trace_current(), 0, "clear resets to 0");
+}
+
+fn test_generate() {
+    test_group("trace/generate");
+
+    var a = arena_allocator(65536);
+    assert_neq(a, 0, "test arena allocated");
+
+    var t1 = agnostic_trace_generate_a(a);
+    assert_neq(t1, 0, "generate returns a Str");
+    assert_eq(str_len(t1), AGNOSTIC_TRACE_LEN, "traceparent is exactly 55 bytes");
+
+    var d = str_data(t1);
+    assert_eq(load8(d) & 0xFF, 48, "version high nibble is '0'");
+    assert_eq(load8(d + 1) & 0xFF, 48, "version low nibble is '0'");
+    assert_eq(load8(d + 2) & 0xFF, 45, "dash after version");
+    assert_eq(load8(d + 35) & 0xFF, 45, "dash after 32-hex trace id");
+    assert_eq(load8(d + 52) & 0xFF, 45, "dash after 16-hex span id");
+    assert_eq(load8(d + 53) & 0xFF, 48, "flags high is '0'");
+    assert_eq(load8(d + 54) & 0xFF, 49, "flags low is '1' — sampled");
+
+    # Every byte of both ids must be lowercase hex. A bug in the nibble->ASCII
+    # map shows up here rather than as a mysterious downstream parse failure.
+    var i = 3;
+    var non_hex = 0;
+    while (i < 52) {
+        if (i != 35) {
+            var c = load8(d + i) & 0xFF;
+            var ok = 0;
+            if (c >= 48) { if (c <= 57) { ok = 1; } }
+            if (c >= 97) { if (c <= 102) { ok = 1; } }
+            if (ok == 0) { non_hex = non_hex + 1; }
+        }
+        i = i + 1;
+    }
+    assert_eq(non_hex, 0, "every id byte is lowercase hex");
+
+    # Two consecutive ids must differ. If the random source degrades to zeros the
+    # counter-and-clock mix in the span id still separates them, which is exactly
+    # what that mix is for.
+    var t2 = agnostic_trace_generate_a(a);
+    assert_eq(str_eq(t1, t2), 0, "consecutive ids differ");
+}
+
+fn test_generate_exhausted_arena() {
+    test_group("trace/arena-exhaustion");
+
+    # ⭐ THE M1 GATE. A full arena answers 0, and a Str of 0 is indistinguishable
+    # from a valid one — there is no option type and no error channel through the
+    # _a families. Anything that does not check will carry the 0 forward and fault
+    # at the first dereference, far from the cause.
+    #
+    # A 16-byte arena cannot hold a 56-byte buffer, so alloc_via must fail.
+    var tiny = arena_allocator(16);
+    assert_neq(tiny, 0, "tiny arena itself allocated");
+
+    var t = agnostic_trace_generate_a(tiny);
+    assert_eq(t, 0, "generate returns 0 rather than a half-built Str when the arena is full");
+}
+
+fn main() {
+    alloc_init();
+    # See the header — without this the first trace_set segfaults.
+    thread_local_init();
+
+    test_slot_claimed();
+    test_set_current_roundtrip();
+    test_generate();
+    test_generate_exhausted_arena();
+    return assert_summary();
+}
+
+var _agnostic_trace_test_exit = main();
+if (_agnostic_trace_test_exit > 0) { _agnostic_trace_test_exit = 1; }
+sys_exit_group(_agnostic_trace_test_exit);

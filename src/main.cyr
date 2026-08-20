@@ -7,6 +7,7 @@
 # state another module reads must be included first.
 include "src/strcase.cyr"
 include "src/config.cyr"
+include "src/trace.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.
 fn main() {
