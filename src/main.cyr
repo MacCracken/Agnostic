@@ -14,21 +14,41 @@ include "src/http/response.cyr"
 include "src/http/codec.cyr"
 include "src/routes/health.cyr"
 include "src/http/router.cyr"
+include "src/server/serve.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.
+# Entry point. Reads config, wires logging, and serves until a shutdown signal.
 fn main() {
     alloc_init();
-    # CYRIUS_PKG_VERSION resolves only in this file — the entry text. Hand it to
-    # the modules that need it at mount. See src/routes/health.cyr.
+    thread_local_init();
+
+    var cfg = agnostic_config_from_env();
+    if (cfg == 0) {
+        println("agnostic: could not allocate configuration");
+        return 1;
+    }
+
+    # ⚠ A malformed environment value refuses to start rather than silently
+    # falling back to a default. An operator discovering in production that
+    # AGNOSTIC_PORT never applied is a worse outcome than a startup failure that
+    # names the problem.
+    if (agnostic_config_invalid(cfg) == 1) {
+        println("agnostic: invalid configuration — check AGNOSTIC_* environment values");
+        return 1;
+    }
+
+    agnostic_log_init(cfg);
+
+    # CYRIUS_PKG_VERSION resolves ONLY in this file — the entry text. cbt injects
+    # `#@pkgver` at byte 0 and cycc replaces it here, but an included file
+    # referencing the symbol fails to compile. Filed upstream as
+    # cyrius 2026-08-20-pkgver-not-visible-in-included-files. So the version is
+    # read here and handed to the modules that report it.
     agnostic_version_set(str_from(CYRIUS_PKG_VERSION));
-    println("hello from agnostic");
-    return 0;
+
+    return agnostic_serve(cfg);
 }
 
-# Prefixed deliberately: this is a top-level `var` in Cyrius's single flat
-# namespace, so a bare `r` here is a global that could shadow — or be shadowed
-# by — any dep that happens to use the same name. `scripts/check-symbols.sh`
-# enforces the rule.
 var _agnostic_exit_code = main();
 # sys_exit_group, not syscall(SYS_EXIT, ...): SYS_EXIT ends only the calling
 # thread, so the bare syscall hangs once this program spawns its first worker.

@@ -46,18 +46,22 @@ before porting any behaviour.
   **fatal toolchain-drift gate** — the failure mode that broke AgnosAI 2.0.2 in CI
 - P(-1) complete: audit-clean, 0 CRITICAL/HIGH/MEDIUM, baseline benches seeded
 
-### M1 — HTTP foundation (v0.2.0)
+### M1 — HTTP foundation (v0.2.0) — ✅ 2026-08-20
 
-The first milestone where untrusted bytes reach a buffer, so it re-opens audit points 1–4
-simultaneously.
+- `sandhi` HTTP/1.1 pooled server, `:name` routing, per-request arena with SPILL
+- Config from environment, strictly parsed — a malformed value refuses to start
+- `sakshi` structured logging with a JSON emit hook; thread-local W3C trace ids
+- `/health` (liveness) and `/ready` (readiness registry) — ADR 0001
+- `bayan` allow-list codec: an unlisted field is a 422 naming it, never a silent discard
+- Signal-driven graceful shutdown via `signalfd` on a dedicated thread
 
-- `sandhi` HTTP/1.1 server, `:name` routing, per-request arena with SPILL policy
-- Config from environment; `sakshi` structured logging and trace ids
-- `/health`, `/ready`
-- `bayan_json_v_*` request/response codecs with allow-list decoding
+**222 assertions across 7 suites**, 0 failed. All CI gates green. Verified live over a socket:
+200/404/405, `?query` handled, trailing slash distinct, SIGTERM drains and exits 0.
 
-**Gates:** arena-exhaustion path tested (a `Str` of 0 is indistinguishable from a valid one — there
-is no error channel through the `_a` families). Security audit re-run.
+**Gates met:** arena exhaustion returns 0 rather than a half-built record, tested for the trace and
+both response constructors. Security audit re-run —
+[`docs/audit/2026-08-20-audit-m1.md`](../audit/2026-08-20-audit-m1.md), 0 CRITICAL / 0 HIGH /
+1 MEDIUM (rate limiting, deliberately deferred to M5 where it belongs with the credential path).
 
 ### M2 — AgnosAI integration (v0.3.0)
 

@@ -1,0 +1,261 @@
+# agnostic/server/serve — the sandhi adapter.
+#
+# The only module that touches a socket. Handlers return a response record and
+# never write bytes, which is what keeps them testable without a server and what
+# keeps the route table separable from handler logic.
+#
+# ## The per-request arena, and why SPILL
+#
+# `lib/alloc.cyr` is a bump allocator with **no `free()`**. Without a per-request
+# arena every `_a` call falls through to that global bump and the process grows
+# in proportion to requests served — forever.
+#
+# `sandhi_server_options_req_arena` defaults to **0, meaning DISABLED**. Not
+# calling that setter leaves `sandhi_server_request_arena()` returning 0 for the
+# life of the process, so the leak is the default rather than the exception.
+#
+# The arena is wrapped in `ARENA_FULL_SPILL` because a full arena answers **0**,
+# and a `Str` of 0 is indistinguishable from a valid one — there is no option
+# type and no error channel through the `_a` families. Without SPILL an oversized
+# response is not an error, it is a segfault several frames later.
+#
+# ⚠ SPILL, not GROW, deliberately. GROW retains its chunks across `arena_reset`,
+# so each worker would converge on its worst-ever request and hold that forever,
+# times the worker count. Spilled bytes come from the global bump and are not
+# reclaimed — the pre-arena cost, applied to the overflow alone.
+#
+# ## Only run_pooled populates the arena
+#
+# `thread_local_set` appears exactly once in sandhi's 15,000 lines, inside
+# `_sandhi_server_pool_worker`. `run`, `run_opts` and `run_async` have no worker
+# to own an arena, and `run_pooled_tls` claims the slot but never allocates one.
+# So every `_a` site needs a bare-form fallback; `a != 0` is not defensive
+# paranoia, it is the documented contract.
+
+var AGNOSTIC_SERVE_ARENA_BYTES = 65536;
+
+# SIGINT(2) | SIGTERM(15) as a sigset word: bit (signo - 1).
+var AGNOSTIC_SHUTDOWN_SIGMASK = 0x4002;
+
+var _agnostic_serve_cfg = 0;
+var _agnostic_serve_stop = 0;
+
+# A fresh arena with the SPILL exhaustion policy.
+fn agnostic_spill_arena(capacity): i64 {
+    var a = arena_allocator(capacity);
+    if (a == 0) { return 0; }
+    arena_allocator_set_on_full(a, ARENA_FULL_SPILL);
+    return a;
+}
+
+# Apply SPILL to sandhi's own request arena.
+#
+# sandhi owns the arena and resets it between requests, so this does not create
+# one — it sets the policy on the existing one. Idempotent, so no thread-local
+# flag is needed to remember whether this worker has already done it.
+fn _agnostic_spill_for(sandhi_arena): i64 {
+    if (sandhi_arena == 0) { return 0; }
+    arena_allocator_set_on_full(sandhi_arena, ARENA_FULL_SPILL);
+    return sandhi_arena;
+}
+
+# 1 once a shutdown signal has been seen.
+fn agnostic_serve_stop_requested(): i64 {
+    return _agnostic_serve_stop;
+}
+
+# Blocks on the signal fd and sets the stop flag. One read is enough — the flag
+# is one-way, and a second signal should not be swallowed by this thread.
+fn _agnostic_serve_signal_thread(arg): i64 {
+    var buf[128];
+    var n = sys_read(arg, &buf, 128);
+    if (n > 0) { sakshi_info("received shutdown signal, draining", 34); }
+    _agnostic_serve_stop = 1;
+    return 0;
+}
+
+# Block SIGINT/SIGTERM process-wide and watch them on a dedicated thread.
+#
+# ⚠ **Order matters.** `sigprocmask` must run BEFORE any worker is spawned:
+# the mask is inherited, so blocking first is what stops a signal being delivered
+# to an arbitrary worker and killing it mid-request. Returns 0 if either syscall
+# fails, so the caller can decide whether to serve without graceful shutdown.
+fn agnostic_serve_install_signals(): i64 {
+    var mask[8];
+    store64(&mask, AGNOSTIC_SHUTDOWN_SIGMASK);
+    if (sys_sigprocmask(SIG_BLOCK, &mask, 0) < 0) { return 0; }
+    var sfd = sys_signalfd(0 - 1, &mask, SFD_CLOEXEC);
+    if (sfd < 0) { return 0; }
+    thread_create(&_agnostic_serve_signal_thread, sfd);
+    return 1;
+}
+
+# Write a response record to the connection.
+#
+# Errors from the send are logged, not propagated: the client is already gone in
+# every case that produces one, and sandhi closes the connection regardless.
+fn _agnostic_serve_send(a, cfd, resp): i64 {
+    var status = agnostic_response_status(resp);
+    var reason = agnostic_http_reason(status);
+
+    var ctype = "application/json";
+    var body = str_from("");
+
+    if (resp != 0) {
+        if (agnostic_response_is_text(resp) == 1) {
+            ctype = "text/plain; charset=utf-8";
+            body = agnostic_response_body(resp);
+        } else {
+            var rendered = 0;
+            if (a != 0) { rendered = agnostic_encode_a(a, agnostic_response_body(resp)); }
+            else { rendered = bayan_json_v_build(agnostic_response_body(resp)); }
+            # A render failure means the arena died mid-response. Say 500 rather
+            # than sending an empty 200, which a client would treat as success.
+            if (rendered == 0) {
+                status = HTTP_INTERNAL;
+                reason = agnostic_http_reason(status);
+                body = str_from("{\"error\":\"response encoding failed\"}");
+            } else {
+                body = rendered;
+            }
+        }
+    } else {
+        # A null response is the handler reporting arena exhaustion. Answer 500
+        # with a fixed literal — allocating here would fail for the same reason.
+        body = str_from("{\"error\":\"internal error\"}");
+    }
+
+    if (a != 0) {
+        return sandhi_server_send_response_a(a, cfd, status, reason, ctype,
+          str_data(body), str_len(body), 0);
+    }
+    return sandhi_server_send_response(cfd, status, reason, ctype,
+      str_data(body), str_len(body), 0);
+}
+
+# sandhi's handler: `fn(ctx, cfd, buf, blen)`.
+#
+# ⚠ **sandhi's accessors return NUL-terminated cstrings, not `Str`.** Passing one
+# straight through reads its pointer as a `Str` header: the method compare
+# answers "no method" and `str_len(path)` returns garbage, so every request 404s
+# or faults. `str_from_a` wraps without copying the bytes — it is not optional.
+fn agnostic_serve_handler(ctx, cfd, buf, blen): i64 {
+    var a = _agnostic_spill_for(sandhi_server_request_arena());
+
+    # Establish the trace id first so every log line from this request carries it,
+    # including ones emitted while the request is still being parsed.
+    if (a != 0) { agnostic_trace_begin_a(a, buf, blen); }
+
+    var method_s = 0;
+    var raw_path = 0;
+    if (a != 0) {
+        method_s = sandhi_server_get_method_a(a, buf, blen);
+        raw_path = sandhi_server_get_path_a(a, buf, blen);
+    } else {
+        method_s = sandhi_server_get_method(buf, blen);
+        raw_path = sandhi_server_get_path(buf, blen);
+    }
+
+    var method = AGNOSTIC_METHOD_NONE;
+    if (method_s != 0) {
+        if (a != 0) { method = agnostic_method_from(str_from_a(a, method_s)); }
+        else { method = agnostic_method_from(str_from(method_s)); }
+    }
+
+    # A request with no parseable path is malformed, not a 404 — but answering
+    # 400 for it is indistinguishable to a client from a bad route, and sandhi
+    # has already accepted the connection. Route "/" so it lands on the normal
+    # not-found path rather than a special case.
+    var path = str_from("/");
+    if (raw_path != 0) {
+        if (a != 0) { path = str_from_a(a, raw_path); }
+        else { path = str_from(raw_path); }
+    }
+
+    var body = str_from("");
+    var off = sandhi_server_body_offset(buf, blen);
+    if (off > 0) {
+        if (off < blen) {
+            if (a != 0) { body = str_new_a(a, buf + off, blen - off); }
+            else { body = str_new(buf + off, blen - off); }
+        }
+    }
+
+    var max_body = agnostic_config_max_body(_agnostic_serve_cfg);
+    if (max_body <= 0) { max_body = AGNOSTIC_DEFAULT_MAX_BODY; }
+
+    var resp = agnostic_route_dispatch_a(a, method, path, body, max_body);
+    _agnostic_serve_send(a, cfd, resp);
+
+    # Clear the trace id so a worker cannot leak the previous request's id onto
+    # the next one if that request never sets one.
+    agnostic_trace_clear();
+    return 0;
+}
+
+# Build sandhi server options from config.
+#
+# ⚠ `sandhi_server_options_idle_ms` and `_max_conns` have no `opts == 0` guard —
+# they store through the pointer unconditionally. Check once here rather than
+# relying on every setter.
+fn agnostic_serve_options(cfg): i64 {
+    var o = sandhi_server_options_new();
+    if (o == 0) { return 0; }
+
+    var workers = agnostic_config_workers(cfg);
+    if (workers <= 0) { workers = AGNOSTIC_DEFAULT_WORKERS; }
+    sandhi_server_options_max_conns(o, workers);
+
+    var idle = agnostic_config_idle_ms(cfg);
+    if (idle <= 0) { idle = AGNOSTIC_DEFAULT_IDLE_MS; }
+    sandhi_server_options_idle_ms(o, idle);
+
+    var backlog = agnostic_config_backlog(cfg);
+    if (backlog <= 0) { backlog = AGNOSTIC_DEFAULT_BACKLOG; }
+    sandhi_server_options_backlog(o, backlog);
+
+    # The setter that must not be forgotten — see the module header.
+    var arena = agnostic_config_arena_bytes(cfg);
+    if (arena <= 0) { arena = AGNOSTIC_SERVE_ARENA_BYTES; }
+    sandhi_server_options_req_arena(o, arena);
+
+    var max_body = agnostic_config_max_body(cfg);
+    if (max_body > 0) { sandhi_server_options_max_request(o, max_body); }
+
+    sandhi_server_options_stop_flag(o, &_agnostic_serve_stop);
+    return o;
+}
+
+# Everything that must happen before workers exist.
+#
+# ⚠ Registration order is a correctness requirement, not tidiness. The readiness
+# registry and the config pointer are read lock-free by every worker;
+# `run_pooled` spawns those workers, so anything registered after it is a data
+# race. Mount, then run.
+fn agnostic_serve_mount(cfg): i64 {
+    _agnostic_serve_cfg = cfg;
+    _agnostic_serve_stop = 0;
+    return agnostic_serve_options(cfg);
+}
+
+# Bind and serve until the stop flag is set. Returns 0 on a graceful stop.
+#
+# `run_pooled` and not `run`/`run_async`: only the pooled worker populates the
+# per-request arena, and without it every allocation goes to the no-free global
+# bump.
+fn agnostic_serve(cfg): i64 {
+    var o = agnostic_serve_mount(cfg);
+    if (o == 0) {
+        sakshi_error("could not build server options", 30);
+        return 1;
+    }
+    agnostic_serve_install_signals();
+
+    var port = agnostic_config_port(cfg);
+    var addr = agnostic_config_addr(cfg);
+    agnostic_log_kv_int(SK_INFO, "listening", 9, "port", 4, port);
+
+    var rc = sandhi_server_run_pooled(addr, port, &agnostic_serve_handler, 0, o);
+    if (rc == 0) { sakshi_info("server shut down gracefully", 27); }
+    return rc;
+}

@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M1, the HTTP foundation
+
+The first milestone where untrusted bytes reach a buffer. **222 assertions across 7 suites**, 0
+failed; all CI gates green. Verified live over a socket, not only under test.
+
+- **`src/config.cyr`** — environment config, strictly parsed. A malformed value **refuses to start**
+  rather than silently defaulting, because an operator discovering in production that
+  `AGNOSTIC_PORT` never applied is worse than a startup failure that names the problem.
+- **`src/strcase.cyr`** — ASCII case folding. The stdlib has no case-insensitive compare and
+  `str_lower_cstr` allocates; comparing an env value to a literal should not.
+- **`src/trace.cyr`** — thread-local W3C trace ids. sakshi's is a process global, so under a worker
+  pool concurrent requests would overwrite each other's id and misattribute every log line.
+- **`src/log.cyr`** — sakshi emit hook rendering one JSON object per event, formatter split out as a
+  pure function so tests assert bytes without a pipe.
+- **`src/http/{status,response,codec,router}.cyr`** — status vocabulary, handler return type,
+  allow-list decoding, route table with a `:name` matcher.
+- **`src/routes/health.cyr`** — `/health` liveness and `/ready` readiness with a check registry.
+- **`src/server/serve.cyr`** — the sandhi adapter: arena/SPILL wiring, cstring→`Str` boundary,
+  `signalfd` graceful shutdown.
+
+### Decisions
+
+- **ADR 0001** — health and readiness are separate probes. The oracle's `/health` pings Redis and
+  RabbitMQ and 503s when they are down; under an orchestrator that manufactures an outage, since one
+  Redis blip fails liveness on every replica and restarting cannot fix a dependency.
+- **ADR 0002** — Daimon Tier 1 deferred. It cannot be implemented as written: daimon serves no agent
+  heartbeat route, and registration for an externally-started process keys supervisor maps to pid 0.
+  Zero first-party projects perform it at runtime, including the one the standard names as canonical.
+- All six open port decisions closed — identity (own it thin, adapted from SecureYeoman's Cyrius
+  probe), preset canon (Agnostic's is canonical), PDF (wait for `bayan_pdf_*`), release shape (one
+  total release), Daimon (deferred), MCP transports (both shapes stand, on merit).
+
+### Fixed — three oracle defect classes designed out, each locked by a mutation-tested assertion
+
+- **Silent config fallback.** The oracle reused its u16 port parser for a rate limit, so any value
+  above 65535 fell back to the default with no error. `parse_bounded` is deliberately a separate
+  function; aliasing it back to `parse_port` fails two named assertions.
+- **`extra='ignore'` field dropping.** Pydantic silently discarded 14 fields including `gpu_strict`,
+  turning a hard-fail GPU requirement into a silent CPU fallback, and elsewhere ate an entire
+  `tasks` array. Replacing the allow-list check with `return 1` fails
+  *"an unlisted field is rejected, not silently dropped"*.
+- **Liveness conflated with readiness.** See ADR 0001. The suite asserts `/health` stays 200 with a
+  failing dependency registered.
+
+### Fixed — two upstream defects avoided that the reference implementation still has
+
+- `GET /health?probe=1` returns 200. AgnosAI never strips the query string, so its own health
+  endpoint 404s for any caller appending a cache-buster.
+- `/ready` reports a version **derived** from `${file:VERSION}`. AgnosAI hardcodes its equivalent and
+  has reported 1.1.0 since shipping 2.0.x.
+
+### Filed upstream
+
+- `cyrius 2026-08-20-pkgver-not-visible-in-included-files` — `CYRIUS_PKG_VERSION` resolves only in
+  the entry file's own text; any `include`d file referencing it fails to compile. That is where the
+  symbol is least useful, since `/version` and `/ready` handlers live in modules. Worked around by
+  threading it from `main.cyr` at mount, so the version stays derived rather than hardcoded.
+
 ## [0.1.0]
 
 ### Hardening — P(-1) pass complete
