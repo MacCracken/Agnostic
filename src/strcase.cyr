@@ -1,0 +1,60 @@
+# agnostic/strcase — ASCII case folding and case-insensitive comparison.
+#
+# There is no case-insensitive compare in the Cyrius stdlib: `lib/str.cyr` has
+# `str_eq` and `str_eq_cstr` and nothing folded, and `lib/string.cyr`'s
+# `str_lower_cstr` allocates a lowered copy. Comparing an env value against a
+# literal should not allocate, so the comparison folds as it walks.
+#
+# ## ASCII only, deliberately
+#
+# The fold is `A-Z` → `a-z` and nothing else. Every caller here matches against
+# ASCII literals — env values like "any", "json", "debug", and HTTP method and
+# header names, all of which are ASCII by specification. A Unicode fold would
+# need a case-mapping table for no reachable gain. Stated rather than implied,
+# so nobody later assumes `İ` folds.
+
+# Fold one byte from ASCII upper case to lower case, leaving everything else.
+# `load8` zero-extends, so callers pass an already-unsigned byte.
+fn _agnostic_fold_ascii(b): i64 {
+    if (b >= 65) { if (b <= 90) { return b + 32; } }
+    return b;
+}
+
+# Whether two Strs are equal ignoring ASCII case.
+fn agnostic_str_eq_ci(a: Str, b: Str): i64 {
+    var n = str_len(a);
+    if (n != str_len(b)) { return 0; }
+    var ad = str_data(a);
+    var bd = str_data(b);
+    var i = 0;
+    while (i < n) {
+        if (_agnostic_fold_ascii(load8(ad + i)) != _agnostic_fold_ascii(load8(bd + i))) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Whether a Str equals a NUL-terminated cstring literal, ignoring ASCII case.
+#
+# This is the form config wants: the left side comes from `getenv` wrapped in a
+# Str, the right side is a literal in the source. Walking the cstring avoids
+# measuring it first.
+fn agnostic_str_eq_cstr_ci(a: Str, b): i64 {
+    var n = str_len(a);
+    var ad = str_data(a);
+    var i = 0;
+    while (i < n) {
+        var bc = load8(b + i) & 0xFF;
+        # The cstring ended before the Str did — different lengths.
+        if (bc == 0) { return 0; }
+        if (_agnostic_fold_ascii(load8(ad + i) & 0xFF) != _agnostic_fold_ascii(bc)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    # Equal only if the cstring also ended exactly here.
+    if ((load8(b + n) & 0xFF) != 0) { return 0; }
+    return 1;
+}

@@ -259,10 +259,43 @@ From `cyrius/CLAUDE.md` and `agnosai/CLAUDE.md` — these constrain *how* the wo
 | # | Decision | Consequence |
 |---|---|---|
 | **D1** | **AgnosAI gains a dist target and ships as 2.0.2.** Agnostic consumes it as `[deps.agnosai] modules = ["dist/agnosai.cyr"]` | Single binary. Everything in §3 is prerequisite work |
-| **D2** | **Async crews via `agnosai_orchestrator_submit_crew`, with majra owning the queue and 202-then-poll semantics** | Live progress available off the event bus. Matches SecureYeoman's submit-then-poll contract |
+| **D2** | **Async crews via `agnosai_orchestrator_submit_crew`, with majra owning the queue and 202-then-poll semantics** | Live progress available off the event bus. 202-then-poll is the right shape for long-running crews regardless of who calls it |
 | **D3** | **WebGUI is a static HTML/CSS/JS bundle served through sandhi.** A richer GUI comes later; a TUI is optional future work, not scope | Needs a static file handler + mime map written from scratch |
 | **D4** | **Full 28 QA tools.** `Page.captureScreenshot` gets added to yantra's CDP surface first, then the CV pipeline is rebuilt on chitra + ranga + rosnet | yantra becomes a prerequisite repo alongside agnosai |
-| **D5** | **Serve both MCP shapes** — REST at `/api/v1/mcp/invoke` for SecureYeoman's live 43-tool client, and JSON-RPC 2.0 at `/mcp` for new consumers | No migration pressure on SY. `/api/v1/{crews,definitions,presets,gpu/*,a2a/receive}` and X-API-Key auth are a **frozen wire contract** |
+| **D5** | ~~Serve both MCP shapes to preserve SecureYeoman's live 43-tool client, treating `/api/v1/{crews,definitions,presets,gpu/*,a2a/receive}` + X-API-Key as a frozen wire contract~~ — **revised 2026-08-20, see §7.3** | JSON-RPC 2.0 MCP at `/mcp` is the standard shape; the REST shape must now earn its place on merit rather than on a migration constraint |
+
+### 7.3 Revision — Agnostic stands on its own (2026-08-20)
+
+**The premise behind D5 was wrong.** This brief assumed SecureYeoman reaches the engine *through*
+Agnostic, which made SY's live 43-tool client a frozen wire contract and forced a second MCP shape
+purely to avoid migrating it.
+
+SY can consume **AgnosAI directly** — AgnosAI 2.0.2+ ships a `/mcp` surface, an `/api/v1/a2a/receive`
+endpoint, and `dist/agnosai.cyr` for in-process linking. Nothing requires Agnostic to sit in front
+of it.
+
+Agnostic is therefore a **product in its own right, not a frontend layer**. What changes:
+
+| Was | Now |
+|---|---|
+| Two MCP shapes, forced, to avoid migrating SY | JSON-RPC at `/mcp` is the standard; a REST shape ships only if it earns its own justification |
+| `/api/v1/*` + X-API-Key a frozen contract | The API is designed for Agnostic's users, on merit |
+| M7 gated on "SY green", inverting the usual ordering | Normal ordering — consumer-green comes after the tag |
+| Identity option 3: SY as IdP | Weakest of the three — couples the two systems for no delivery benefit if SY is not in the path |
+| v1.0 criterion "SecureYeoman green" | "At least one consumer green against the published API" |
+
+This is a **scope reduction and a design freedom**, not new work. The one thing it does not license
+is gratuitously breaking SY. If SY is ever pointed at Agnostic, the answer is a **compatibility
+shim** — an additive translation layer over the published API — built then, against a real
+requirement. It is explicitly out of scope for v1.0.
+
+The design obligation that follows is small but real: **keep the seam shim-able.** Route tables and
+request decoding stay separable from handler logic, so an alternate surface can be mounted without
+touching either. Cheap to preserve now, expensive to retrofit.
+
+⚠ It also removes the keep-alive worry's urgency (§5.2): that entry is justified by "SecureYeoman's
+43-tool client polls". Agnostic→AgnosAI/hoosh calls use `sandhi_http_pool_*` client-side pooling and
+are unaffected either way.
 
 ### 7.1 Prerequisite work in other repos
 

@@ -30,7 +30,8 @@ before porting any behaviour.
       written: `ORACLE-AUDIT.md` §4 shows the oracle's published numbers are invalid, so parity is
       assessed on coverage and behaviour, not on its timings.
 - [ ] Benchmarks captured in `BENCHMARKS.md` with a CSV trail
-- [ ] SecureYeoman green against the frozen wire contract (see M7)
+- [ ] At least one consumer green against the published API — Agnostic's own, not a
+      pre-existing client's contract (see M7)
 - [ ] CHANGELOG complete from v0.1.0 onward
 - [ ] Security audit pass re-run (`docs/audit/YYYY-MM-DD-audit.md`)
 - [ ] Zugot recipe published (`zugot: marketplace/agnostic.toml`)
@@ -99,7 +100,9 @@ the oracle's multi-container "everyone talks to postgres" topology cannot be rep
 - Webhook HMAC signatures
 
 ⛔ **Blocked on an open decision.** Own it (patra + sigil), delegate to kavach, or make
-SecureYeoman the IdP with Agnostic only validating SY-issued JWTs. Per `cyrius/CLAUDE.md:66`
+SecureYeoman the IdP with Agnostic only validating SY-issued JWTs. ⚠ The third option is now the
+weakest: if SY does not sit in front of Agnostic, making it the identity provider couples the two
+for no delivery benefit. Per `cyrius/CLAUDE.md:66`
 ("When stuck, ASK the user"), this is answered *before* M5 opens, not discovered inside it.
 
 ### M6 — QA tool surface (v0.7.0)
@@ -112,15 +115,32 @@ SecureYeoman the IdP with Agnostic only validating SY-issued JWTs. Per `cyrius/C
 
 **Prerequisite:** `yantra` needs `Page.captureScreenshot` on its CDP surface.
 
-### M7 — MCP dual surface + A2A (v0.8.0)
+### M7 — MCP surface + A2A (v0.8.0)
 
-- REST at `/api/v1/mcp/invoke` for SecureYeoman's live 43-tool client
-- JSON-RPC 2.0 at `/mcp` for new consumers (**D5**), on `bote`
+- JSON-RPC 2.0 MCP at `/mcp`, on `bote`
+- REST tool invocation at `/api/v1/mcp/invoke`
 - A2A callback endpoint
 
-🔒 **Frozen wire contract:** `/api/v1/{crews,definitions,presets,gpu/*,a2a/receive}` and X-API-Key
-auth. SecureYeoman is live against these *now* — this milestone must not break it, which inverts
-the usual "consumer green comes after the tag" ordering.
+**Agnostic stands on its own.** An earlier draft treated SecureYeoman's live 43-tool client as a
+*frozen wire contract* that this milestone had to preserve, on the assumption SY reaches the engine
+through Agnostic. It does not have to: **SY can consume AgnosAI directly**, since AgnosAI 2.0.2+
+ships both a `/mcp` surface and `dist/agnosai.cyr` for in-process linking. Agnostic is a product in
+its own right, not a frontend layer in front of the engine.
+
+The consequences are all simplifications:
+
+- The API is designed for **Agnostic's** users. Shape, naming and auth are chosen on merit rather
+  than back-fitted to an existing client.
+- Serving two MCP shapes (**D5**) is no longer forced by a migration constraint. Keep both only if
+  each earns its place — JSON-RPC is the MCP standard; the REST shape needs its own justification.
+- The ordering inversion is gone. "Consumer green comes after the tag" applies normally again,
+  because no live consumer is waiting on this specific surface.
+
+⚠ **Not a licence to break SY gratuitously.** If SY is ever pointed at Agnostic, the answer is a
+**compatibility shim** — an additive translation layer over the real API — not a core API bent to
+fit an existing client. Keep the seam shim-able: route tables and request decoding stay separable
+from handler logic, so an alternate surface can be mounted without touching either. That is cheap
+now and expensive to retrofit.
 
 ### M8 — Reports (v0.9.0)
 
@@ -137,7 +157,7 @@ roadmapped `bayan_pdf_*`, or ship without.
 ## Release shape
 
 `cyrius/CLAUDE.md:96` permits 1–2 releases for a multi-phase arc; AgnosAI used two. The natural cut
-is **M1–M7** (headless: API + both MCP shapes — everything SecureYeoman needs) then **M8–M9**
+is **M1–M7** (headless: the API and MCP surfaces, usable without a browser) then **M8–M9**
 (reports + GUI). The user owns that call.
 
 ## Out of scope for v1.0
@@ -150,3 +170,7 @@ is **M1–M7** (headless: API + both MCP shapes — everything SecureYeoman need
   the move to embedded `patra`.
 - **The oracle's benchmark numbers as a performance target** — they are invalid
   (`ORACLE-AUDIT.md` §4). The Cyrius line starts its own baseline.
+- **A SecureYeoman compatibility shim.** SY can consume AgnosAI directly, so no shim is needed for
+  v1.0. If one is wanted later it is *additive* — a translation layer mounted over the published
+  API — and it is built then, against a real requirement, rather than pre-emptively shaping v1.0
+  around a client that may never call us.

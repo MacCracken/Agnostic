@@ -1,0 +1,240 @@
+# agnostic/config — server configuration, read once from the environment.
+#
+# ## Why the readers and the interpreters are separate functions
+#
+# `lib/` has no `setenv`, so nothing can drive an env branch from a `.tcyr`.
+# If `agnostic_config_from_env` both read the variable AND interpreted it, the
+# interpretation would be untestable — which is how a parser acquires a silent
+# divergence and keeps it. So every value is read by a one-line getter and
+# interpreted by a pure function that takes the string; the pure half is what
+# tests/config.tcyr exercises.
+#
+# ## The config block
+#
+# A plain `alloc()`ed block with an enum offset table, not a struct. That is the
+# house idiom — AgnosAI declares zero structs and 182 enums for exactly this.
+
+enum AgnosticConfigOff {
+    AGNOSTIC_CFG_PORT      = 0;
+    AGNOSTIC_CFG_ADDR      = 8;
+    AGNOSTIC_CFG_WORKERS   = 16;
+    AGNOSTIC_CFG_ARENA     = 24;
+    AGNOSTIC_CFG_MAX_BODY  = 32;
+    AGNOSTIC_CFG_IDLE_MS   = 40;
+    AGNOSTIC_CFG_BACKLOG   = 48;
+    AGNOSTIC_CFG_LOG_LEVEL = 56;
+    AGNOSTIC_CFG_LOG_JSON  = 64;
+    AGNOSTIC_CFG_SIZE      = 72;
+}
+
+# Defaults. The port matches the oracle's uvicorn default so an existing
+# deployment's health checks keep pointing at the right place.
+var AGNOSTIC_DEFAULT_PORT     = 8000;
+var AGNOSTIC_DEFAULT_WORKERS  = 16;
+var AGNOSTIC_DEFAULT_ARENA    = 65536;
+var AGNOSTIC_DEFAULT_MAX_BODY = 1048576;
+var AGNOSTIC_DEFAULT_IDLE_MS  = 30000;
+var AGNOSTIC_DEFAULT_BACKLOG  = 128;
+
+# Strict u16 port parse. Returns the port, or -1 for anything malformed.
+#
+# ⚠ The sentinel is -1, not 0, because **0 is a legal port** — it asks the
+# kernel to assign one. A 0 sentinel would make `AGNOSTIC_PORT=0` mean "use the
+# default", which is a different behaviour from what the string says.
+#
+# Accepts one leading `+` and no `-`, matching `u16::from_str`. Transcribed from
+# `agnosai_serve_parse_port` (agnosai/src/server/serve.cyr).
+fn agnostic_config_parse_port(v: Str): i64 {
+    var n = str_len(v);
+    var d = str_data(v);
+    var i = 0;
+    if (n > 0) { if ((load8(d) & 0xFF) == 43) { i = 1; } }
+    # An empty string, or a lone "+", is an error — never the default.
+    if (i >= n) { return 0 - 1; }
+    var acc = 0;
+    while (i < n) {
+        var c = load8(d + i) & 0xFF;
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        acc = acc * 10 + (c - 48);
+        if (acc > 65535) { return 0 - 1; }
+        i = i + 1;
+    }
+    return acc;
+}
+
+# Strict non-negative integer parse bounded by `max`. Returns -1 when malformed
+# or out of range.
+#
+# ⚠ **This is deliberately NOT `parse_port` with a different ceiling**, and the
+# duplication is the point. AgnosAI reused its port parser for
+# `AGNOSAI_RATE_LIMIT`, so every value above 65535 failed the `acc > 65535`
+# check and silently fell back to the default — a rate limit of 200000 became
+# whatever the default was, with no error. Any bound other than u16 needs a
+# parser whose ceiling is the caller's.
+fn agnostic_config_parse_bounded(v: Str, max): i64 {
+    var n = str_len(v);
+    var d = str_data(v);
+    var i = 0;
+    if (n > 0) { if ((load8(d) & 0xFF) == 43) { i = 1; } }
+    if (i >= n) { return 0 - 1; }
+    var acc = 0;
+    while (i < n) {
+        var c = load8(d + i) & 0xFF;
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        acc = acc * 10 + (c - 48);
+        if (acc > max) { return 0 - 1; }
+        i = i + 1;
+    }
+    return acc;
+}
+
+# Truthiness for a NUL-terminated cstring, as `getenv` hands it back.
+# 1 for "1" or a case-insensitive "true"; everything else, including 0, is 0.
+fn agnostic_config_parse_bool(v): i64 {
+    if (v == 0) { return 0; }
+    var c0 = load8(v) & 0xFF;
+    if (c0 == 0) { return 0; }
+    # "1" exactly — not "1x".
+    if (c0 == 49) { if ((load8(v + 1) & 0xFF) == 0) { return 1; } return 0; }
+    # ASCII-case-insensitive "true".
+    var want = "true";
+    var i = 0;
+    while (i < 4) {
+        var a = load8(v + i) & 0xFF;
+        var b = load8(want + i) & 0xFF;
+        if (a >= 65) { if (a <= 90) { a = a + 32; } }
+        if (a != b) { return 0; }
+        i = i + 1;
+    }
+    if ((load8(v + 4) & 0xFF) != 0) { return 0; }
+    return 1;
+}
+
+# Map a log-level name to its sakshi constant. -1 for an unknown name, so the
+# caller can reject rather than silently pick a level the operator did not ask
+# for. Case-insensitive.
+fn agnostic_config_parse_level(v: Str): i64 {
+    if (agnostic_str_eq_cstr_ci(v, "error") == 1) { return SK_ERROR; }
+    if (agnostic_str_eq_cstr_ci(v, "warn") == 1)  { return SK_WARN; }
+    if (agnostic_str_eq_cstr_ci(v, "info") == 1)  { return SK_INFO; }
+    if (agnostic_str_eq_cstr_ci(v, "debug") == 1) { return SK_DEBUG; }
+    if (agnostic_str_eq_cstr_ci(v, "trace") == 1) { return SK_TRACE; }
+    return 0 - 1;
+}
+
+# `getenv(primary)`, falling back to `fallback` only when primary is UNSET.
+#
+# ⚠ Unset, not empty. `AGNOSTIC_PORT=""` is an operator explicitly clearing the
+# value and must not silently inherit `PORT` — it should fail the strict parse
+# and be reported, which is what an empty string does.
+fn _agnostic_config_env2(primary, fallback): i64 {
+    var v = getenv(primary);
+    if (v != 0) { return v; }
+    return getenv(fallback);
+}
+
+# Read one bounded integer from the environment, or return `dflt`.
+# A malformed value is NOT silently defaulted — it returns -1 so the caller can
+# refuse to start. Starting on a misread config is how an operator discovers in
+# production that their setting never applied.
+fn _agnostic_config_int_env(name, dflt, max): i64 {
+    var raw = getenv(name);
+    if (raw == 0) { return dflt; }
+    return agnostic_config_parse_bounded(str_from(raw), max);
+}
+
+# Build the config block from the environment. Returns 0 on allocation failure,
+# or a block whose integer fields are -1 where the environment was malformed.
+fn agnostic_config_from_env(): i64 {
+    var c = alloc(AGNOSTIC_CFG_SIZE);
+    if (c == 0) { return 0; }
+
+    var port = AGNOSTIC_DEFAULT_PORT;
+    var raw_port = _agnostic_config_env2("AGNOSTIC_PORT", "PORT");
+    if (raw_port != 0) { port = agnostic_config_parse_port(str_from(raw_port)); }
+    store64(c + AGNOSTIC_CFG_PORT, port);
+
+    # "any" binds 0.0.0.0, anything else binds loopback. Defaulting to loopback
+    # is the safe direction: a service that is unreachable is a visible failure,
+    # one that is reachable from the whole network by accident is not.
+    var addr = INADDR_LOOPBACK();
+    var raw_addr = getenv("AGNOSTIC_ADDR");
+    if (raw_addr != 0) {
+        if (agnostic_str_eq_cstr_ci(str_from(raw_addr), "any") == 1) { addr = INADDR_ANY(); }
+    }
+    store64(c + AGNOSTIC_CFG_ADDR, addr);
+
+    store64(c + AGNOSTIC_CFG_WORKERS,
+      _agnostic_config_int_env("AGNOSTIC_WORKERS", AGNOSTIC_DEFAULT_WORKERS, 1024));
+    store64(c + AGNOSTIC_CFG_ARENA,
+      _agnostic_config_int_env("AGNOSTIC_REQUEST_ARENA_BYTES", AGNOSTIC_DEFAULT_ARENA, 268435456));
+    store64(c + AGNOSTIC_CFG_MAX_BODY,
+      _agnostic_config_int_env("AGNOSTIC_MAX_BODY_BYTES", AGNOSTIC_DEFAULT_MAX_BODY, 268435456));
+    store64(c + AGNOSTIC_CFG_IDLE_MS,
+      _agnostic_config_int_env("AGNOSTIC_IDLE_MS", AGNOSTIC_DEFAULT_IDLE_MS, 3600000));
+    store64(c + AGNOSTIC_CFG_BACKLOG,
+      _agnostic_config_int_env("AGNOSTIC_BACKLOG", AGNOSTIC_DEFAULT_BACKLOG, 65535));
+
+    var level = SK_INFO;
+    var raw_level = getenv("AGNOSTIC_LOG_LEVEL");
+    if (raw_level != 0) { level = agnostic_config_parse_level(str_from(raw_level)); }
+    store64(c + AGNOSTIC_CFG_LOG_LEVEL, level);
+
+    # AGNOSTIC_LOG_FORMAT=json selects structured output; anything else is text.
+    var as_json = 0;
+    var raw_fmt = getenv("AGNOSTIC_LOG_FORMAT");
+    if (raw_fmt != 0) {
+        if (agnostic_str_eq_cstr_ci(str_from(raw_fmt), "json") == 1) { as_json = 1; }
+    }
+    store64(c + AGNOSTIC_CFG_LOG_JSON, as_json);
+
+    return c;
+}
+
+# Each accessor returns 0 for a null block, so a caller that skipped the
+# allocation check gets a benign value rather than a fault at offset 0.
+
+# The TCP port to bind. 0 is legal and means "let the kernel choose".
+fn agnostic_config_port(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_PORT); }
+
+# The bind address as a network-order packed IPv4 word, not a string.
+fn agnostic_config_addr(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_ADDR); }
+
+# Worker thread count for the pooled serve loop.
+fn agnostic_config_workers(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_WORKERS); }
+
+# Per-request arena size in bytes. Multiplied by the worker count for the
+# real footprint, so raising it without lowering workers is how you run out
+# of memory.
+fn agnostic_config_arena_bytes(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_ARENA); }
+
+# Largest request body accepted, in bytes.
+fn agnostic_config_max_body(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_MAX_BODY); }
+
+# Idle timeout in milliseconds before a kept connection is dropped.
+fn agnostic_config_idle_ms(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_IDLE_MS); }
+
+# Listen backlog depth.
+fn agnostic_config_backlog(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_BACKLOG); }
+
+# The sakshi level constant to log at.
+fn agnostic_config_log_level(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_LOG_LEVEL); }
+
+# 1 when log output should be structured JSON rather than text.
+fn agnostic_config_log_json(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_LOG_JSON); }
+
+# Report the first malformed field, or 0 when every field parsed. The caller
+# refuses to start on a non-zero answer.
+fn agnostic_config_invalid(c): i64 {
+    if (c == 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_PORT) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_WORKERS) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_ARENA) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_MAX_BODY) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_IDLE_MS) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_BACKLOG) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_LOG_LEVEL) < 0) { return 1; }
+    return 0;
+}

@@ -1,0 +1,127 @@
+# agnostic/config — the pure interpreters.
+#
+# Stdlib is auto-prepended from cyrius.cyml. ⚠ Do NOT `include` a stdlib module
+# here: the explicit include lands after the auto-prepended copy and single-passes
+# into a duplicate-definition error.
+include "src/strcase.cyr"
+include "src/config.cyr"
+
+# `lib/` has no setenv, so the env-reading half is not drivable from a test.
+# That is exactly why config.cyr keeps the interpreters as separate pure
+# functions — this suite covers the half that can hold a silent divergence.
+
+fn test_parse_port() {
+    test_group("config/parse_port");
+
+    assert_eq(agnostic_config_parse_port(str_from("8000")), 8000, "plain port");
+    assert_eq(agnostic_config_parse_port(str_from("65535")), 65535, "u16 ceiling");
+    assert_eq(agnostic_config_parse_port(str_from("000080")), 80, "leading zeros");
+
+    # 0 is a LEGAL port — it asks the kernel to assign one. This is why the
+    # error sentinel is -1: a 0 sentinel would silently turn an explicit
+    # AGNOSTIC_PORT=0 into "use the default", which is different behaviour.
+    assert_eq(agnostic_config_parse_port(str_from("0")), 0, "0 is a legal port, not an error");
+
+    # One leading '+' is accepted, matching u16::from_str.
+    assert_eq(agnostic_config_parse_port(str_from("+80")), 80, "leading plus accepted");
+
+    assert_eq(agnostic_config_parse_port(str_from("")), 0 - 1, "empty is an error");
+    assert_eq(agnostic_config_parse_port(str_from("+")), 0 - 1, "lone plus is an error");
+    assert_eq(agnostic_config_parse_port(str_from("-1")), 0 - 1, "negative is an error");
+    assert_eq(agnostic_config_parse_port(str_from("80a80")), 0 - 1, "embedded letter is an error");
+    assert_eq(agnostic_config_parse_port(str_from("65536")), 0 - 1, "above u16 is an error");
+    assert_eq(agnostic_config_parse_port(str_from(" 80")), 0 - 1, "leading space is an error");
+}
+
+fn test_parse_bounded() {
+    test_group("config/parse_bounded");
+
+    # ⭐ THE REGRESSION THIS FUNCTION EXISTS FOR.
+    #
+    # AgnosAI reused its u16 port parser for AGNOSAI_RATE_LIMIT, so every value
+    # above 65535 hit the `acc > 65535` check and silently fell back to the
+    # default — a configured rate limit of 200000 became whatever the default
+    # was, with no error reported. These two lines are the mutation: they must
+    # disagree, and if someone "simplifies" parse_bounded into parse_port they
+    # will stop disagreeing and this test fails.
+    assert_eq(agnostic_config_parse_bounded(str_from("200000"), 1000000), 200000,
+      "bounded parse accepts a value above u16");
+    assert_eq(agnostic_config_parse_port(str_from("200000")), 0 - 1,
+      "port parse rejects the same value — the two must NOT be the same function");
+
+    assert_eq(agnostic_config_parse_bounded(str_from("0"), 100), 0, "zero within bound");
+    assert_eq(agnostic_config_parse_bounded(str_from("100"), 100), 100, "value at the bound");
+    assert_eq(agnostic_config_parse_bounded(str_from("101"), 100), 0 - 1, "value above the bound");
+    assert_eq(agnostic_config_parse_bounded(str_from(""), 100), 0 - 1, "empty is an error");
+    assert_eq(agnostic_config_parse_bounded(str_from("1x"), 100), 0 - 1, "trailing letter is an error");
+}
+
+fn test_parse_bool() {
+    test_group("config/parse_bool");
+
+    assert_eq(agnostic_config_parse_bool("1"), 1, "\"1\" is true");
+    assert_eq(agnostic_config_parse_bool("true"), 1, "\"true\" is true");
+    assert_eq(agnostic_config_parse_bool("TRUE"), 1, "\"TRUE\" is true");
+    assert_eq(agnostic_config_parse_bool("True"), 1, "\"True\" is true");
+
+    assert_eq(agnostic_config_parse_bool("0"), 0, "\"0\" is false");
+    assert_eq(agnostic_config_parse_bool("yes"), 0, "\"yes\" is NOT true — only 1/true");
+    assert_eq(agnostic_config_parse_bool(""), 0, "empty is false");
+    assert_eq(agnostic_config_parse_bool("1x"), 0, "\"1x\" is false, not a prefix match");
+    assert_eq(agnostic_config_parse_bool("truex"), 0, "\"truex\" is false, not a prefix match");
+    assert_eq(agnostic_config_parse_bool(0), 0, "a null pointer is false, not a fault");
+}
+
+fn test_parse_level() {
+    test_group("config/parse_level");
+
+    assert_eq(agnostic_config_parse_level(str_from("error")), SK_ERROR, "error");
+    assert_eq(agnostic_config_parse_level(str_from("warn")), SK_WARN, "warn");
+    assert_eq(agnostic_config_parse_level(str_from("info")), SK_INFO, "info");
+    assert_eq(agnostic_config_parse_level(str_from("debug")), SK_DEBUG, "debug");
+    assert_eq(agnostic_config_parse_level(str_from("trace")), SK_TRACE, "trace");
+    assert_eq(agnostic_config_parse_level(str_from("DEBUG")), SK_DEBUG, "case-insensitive");
+    assert_eq(agnostic_config_parse_level(str_from("Debug")), SK_DEBUG, "mixed case");
+
+    # An unknown level is rejected rather than defaulted. Silently choosing a
+    # level the operator did not ask for is how a deployment ends up logging at
+    # the wrong verbosity without anyone noticing.
+    assert_eq(agnostic_config_parse_level(str_from("loud")), 0 - 1, "unknown level is an error");
+    assert_eq(agnostic_config_parse_level(str_from("")), 0 - 1, "empty level is an error");
+    assert_eq(agnostic_config_parse_level(str_from("debugx")), 0 - 1, "no prefix matching");
+}
+
+fn test_str_eq_ci() {
+    test_group("strcase");
+
+    assert_eq(agnostic_str_eq_cstr_ci(str_from("json"), "json"), 1, "identical");
+    assert_eq(agnostic_str_eq_cstr_ci(str_from("JSON"), "json"), 1, "upper vs lower");
+    assert_eq(agnostic_str_eq_cstr_ci(str_from("JsOn"), "json"), 1, "mixed");
+    assert_eq(agnostic_str_eq_cstr_ci(str_from("json"), "jsonx"), 0, "cstring longer");
+    assert_eq(agnostic_str_eq_cstr_ci(str_from("jsonx"), "json"), 0, "Str longer");
+    assert_eq(agnostic_str_eq_cstr_ci(str_from(""), ""), 1, "both empty");
+    assert_eq(agnostic_str_eq_cstr_ci(str_from(""), "x"), 0, "empty vs non-empty");
+
+    # The fold is A-Z only. '[' is 0x5B, one past 'Z', and '{' is 0x7B — the
+    # byte a naive `+32` fold would map it to. They must not compare equal.
+    assert_eq(agnostic_str_eq_cstr_ci(str_from("["), "{"), 0, "fold does not run past Z");
+
+    assert_eq(agnostic_str_eq_ci(str_from("Any"), str_from("any")), 1, "Str/Str form");
+    assert_eq(agnostic_str_eq_ci(str_from("any"), str_from("anyy")), 0, "Str/Str length differs");
+}
+
+fn main() {
+    alloc_init();
+    test_parse_port();
+    test_parse_bounded();
+    test_parse_bool();
+    test_parse_level();
+    test_str_eq_ci();
+    return assert_summary();
+}
+
+var _agnostic_config_test_exit = main();
+# Clamp: assert_summary() returns the raw failure COUNT and a wait status is
+# only 8 bits, so an unclamped 256/512/768 failures would exit 0 and score PASS.
+if (_agnostic_config_test_exit > 0) { _agnostic_config_test_exit = 1; }
+sys_exit_group(_agnostic_config_test_exit);

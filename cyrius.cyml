@@ -12,7 +12,16 @@ test = "src/test.cyr"
 output = "agnostic"
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+stdlib = [
+    "syscalls", "alloc", "result", "tagged", "fmt", "io", "fs", "str", "string",
+    "vec", "slice", "args", "process", "assert", "bench",
+    "fnptr", "freelist", "hashmap", "hashmap_fast", "callback", "chrono", "math",
+    "atomic", "sync", "thread", "thread_local", "ct", "keccak", "random", "sha1",
+    "mmap", "dynlib", "fdlopen",
+    "async",
+    "bayan",
+    "net", "http", "tls", "sakshi", "sandhi",
+]
 
 # Release artifacts. `bins` is the native build; `cross_bins` is what the
 # release workflow cross-compiles. first-party-standards.md:956 makes both
