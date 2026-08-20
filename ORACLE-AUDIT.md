@@ -5,7 +5,7 @@
 
 > This document is the retained artifact of the Python implementation. The code itself moves to
 > `python-port/` and serves as an **oracle** — a behavioural reference for the Cyrius rewrite
-> (Agnostic 2.0.1) — **not** as a finalized product. Everything below describes what the oracle
+> (Agnostic 1.0.0) — **not** as a finalized product. Everything below describes what the oracle
 > actually does, including where it is wrong. Do not port a behaviour from `python-port/` without
 > checking it against this list first.
 
@@ -127,7 +127,7 @@ checkpointing, no coordinator failover, no dead-node re-placement, no local-agen
 
 ## 3. Confirmed defects — high severity
 
-Do **not** carry these behaviours into 2.0.1.
+Do **not** carry these behaviours into 1.0.0.
 
 ### 3.1 A failed crew is reported to the user as completed
 `agents/backend/agnosai_backend.py:151` → `webgui/routes/crews.py:613`
@@ -282,12 +282,12 @@ Commit `7617ed4` renamed the compose `ollama` service to `ollama-nvidia`, so
 24 findings were dropped by the verification pass. The dominant reason: they depended on the
 behaviour of the external `ghcr.io/maccracken/agnosai` image, which has no source in this tree —
 default auth posture, persistence needs, whether the create-crew endpoint is synchronous, and whether
-image tag `1.0.2` corresponds to crate version `0.21.3+`. **These are open questions for 2.0.1, not
+image tag `1.0.2` corresponds to crate version `0.21.3+`. **These are open questions for 1.0.0, not
 settled facts.**
 
 ---
 
-## 6. Design lessons for Agnostic 2.0.1 (Cyrius)
+## 6. Design lessons for Agnostic 1.0.0 (Cyrius)
 
 Carried forward as requirements, derived from what the oracle got wrong:
 

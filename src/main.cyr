@@ -1,0 +1,18 @@
+# agnostic — main entry point
+# Stdlib auto-included via cyrius.cyml
+
+# Entry point. Initialises the allocator and returns the process exit code.
+fn main() {
+    alloc_init();
+    println("hello from agnostic");
+    return 0;
+}
+
+# Prefixed deliberately: this is a top-level `var` in Cyrius's single flat
+# namespace, so a bare `r` here is a global that could shadow — or be shadowed
+# by — any dep that happens to use the same name. `scripts/check-symbols.sh`
+# enforces the rule.
+var _agnostic_exit_code = main();
+# sys_exit_group, not syscall(SYS_EXIT, ...): SYS_EXIT ends only the calling
+# thread, so the bare syscall hangs once this program spawns its first worker.
+sys_exit_group(_agnostic_exit_code);

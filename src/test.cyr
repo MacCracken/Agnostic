@@ -1,0 +1,16 @@
+# agnostic — top-level test entry (referenced by cyrius.cyml [build].test).
+# For unit tests, prefer adding cases to tests/agnostic.tcyr.
+#
+# This is its own translation unit — compiled alone, never alongside
+# src/main.cyr — so its `main` does not collide with the binary's.
+# scripts/check-symbols.sh excludes it for that reason.
+
+include "lib/syscalls.cyr"
+
+# Entry point for the top-level test unit. Returns 0 when every case passes.
+fn main() {
+    return 0;
+}
+
+var _agnostic_test_exit_code = main();
+sys_exit_group(_agnostic_test_exit_code);

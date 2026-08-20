@@ -1,4 +1,4 @@
-# Cyrius Port Brief — Agnostic 2.0.1
+# Cyrius Port Brief — Agnostic 1.0.0
 
 **Researched:** 2026-08-19 · **Cyrius:** 6.5.29 · **AgnosAI:** 2.0.1 → 2.0.2 (dist target)
 **Method:** 12 research agents across cyrius / vidya / agnosai / ~150 ecosystem repos, plus an
@@ -11,7 +11,7 @@ Companion to [`ORACLE-AUDIT.md`](ORACLE-AUDIT.md), which documents what the Pyth
 
 ## 0. Headline
 
-**Agnostic 2.0.1 is roughly a third of the Python tree.** AgnosAI 2.0.1 already owns the entire
+**Agnostic 1.0.0 is roughly a third of the Python tree.** AgnosAI 2.0.1 already owns the entire
 *engine* tier: crews, tasks, agents, DAG/priority scheduling, agent scoring, LLM routing through
 hoosh, the tool registry with four sandbox tiers, fleet coordination + GPU scheduling, multi-tenant
 budgets, human-in-the-loop approvals, a tamper-evident audit chain, durable state, SSE, Prometheus,

@@ -1,0 +1,28 @@
+# Getting started with agnostic
+
+## Build
+
+```sh
+cyrius deps                              # resolve dependencies
+cyrius build src/main.cyr build/agnostic    # compile
+cyrius test                              # run [build].test + tests/*.tcyr
+```
+
+## Layout
+
+- `src/main.cyr` — entry point. Top-level `var r = main(); sys_exit_group(r);`.
+  Use `sys_exit_group`, not `syscall(SYS_EXIT, r)` — the latter is exit(2) and ends
+  only the calling thread, so it hangs once the program spawns its first worker.
+- `src/test.cyr` — top-level test entry referenced by `cyrius.cyml [build].test`. Add unit cases here or in `tests/agnostic.tcyr`.
+- `tests/agnostic.tcyr` — primary test suite (`cyrius test` auto-discovers).
+- `tests/agnostic.bcyr` — benchmarks (`cyrius bench`).
+- `tests/agnostic.fcyr` — fuzz harness (`cyrius fuzz`).
+
+## Adding a feature
+
+1. Edit `src/main.cyr` (or add a new module and `include` it).
+2. Add a test case to `tests/agnostic.tcyr`.
+3. Run `cyrius test`.
+4. Bump `VERSION` and add a CHANGELOG entry before tagging.
+
+See [`../adr/template.md`](../adr/template.md) when a non-trivial design choice deserves an ADR.
