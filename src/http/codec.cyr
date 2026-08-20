@@ -1,0 +1,166 @@
+# agnostic/http/codec — JSON decoding with an allow-list.
+#
+# ## The defect this module exists to prevent
+#
+# The Python oracle's request models are Pydantic classes with no `model_config`,
+# so they inherit `extra='ignore'`. A client field the model does not declare is
+# **silently discarded** — no error, no log line, no 4xx.
+#
+# `ORACLE-AUDIT.md` §2.2 records what that cost: fourteen fields dropped between
+# the API and the engine, including `gpu_strict`. A caller asking for a hard-fail
+# GPU requirement got a silent CPU fallback instead. §3.3 records the same
+# mechanism eating an entire `tasks` array, so the two backends ran structurally
+# different work for one request.
+#
+# The rule here: **an unlisted key is a 422, never a silent discard.**
+#
+# ## The decode contract
+#
+# Every `*_from_value_a` decoder follows this order, and the order matters:
+#
+#   1. `bayan_json_v_is_obj` — reject a non-object outright.
+#   2. `agnostic_no_unknown_fields` — BEFORE reading any field. Validating the
+#      shape first means a request is rejected whole rather than half-applied.
+#   3. Required fields.
+#   4. Optional fields.
+#
+# ## Why this ships in M1 with no route consumer
+#
+# M1 has no request bodies. This module is built now, under test, because M3's
+# field-forwarding gate is built on it — and retrofitting an allow-list after
+# decoders exist means auditing every one of them instead of writing them right.
+
+# A new, empty allow-list, in arena `a`.
+fn agnostic_fields_a(a): i64 {
+    return vec_new_a(a);
+}
+
+# A new, empty allow-list from the global allocator. Not for request paths.
+fn agnostic_fields(): i64 {
+    return vec_new();
+}
+
+# Add a permitted field name to an allow-list, returning the list for chaining.
+fn agnostic_field_a(a, allowed, name): i64 {
+    vec_push_a(a, allowed, str_from_a(a, name));
+    return allowed;
+}
+
+# Add a permitted field name, global allocator. Not for request paths.
+fn agnostic_field(allowed, name): i64 {
+    vec_push(allowed, str_from(name));
+    return allowed;
+}
+
+# 1 when every key in `obj` appears in `allowed`; 0 when any key does not.
+#
+# This is the `deny_unknown_fields` equivalent. A caller that skips it inherits
+# the oracle's defect exactly.
+fn agnostic_no_unknown_fields(obj, allowed): i64 {
+    if (obj == 0) { return 0; }
+    if (allowed == 0) { return 0; }
+    var n = bayan_json_v_obj_len(obj);
+    var i = 0;
+    while (i < n) {
+        var key = bayan_json_v_obj_key(obj, i);
+        var m = vec_len(allowed);
+        var j = 0;
+        var found = 0;
+        while (j < m) {
+            if (str_eq(key, vec_get(allowed, j)) == 1) { found = 1; break; }
+            j = j + 1;
+        }
+        if (found == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The first key in `obj` that is not in `allowed`, or 0 when all are permitted.
+#
+# Reporting *which* field was rejected is the difference between an error a
+# caller can act on and one that sends them to read source. The oracle reported
+# nothing at all.
+fn agnostic_unknown_field(obj, allowed): i64 {
+    if (obj == 0) { return 0; }
+    if (allowed == 0) { return 0; }
+    var n = bayan_json_v_obj_len(obj);
+    var i = 0;
+    while (i < n) {
+        var key = bayan_json_v_obj_key(obj, i);
+        var m = vec_len(allowed);
+        var j = 0;
+        var found = 0;
+        while (j < m) {
+            if (str_eq(key, vec_get(allowed, j)) == 1) { found = 1; break; }
+            j = j + 1;
+        }
+        if (found == 0) { return key; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Parse a request body into a bayan value in arena `a`. 0 on malformed JSON.
+fn agnostic_decode_a(a, body: Str): i64 {
+    if (str_len(body) == 0) { return 0; }
+    return bayan_json_v_parse_buf_a(a, str_data(body), str_len(body));
+}
+
+# Serialise a bayan value to a Str in arena `a`. 0 when the arena is exhausted.
+fn agnostic_encode_a(a, v): i64 {
+    return bayan_json_v_build_a(a, v);
+}
+
+# A required string field. Returns the Str, or 0 when absent or the wrong type.
+#
+# ⚠ Absent and wrong-type deliberately collapse to one signal. A caller that
+# needs to tell them apart is doing something the allow-list should have caught
+# first — and every field here has already passed the shape check.
+fn agnostic_req_str(v, key: Str): i64 {
+    if (v == 0) { return 0; }
+    var f = bayan_json_v_obj_get_by_str(v, key);
+    if (f == 0) { return 0; }
+    if (bayan_json_v_is_str(f) != 1) { return 0; }
+    return bayan_json_v_str(f);
+}
+
+# An optional string field. Returns the Str when present and a string, or
+# `dflt` when absent or JSON null.
+#
+# ⚠ Returns 0 — distinct from `dflt` — when the field is present but the WRONG
+# TYPE. `{"name": 42}` is a client error, not an omission, and collapsing it to
+# the default is how a typo becomes a silent default in production.
+fn agnostic_opt_str(v, key: Str, dflt): i64 {
+    if (v == 0) { return dflt; }
+    var f = bayan_json_v_obj_get_by_str(v, key);
+    if (f == 0) { return dflt; }
+    if (bayan_json_v_is_null(f) == 1) { return dflt; }
+    if (bayan_json_v_is_str(f) != 1) { return 0; }
+    return bayan_json_v_str(f);
+}
+
+# A required integer field. Returns `sentinel` when absent or the wrong type.
+#
+# The caller picks the sentinel because there is no value this can return that
+# is universally invalid — 0 and -1 are both legitimate for some fields.
+fn agnostic_req_int(v, key: Str, sentinel): i64 {
+    if (v == 0) { return sentinel; }
+    var f = bayan_json_v_obj_get_by_str(v, key);
+    if (f == 0) { return sentinel; }
+    if (bayan_json_v_is_int(f) != 1) { return sentinel; }
+    return bayan_json_v_int(f);
+}
+
+# A required boolean field. Returns `sentinel` when absent or the wrong type.
+#
+# ⚠ A JSON string "true" is NOT a boolean and returns the sentinel. Coercing it
+# would mean `{"gpu_strict": "false"}` reads as true — the string is non-empty —
+# which is precisely the class of silent misreading this module exists to stop.
+fn agnostic_req_bool(v, key: Str, sentinel): i64 {
+    if (v == 0) { return sentinel; }
+    var f = bayan_json_v_obj_get_by_str(v, key);
+    if (f == 0) { return sentinel; }
+    if (bayan_json_v_is_bool(f) != 1) { return sentinel; }
+    return bayan_json_v_bool(f);
+}

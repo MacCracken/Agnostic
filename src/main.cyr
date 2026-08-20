@@ -11,6 +11,7 @@ include "src/trace.cyr"
 include "src/log.cyr"
 include "src/http/status.cyr"
 include "src/http/response.cyr"
+include "src/http/codec.cyr"
 include "src/routes/health.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.

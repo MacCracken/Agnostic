@@ -81,9 +81,27 @@ record.
   (`ORACLE-AUDIT.md` §2.2 lists six fields the oracle dropped, `gpu_strict` being the sharp one:
   a hard-fail GPU requirement became a silent CPU fallback)
 
-**Open decision:** preset canon. The two sets differ — Agnostic has `complete-lean`,
-`quality-performance`, `quality-security`; AgnosAI has `security-lean/standard/large`. Does
-Agnostic keep its own store given AgnosAI serves 18 over `GET /api/v1/presets`?
+**✅ Decided 2026-08-20 — Agnostic's preset library is canonical; AgnosAI streamlines to examples.**
+
+The two sets are not two versions of one library — they are unrelated content sharing a naming
+scheme. 18 each, 15 names collide, and **not one** of the 15 has a matching description, agent
+roster or tool vocabulary. Agnostic's presets name 38 PascalCase QA tool classes; AgnosAI's name 23
+snake_case capabilities. **The intersection is empty.** Agnostic's documents also carry five fields
+AgnosAI's schema has no slot for (`workflow_mode`; per-agent `focus`, `celery_queue`,
+`redis_prefix`, `allow_delegation`) — which its parser would silently discard, the exact failure
+this milestone forbids.
+
+Serving an AgnosAI preset through Agnostic would name tools Agnostic cannot resolve, and a registry
+miss is **silent**: the crew assembles empty rather than erroring.
+
+This is a decision about **content, not linkage** — Agnostic still calls AgnosAI for execution.
+
+→ **Cross-repo follow-up (agnosai):** streamline its preset set to a small illustrative example
+library rather than a competing production one, so the two stop diverging by accident.
+
+→ **M3 task:** verify the oracle's 18 presets are still *viable* — every named tool resolvable in the
+Cyrius tool registry, every role meaningful — before porting them wholesale. A preset naming a tool
+that no longer exists fails silently for the same reason.
 
 ### M4 — Persistence + audit chain (v0.5.0)
 
@@ -96,14 +114,37 @@ the oracle's multi-container "everyone talks to postgres" topology cannot be rep
 
 ### M5 — Identity + tenancy (v0.6.0)
 
-- API keys (`sigil` SHA-256 + `ct_eq_bytes`), tenant CRUD, roles
-- Webhook HMAC signatures
+**✅ Decided 2026-08-20 — Agnostic owns identity, thin, adapted from SecureYeoman's Cyrius probe.**
 
-⛔ **Blocked on an open decision.** Own it (patra + sigil), delegate to kavach, or make
-SecureYeoman the IdP with Agnostic only validating SY-issued JWTs. ⚠ The third option is now the
-weakest: if SY does not sit in front of Agnostic, making it the identity provider couples the two
-for no delivery benefit. Per `cyrius/CLAUDE.md:66`
-("When stuck, ASK the user"), this is answered *before* M5 opens, not discovered inside it.
+- HS256 JWT issue + verify, adapted from `secureyeoman/yeo-cy-test/src/auth.cyr` (541 lines, working)
+- Argon2id credentials via `sigil` at sy-core's parameters (m=19456, t=2, p=1)
+- API keys — `sigil` SHA-256 + `ct_eq_bytes` constant-time compare
+- Tenant CRUD in `patra`, tenant key-prefixing, static role→permission table
+- Webhook HMAC-SHA256
+- External-IdP verification as an **additive** mode behind a fn-pointer validator
+
+⛔ **"Delegate to kavach" was struck, not weighed.** kavach has *zero* identity surface — a grep for
+user/role/apikey/tenant/jwt/oauth/session across all 48 files of `kavach/src/` returns nothing.
+`credential.cyr` injects secrets *into* sandboxes; it authenticates nobody. There is no ecosystem
+IdP either (`iam` is a neofetch clone, `aegis` a policy daemon, `phylax` threat detection).
+
+⚠ **Do not port the oracle's identity surface faithfully — most of it has never run.**
+Local password login cannot succeed (`_authenticate_local` reads `password_hash`, but `User` has no
+such field, so the writer's guard is permanently false); no user can create an API key (everyone is
+`VIEWER`, no role assignment exists, the endpoint needs `SUPER_ADMIN`); tenant API keys are
+read-only (the validator reads a key nothing writes); the three OAuth providers are unreachable (no
+caller passes a provider). **None of this is among the 85 audited defects** — it was found while
+deciding this. Scope covers what the oracle actually executes.
+
+⚠ **Carry SY's login-abuse controls over — they are load-bearing, not polish.** Argon2id at ~244 ms
+makes login a request-amplification lever: 8 concurrent attempts pushed `GET /health` from 6 ms to
+942 ms, and ~40 wedged a 4-worker pool. A per-IP token bucket and a worker-concurrency cap both shed
+with 429 **before** any Argon2 work.
+
+⚠ **Three `patra` constraints to design around, not discover:** one index per table (so user-by-email
+and user-by-id need two tables or a scan), per-write fsync by default (never rewrite a key blob on
+every validation, as the oracle does), and single-writer (fine for a read-dominated verify path;
+key creation serializes).
 
 ### M6 — QA tool surface (v0.7.0)
 
@@ -120,6 +161,13 @@ for no delivery benefit. Per `cyrius/CLAUDE.md:66`
 - JSON-RPC 2.0 MCP at `/mcp`, on `bote`
 - REST tool invocation at `/api/v1/mcp/invoke`
 - A2A callback endpoint
+
+**Both MCP shapes stand (D5), on their own merit.** The original justification was preserving
+SecureYeoman's live client; that is gone (see below), but the decision is unchanged — JSON-RPC is
+the MCP standard for tool clients, and the REST shape is what scripts, the WebGUI and any
+non-MCP-aware caller actually want. The **28-tool** surface is settled: the 5–8 figure in
+`first-party-standards.md:625` is a soft guideline for typical projects, not a ceiling for
+platform-scale ones.
 
 **Agnostic stands on its own.** An earlier draft treated SecureYeoman's live 43-tool client as a
 *frozen wire contract* that this milestone had to preserve, on the assumption SY reaches the engine
@@ -146,8 +194,24 @@ now and expensive to retrofit.
 
 - HTML + CSV + JSON export; quality trends and comparison reports
 
-**Open decision:** PDF. Lift `mneme/src/io_export_pdf.cyr` (works, proven to run), wait for bayan's
-roadmapped `bayan_pdf_*`, or ship without.
+**✅ Decided 2026-08-20 — HTML + CSV + JSON only. No PDF in 1.0; wait for `bayan_pdf_*`.**
+
+"Lift mneme" is not the cheap proven option this brief assumed. It was built and run: a genuine
+PDF 1.4, 21 assertions green. But probed with QA-shaped input it fails on the two things a QA report
+is made of — **UTF-8 becomes mojibake** ("Qualité" → "Qualitˆ'") and **markdown tables print as
+literal `| Test | Status |` pipes** in a proportional font. Tables are the one structure the
+oracle's PDF path actually builds. Fixing that is a rewrite, not a lift.
+
+Decisive independently: mneme is **AGPL-3.0** and Agnostic is **GPL-3.0-only**, and mneme exposes no
+`[lib]`/`dist/` so "lift" means copying source. AgnosAI already refused mneme for exactly this
+(`agnosai/docs/development/roadmap.md:95`).
+
+Worth knowing the oracle's PDF is largely aspirational too: `reportlab` sits in an optional extra,
+the ImportError path writes **HTML into a `.pdf` file**, `_count_pages` is a hardcoded `return 1`,
+and `include_charts` is never read.
+
+→ **Follow-up, separate session:** file a writer-only `bayan_pdf_*` request naming Agnostic as a
+second driver. It is currently P2 / post-v1.0 with no date.
 
 ### M9 — WebGUI (v1.0.0)
 
@@ -156,9 +220,12 @@ roadmapped `bayan_pdf_*`, or ship without.
 
 ## Release shape
 
-`cyrius/CLAUDE.md:96` permits 1–2 releases for a multi-phase arc; AgnosAI used two. The natural cut
-is **M1–M7** (headless: the API and MCP surfaces, usable without a browser) then **M8–M9**
-(reports + GUI). The user owns that call.
+**✅ Decided 2026-08-20 — one release. M1–M9 ship together as 1.0.0.**
+
+`cyrius/CLAUDE.md:96` permits 1–2 releases for a multi-phase arc and AgnosAI used two, but Agnostic
+cuts as a total. The consequence to plan around: there is no intermediate tag, so `main` must stay
+green the whole way rather than being stabilised once per release — every milestone lands with its
+gates passing, and nothing is left "to be fixed before the cut".
 
 ## Out of scope for v1.0
 

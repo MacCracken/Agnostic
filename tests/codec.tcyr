@@ -1,0 +1,185 @@
+# agnostic/http/codec — allow-list decoding.
+#
+# This suite is the regression barrier for the oracle's single most damaging
+# defect class: Pydantic's extra='ignore' silently discarding client fields.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+
+fn _t_parse(a, s): i64 {
+    return agnostic_decode_a(a, str_from(s));
+}
+
+fn test_decode_basics() {
+    test_group("codec/decode");
+
+    var a = arena_allocator(65536);
+
+    var v = _t_parse(a, "{\"name\":\"crew-1\",\"count\":3,\"live\":true}");
+    assert_neq(v, 0, "well-formed object parses");
+    assert_eq(bayan_json_v_is_obj(v), 1, "parses as an object");
+
+    assert_eq(agnostic_decode_a(a, str_from("")), 0, "empty body is not valid JSON");
+    assert_eq(agnostic_decode_a(a, str_from("{\"a\":")), 0, "truncated JSON returns 0");
+    assert_eq(agnostic_decode_a(a, str_from("not json")), 0, "garbage returns 0");
+}
+
+fn test_allow_list_accepts_known() {
+    test_group("codec/allow-known");
+
+    var a = arena_allocator(65536);
+    var v = _t_parse(a, "{\"name\":\"crew-1\",\"count\":3}");
+
+    var allowed = agnostic_fields_a(a);
+    agnostic_field_a(a, allowed, "name");
+    agnostic_field_a(a, allowed, "count");
+
+    assert_eq(agnostic_no_unknown_fields(v, allowed), 1, "every key is permitted");
+    assert_eq(agnostic_unknown_field(v, allowed), 0, "no unknown field to report");
+
+    # A permitted field being absent is fine — the allow-list bounds what MAY
+    # appear, not what must.
+    var v2 = _t_parse(a, "{\"name\":\"crew-1\"}");
+    assert_eq(agnostic_no_unknown_fields(v2, allowed), 1, "a subset of permitted keys is fine");
+}
+
+fn test_allow_list_rejects_unknown() {
+    test_group("codec/allow-unknown");
+
+    var a = arena_allocator(65536);
+
+    # ⭐ THE ORACLE DEFECT, IN ONE ASSERTION.
+    #
+    # ORACLE-AUDIT.md §2.2: fourteen fields were dropped between the API and the
+    # engine because Pydantic defaults to extra='ignore'. `gpu_strict` was one —
+    # a caller asking for a hard-fail GPU requirement silently got a CPU
+    # fallback. §3.3 records the same mechanism eating an entire `tasks` array.
+    #
+    # An unlisted key must be REJECTED, never discarded.
+    var v = _t_parse(a, "{\"name\":\"crew-1\",\"gpu_strict\":true}");
+
+    var allowed = agnostic_fields_a(a);
+    agnostic_field_a(a, allowed, "name");
+
+    assert_eq(agnostic_no_unknown_fields(v, allowed), 0,
+      "an unlisted field is rejected, not silently dropped");
+
+    # And the caller is told WHICH field. The oracle reported nothing at all.
+    var bad = agnostic_unknown_field(v, allowed);
+    assert_neq(bad, 0, "the offending field is reported");
+    assert_eq(str_eq_cstr(bad, "gpu_strict"), 1, "reported by name");
+}
+
+fn test_allow_list_edges() {
+    test_group("codec/allow-edges");
+
+    var a = arena_allocator(65536);
+    var allowed = agnostic_fields_a(a);
+    agnostic_field_a(a, allowed, "name");
+
+    # An empty object trivially satisfies any allow-list.
+    var empty = _t_parse(a, "{}");
+    assert_eq(agnostic_no_unknown_fields(empty, allowed), 1, "empty object passes");
+
+    # A null value is still a null pointer — reject rather than fault.
+    assert_eq(agnostic_no_unknown_fields(0, allowed), 0, "null object is rejected, not a fault");
+    assert_eq(agnostic_no_unknown_fields(empty, 0), 0, "null allow-list is rejected, not a fault");
+
+    # Matching is exact, not prefix — "nam" and "names" are both unknown.
+    var near = _t_parse(a, "{\"names\":\"x\"}");
+    assert_eq(agnostic_no_unknown_fields(near, allowed), 0, "near-miss key is not a match");
+}
+
+fn test_required_str() {
+    test_group("codec/req_str");
+
+    var a = arena_allocator(65536);
+    var v = _t_parse(a, "{\"name\":\"crew-1\",\"count\":3}");
+
+    var got = agnostic_req_str(v, str_from("name"));
+    assert_neq(got, 0, "present string field returns a value");
+    assert_eq(str_eq_cstr(got, "crew-1"), 1, "value is correct");
+
+    assert_eq(agnostic_req_str(v, str_from("missing")), 0, "absent field returns 0");
+    assert_eq(agnostic_req_str(v, str_from("count")), 0, "wrong type returns 0, not a coercion");
+    assert_eq(agnostic_req_str(0, str_from("name")), 0, "null object returns 0");
+}
+
+fn test_optional_str() {
+    test_group("codec/opt_str");
+
+    var a = arena_allocator(65536);
+    var dflt = str_from("fallback");
+
+    var v = _t_parse(a, "{\"name\":\"crew-1\",\"note\":null,\"count\":3}");
+
+    assert_eq(str_eq_cstr(agnostic_opt_str(v, str_from("name"), dflt), "crew-1"), 1, "present value wins");
+    assert_eq(str_eq(agnostic_opt_str(v, str_from("absent"), dflt), dflt), 1, "absent falls back to default");
+    assert_eq(str_eq(agnostic_opt_str(v, str_from("note"), dflt), dflt), 1, "JSON null falls back to default");
+
+    # ⚠ Wrong type is NOT the default — it returns 0, distinctly. `{"name": 42}`
+    # is a client error, and collapsing it to the default is how a typo becomes
+    # a silent default in production.
+    assert_eq(agnostic_opt_str(v, str_from("count"), dflt), 0,
+      "wrong type returns 0, distinct from the default");
+}
+
+fn test_required_int_bool() {
+    test_group("codec/req_int_bool");
+
+    var a = arena_allocator(65536);
+    var v = _t_parse(a, "{\"count\":3,\"live\":true,\"off\":false,\"name\":\"x\",\"strflag\":\"true\"}");
+
+    assert_eq(agnostic_req_int(v, str_from("count"), 0 - 1), 3, "int field read");
+    assert_eq(agnostic_req_int(v, str_from("absent"), 0 - 1), 0 - 1, "absent int gives the sentinel");
+    assert_eq(agnostic_req_int(v, str_from("name"), 0 - 1), 0 - 1, "wrong type gives the sentinel");
+
+    assert_eq(agnostic_req_bool(v, str_from("live"), 0 - 1), 1, "true read");
+    assert_eq(agnostic_req_bool(v, str_from("off"), 0 - 1), 0, "false read as 0, not as the sentinel");
+    assert_eq(agnostic_req_bool(v, str_from("absent"), 0 - 1), 0 - 1, "absent bool gives the sentinel");
+
+    # ⚠ A JSON string "true" is NOT a boolean. Coercing it would make
+    # {"gpu_strict": "false"} read as TRUE, since the string is non-empty —
+    # exactly the silent misreading this module exists to stop.
+    assert_eq(agnostic_req_bool(v, str_from("strflag"), 0 - 1), 0 - 1,
+      "a string is not coerced to a boolean");
+}
+
+fn test_encode_roundtrip() {
+    test_group("codec/encode");
+
+    var a = arena_allocator(65536);
+    var obj = bayan_json_v_obj_new_a(a);
+    bayan_json_v_obj_set_a(a, obj, str_from("status"), bayan_json_v_str_new_a(a, str_from("ok")));
+
+    var out = agnostic_encode_a(a, obj);
+    assert_neq(out, 0, "encode produced bytes");
+
+    # Re-parse what we emitted: a codec whose output its own decoder rejects is
+    # broken regardless of how the bytes look.
+    var back = agnostic_decode_a(a, out);
+    assert_neq(back, 0, "our own output re-parses");
+    assert_eq(str_eq_cstr(agnostic_req_str(back, str_from("status")), "ok"), 1, "round-trip preserves the value");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_decode_basics();
+    test_allow_list_accepts_known();
+    test_allow_list_rejects_unknown();
+    test_allow_list_edges();
+    test_required_str();
+    test_optional_str();
+    test_required_int_bool();
+    test_encode_roundtrip();
+    return assert_summary();
+}
+
+var _agnostic_codec_test_exit = main();
+if (_agnostic_codec_test_exit > 0) { _agnostic_codec_test_exit = 1; }
+sys_exit_group(_agnostic_codec_test_exit);

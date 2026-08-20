@@ -264,6 +264,49 @@ From `cyrius/CLAUDE.md` and `agnosai/CLAUDE.md` — these constrain *how* the wo
 | **D4** | **Full 28 QA tools.** `Page.captureScreenshot` gets added to yantra's CDP surface first, then the CV pipeline is rebuilt on chitra + ranga + rosnet | yantra becomes a prerequisite repo alongside agnosai |
 | **D5** | ~~Serve both MCP shapes to preserve SecureYeoman's live 43-tool client, treating `/api/v1/{crews,definitions,presets,gpu/*,a2a/receive}` + X-API-Key as a frozen wire contract~~ — **revised 2026-08-20, see §7.3** | JSON-RPC 2.0 MCP at `/mcp` is the standard shape; the REST shape must now earn its place on merit rather than on a migration constraint |
 
+### 7.1 Prerequisite work in other repos
+
+| Repo | Change | Version |
+|---|---|---|
+| `agnosai` | `[lib]` stanza + `cyrius distlib` → `dist/agnosai.cyr` (§3). Fix the hardcoded `AGNOSAI_VERSION = "1.1.0"` at `src/server/routes/mod.cyr:44` while there | 2.0.1 → **2.0.2** |
+| `yantra` | `Page.captureScreenshot` on the CDP surface (D4) | TBD |
+
+### 7.2 Resolved 2026-08-20
+
+| # | Was open | Decided | Where |
+|---|---|---|---|
+| 1 | **Identity** — own it / kavach / SY-as-IdP | **Own it, thin.** Adapt `secureyeoman/yeo-cy-test/src/auth.cyr` — HS256 JWT issue+verify, Argon2id via sigil, per-IP rate limit. kavach **struck**: zero identity surface across all 48 files. External IdP additive behind a fn-pointer validator. | roadmap M5 |
+| 2 | **Preset canon** | **Agnostic's library is canonical.** The two sets share names and nothing else — 15 collisions, zero matching rosters, empty tool-vocabulary intersection. AgnosAI streamlines to examples (cross-repo follow-up). | roadmap M3 |
+| 3 | **PDF reports** | **HTML+CSV+JSON only in 1.0.** mneme is AGPL into a GPL-3.0-only project, and mangles UTF-8 and tables. Wait for `bayan_pdf_*`; file the ask separately. | roadmap M8 |
+
+Three findings from that research are worth carrying independently of the decisions:
+
+- **The oracle's identity surface is mostly dead code** — no `password_hash` writer, no user CRUD
+  routes, no role assignment beyond a hardcoded `VIEWER`, no tenant-API-key writer, and three
+  unreachable OAuth providers. **None of it appears among ORACLE-AUDIT.md's 85 defects.** Anything
+  reading the oracle for an identity spec will be reading machinery that never ran.
+- **Argon2id makes login a DoS lever.** Measured in the SY probe: 8 concurrent attempts took
+  `GET /health` from 6 ms to 942 ms; ~40 wedged a 4-worker pool. The mitigations must shed *before*
+  the KDF runs, not after.
+- **A preset naming an unresolvable tool fails silently** — the crew assembles empty rather than
+  erroring. That makes preset viability a correctness question, not a tidiness one.
+
+### 7.2.1 Also resolved 2026-08-20
+
+| # | Was open | Decided |
+|---|---|---|
+| 4 | **Release shape** | **One release — total.** M1–M9 ship together as 1.0.0. No intermediate tag, so `main` stays green throughout rather than being stabilised once per release. |
+| 5 | **Daimon Tier 1** | **Deferred** — ADR 0002. It cannot be implemented as written: daimon serves no agent heartbeat route, and registration for an externally-started process seeds supervisor maps against pid 0. Closing the gap needs daimon-side socket-layer and HTTP-layer adaptation. M7 ships the env-gated, default-off **tool** registration that does work. |
+| 6 | **MCP transports** | **Both shapes stand (D5)** — now justified on merit rather than on SecureYeoman compatibility. JSON-RPC at `/mcp` is the standard for MCP clients; the REST shape at `/api/v1/mcp/invoke` is what scripts, the WebGUI and non-MCP-aware callers want. The 28-tool surface was settled separately: the 5–8 figure is a soft guideline, not a ceiling. |
+
+⚠ On #5, note the shape of the evidence rather than just the verdict: **zero** first-party projects
+perform Tier 1 at runtime, including AgnosAI and including agnoshi, which the standard itself names
+as the canonical daimon consumer. Two that tried (phylax, prakash) target a path daimon does not
+route and never call their own code. A requirement that no consumer satisfies and no server
+implements is a requirement written against an intended API.
+
+**All six open decisions are now closed.** Nothing in the roadmap is blocked.
+
 ### 7.3 Revision — Agnostic stands on its own (2026-08-20)
 
 **The premise behind D5 was wrong.** This brief assumed SecureYeoman reaches the engine *through*
@@ -296,21 +339,3 @@ touching either. Cheap to preserve now, expensive to retrofit.
 ⚠ It also removes the keep-alive worry's urgency (§5.2): that entry is justified by "SecureYeoman's
 43-tool client polls". Agnostic→AgnosAI/hoosh calls use `sandhi_http_pool_*` client-side pooling and
 are unaffected either way.
-
-### 7.1 Prerequisite work in other repos
-
-| Repo | Change | Version |
-|---|---|---|
-| `agnosai` | `[lib]` stanza + `cyrius distlib` → `dist/agnosai.cyr` (§3). Fix the hardcoded `AGNOSAI_VERSION = "1.1.0"` at `src/server/routes/mod.cyr:44` while there | 2.0.1 → **2.0.2** |
-| `yantra` | `Page.captureScreenshot` on the CDP surface (D4) | TBD |
-
-### 7.2 Still open
-
-1. **Identity.** AgnosAI has a shared bearer secret or RS256 JWT, off by default. Agnostic needs
-   users, roles, OAuth, API keys, tenant CRUD. Own it (patra + sigil), delegate to kavach, or make
-   SecureYeoman the IdP with Agnostic only validating SY-issued JWTs.
-2. **Preset canon.** The two sets differ — Agnostic has `complete-lean`, `quality-performance`,
-   `quality-security`; AgnosAI has `security-lean/standard/large`. Which is canonical, and does
-   Agnostic keep its own preset store given AgnosAI serves 18 over `GET /api/v1/presets`?
-3. **PDF reports.** `mneme/src/io_export_pdf.cyr` works and is proven to run — lift it, wait for
-   bayan's roadmapped `bayan_pdf_*`, or ship HTML+CSV+JSON only.
