@@ -9,9 +9,9 @@ fn main() {
     return assert_summary();
 }
 
-var exit_code = main();
+var _agnostic_test_exit_code = main();
 # Clamp before exiting: assert_summary() returns the raw failure COUNT, and a
 # wait status is only 8 bits — an unclamped 256 / 512 / 768 failures would exit
 # 0 and score PASS. Any failure at all is exit 1.
-if (exit_code > 0) { exit_code = 1; }
-sys_exit_group(exit_code);
+if (_agnostic_test_exit_code > 0) { _agnostic_test_exit_code = 1; }
+sys_exit_group(_agnostic_test_exit_code);

@@ -19,5 +19,9 @@ fn main(): i64 {
     return 0;
 }
 
-var r = main();
-sys_exit_group(r);
+# Prefixed: a bench binary links all of lib/, which exports ~180 unprefixed
+# names. A bare `r` here is a global in Cyrius's single flat namespace and
+# last-definition-wins would apply silently. No collision exists today —
+# lib/ declares no single-letter globals — but the dep set is about to grow.
+var _agnostic_bench_exit_code = main();
+sys_exit_group(_agnostic_bench_exit_code);

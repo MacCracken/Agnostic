@@ -12,5 +12,6 @@ fn main() {
     return 0;
 }
 
-var r = main();
-sys_exit_group(r);
+# Prefixed for the same reason as the bench harness — see tests/agnostic.bcyr.
+var _agnostic_fuzz_exit_code = main();
+sys_exit_group(_agnostic_fuzz_exit_code);

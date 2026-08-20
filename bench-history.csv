@@ -1,0 +1,2 @@
+date,version,commit,branch,benchmark,time_ns
+2026-08-20T17:29:38Z,0.1.0,830216c,main,noop,2
