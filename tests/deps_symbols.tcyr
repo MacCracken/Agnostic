@@ -1,0 +1,86 @@
+# Cross-dependency symbol integrity.
+#
+# ⚠ This suite guards a class of defect that NOTHING else in the ecosystem
+# catches. Cyrius has ONE flat symbol namespace with last-definition-wins, and
+# the compiler warns on a duplicate `fn` but is **SILENT** on a duplicate `var`.
+# Meanwhile every `check-symbols.sh` — this repo's included — scans `src/` only.
+# So a collision between two *dependencies* inside `lib/` is invisible to the
+# compiler and to the linter simultaneously.
+#
+# That is not hypothetical. kavach and ai-hwaccel both defined `var
+# BACKEND_COUNT` — 10 and 18. Any binary linking both silently resolved it to
+# 18, which disabled kavach's `_backend_fp` bounds check over a 10-slot table:
+# `_backend_slot(17)` read 224 bytes past `_backend_table[320]` and
+# `backend_dispatch_exec` then called the result as a function pointer.
+#
+# Agnostic is where that mattered, because agnostic is the binary that links
+# both (transitively, through agnosai). Fixed upstream in kavach 3.11.15 and
+# ai-hwaccel 2.3.18 by renaming to KAVACH_BACKEND_COUNT / AIHW_BACKEND_COUNT.
+# These assertions fail if either name ever collapses back together.
+
+fn test_backend_count_is_not_shared() {
+    test_group("deps/backend-count");
+
+    # The two constants must be DISTINCT symbols holding DIFFERENT values.
+    # Before the rename a single `BACKEND_COUNT` answered 18 to both callers.
+    assert_eq(KAVACH_BACKEND_COUNT, 10, "kavach's backend count is its own 10");
+    assert_eq(AIHW_BACKEND_COUNT, 18, "ai-hwaccel's backend count is its own 18");
+    assert_neq(KAVACH_BACKEND_COUNT, AIHW_BACKEND_COUNT,
+      "the two counts must not resolve to the same symbol");
+}
+
+fn test_kavach_bound_matches_its_table() {
+    test_group("deps/backend-bound");
+
+    # ⭐ The assertion that actually encodes the safety property: kavach's
+    # bounds check is only a bounds check if the count it compares against
+    # matches the table it guards. 320 bytes / 32 per slot = 10 slots.
+    var slots = 320 / BACKEND_SLOT_SIZE;
+    assert_eq(slots, 10, "the dispatch table holds 10 slots");
+    assert_eq(KAVACH_BACKEND_COUNT, slots,
+      "the guard's limit equals the table's real slot count");
+
+    # The highest legal id must land inside the table, and one past it must not.
+    assert_eq(KAVACH_BACKEND_COUNT - 1, 9, "highest legal backend id is 9");
+    assert_eq((KAVACH_BACKEND_COUNT - 1) * BACKEND_SLOT_SIZE + BACKEND_SLOT_SIZE, 320,
+      "the last legal slot ends exactly at the end of the table");
+
+    # ⚠ The regression, stated directly: had the guard kept ai-hwaccel's 18,
+    # the highest admitted id would have read past the table's end.
+    assert_eq((AIHW_BACKEND_COUNT - 1) * BACKEND_SLOT_SIZE, 544,
+      "id 17 would sit at byte 544 — 224 bytes past a 320-byte table");
+}
+
+fn test_enum_members_still_resolve() {
+    test_group("deps/enum-members");
+
+    # ⚠ In Cyrius an enum QUALIFIER is cosmetic: the type name plays no part in
+    # resolution, only the member name does. So renaming `enum Backend` to
+    # `KavachBackend` protected nothing by itself — these members are still
+    # generic and still unprefixed, and a future library defining `WASM` or
+    # `PROCESS` would collide with them SILENTLY, exactly as BACKEND_COUNT did.
+    # Pinning the values here is what would catch that.
+    assert_eq(KavachBackend.PROCESS, 0, "PROCESS is 0");
+    assert_eq(KavachBackend.WASM, 3, "WASM is 3");
+    assert_eq(KavachBackend.OCI, 4, "OCI is 4");
+    assert_eq(KavachBackend.NOOP, 9, "NOOP is 9");
+
+    # The unqualified spelling must agree — this is what proves the qualifier
+    # is cosmetic rather than assumed to be.
+    assert_eq(Backend.WASM, KavachBackend.WASM,
+      "an enum qualifier is cosmetic — both spellings resolve to member WASM");
+
+    assert_eq(AiHwBackend.BACKEND_CUDA, 0, "ai-hwaccel's CUDA is 0");
+}
+
+fn main() {
+    alloc_init();
+    test_backend_count_is_not_shared();
+    test_kavach_bound_matches_its_table();
+    test_enum_members_still_resolve();
+    return assert_summary();
+}
+
+var _agnostic_deps_symbols_exit = main();
+if (_agnostic_deps_symbols_exit > 0) { _agnostic_deps_symbols_exit = 1; }
+sys_exit_group(_agnostic_deps_symbols_exit);

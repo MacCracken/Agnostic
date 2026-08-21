@@ -4,9 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — agnosai 2.0.3 → 2.0.4, closing a memory-safety defect in this binary
+
+Agnostic is the binary where the defect actually lived, because Agnostic is what links kavach and
+ai-hwaccel together — transitively, through agnosai.
+
+Both libraries defined `var BACKEND_COUNT`, 10 and 18. Cyrius has one flat symbol namespace with
+last-definition-wins and is **silent** on a duplicate `var`, so the constant resolved to **18** while
+kavach used it as the bounds check in `_backend_fp` over a **10-slot** table (`_backend_table[320]`
+at `BACKEND_SLOT_SIZE = 32`). The guard admitted ids 0–17; `_backend_slot(17)` sits at byte 544, 224
+bytes past the end, and `backend_dispatch_exec` then calls the result as a function pointer.
+Renamed upstream to `KAVACH_BACKEND_COUNT` / `AIHW_BACKEND_COUNT` in kavach 3.11.15 and
+ai-hwaccel 2.3.18, which agnosai 2.0.4 folds.
+
+### Added — `tests/deps_symbols.tcyr`, a guard for the class rather than the instance
+
+**14 assertions.** The instance is fixed upstream; this suite exists because *nothing caught it*.
+The compiler warns on a duplicate `fn` and is silent for `var`, and every `check-symbols.sh` in the
+ecosystem — including this repo's — scans `src/` only. A collision between two dependencies inside
+`lib/` is therefore invisible to the compiler and the linter simultaneously, and Agnostic is the
+repo where such a collision lands.
+
+The suite pins both counts as distinct values, ties kavach's guard to its table's real slot count,
+and records the out-of-bounds arithmetic the old value produced. Mutation-tested: three mutants —
+restoring 18, resizing the table to 18 slots, and drifting an enum member — each killed.
+
+⚠ It also pins the enum *members* (`PROCESS`, `WASM`, `OCI`, `NOOP`), because in Cyrius an enum
+qualifier is **cosmetic** — `Backend.WASM` and `KavachBackend.WASM` both resolve to the member
+`WASM`, asserted here directly. The upstream type rename therefore protected nothing on its own;
+those members remain generic and unprefixed, and a future library defining `WASM` would collide the
+same silent way.
+
+### Fixed — `lib/vani.cyr` did not match the pinned toolchain snapshot
+
+Pre-existing and unrelated to the dep bump: the vendored copy matched **no** installed toolchain, so
+`scripts/check-clean.sh` failed at HEAD. `vani` is not in `[deps].stdlib` and `src/` has zero
+references to it, but the snapshot check requires every file in the pinned snapshot to be present
+*and* byte-identical, so removing it would fail too. Re-synced from the 6.5.32 snapshot.
+
+⚠ Provisioning was done with the **pinned** toolchain binary rather than the PATH wrapper, which had
+drifted to 6.5.33. `lib sync` and `deps` provision from the *installed* toolchain, not the manifest
+pin, so syncing under drift is how a lock that CI cannot reproduce gets written.
+
 ### Added — M1, the HTTP foundation
 
-The first milestone where untrusted bytes reach a buffer. **222 assertions across 7 suites**, 0
+The first milestone where untrusted bytes reach a buffer. **215 assertions across 7 suites**, 0
 failed; all CI gates green. Verified live over a socket, not only under test.
 
 - **`src/config.cyr`** — environment config, strictly parsed. A malformed value **refuses to start**

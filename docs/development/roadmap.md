@@ -55,7 +55,7 @@ before porting any behaviour.
 - `bayan` allow-list codec: an unlisted field is a 422 naming it, never a silent discard
 - Signal-driven graceful shutdown via `signalfd` on a dedicated thread
 
-**222 assertions across 7 suites**, 0 failed. All CI gates green. Verified live over a socket:
+**215 assertions across 7 suites**, 0 failed. All CI gates green. Verified live over a socket:
 200/404/405, `?query` handled, trailing slash distinct, SIGTERM drains and exits 0.
 
 **Gates met:** arena exhaustion returns 0 rather than a half-built record, tested for the trace and
