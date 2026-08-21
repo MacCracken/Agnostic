@@ -67,6 +67,7 @@ cyrius test                          # run [build].test + tests/*.tcyr
 - [`docs/architecture/`](docs/architecture/) — Non-obvious constraints (*what's true about the code?*)
 - [`docs/guides/`](docs/guides/) — Task-oriented how-tos
 - [`docs/examples/`](docs/examples/) — Runnable examples
+- [`docs/development/handoff.md`](docs/development/handoff.md) — **Start here** — port orientation: where it is, how to build it correctly, what M2 must do
 - [`docs/development/state.md`](docs/development/state.md) — Live state snapshot
 - [`docs/development/roadmap.md`](docs/development/roadmap.md) — Milestones through v1.0
 

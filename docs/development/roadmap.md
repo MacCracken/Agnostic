@@ -1,6 +1,7 @@
 # agnostic — Roadmap
 
 > Milestone plan through v1.0. State lives in [`state.md`](state.md);
+> orientation for picking the port up lives in [`handoff.md`](handoff.md);
 > this file is the sequencing — what ships, in what order, against
 > what dependency gates.
 
@@ -75,8 +76,11 @@ a result type that carries status *and* error *and* the remote id; terminal stat
 terminal; one task model rather than two; cancellation that stops work rather than relabelling a
 record.
 
-**Unblocked:** D1's prerequisite shipped — AgnosAI 2.0.2 added the `[lib]` stanza and
-`dist/agnosai.cyr`; 2.0.3 moved to Cyrius 6.5.31.
+**Unblocked, and the dependency is already wired.** D1's prerequisite shipped — AgnosAI 2.0.2 added
+the `[lib]` stanza and `dist/agnosai.cyr`. `[deps.agnosai]` is now pinned at **2.0.4** and linked:
+`lib/agnosai.cyr` is in the compile unit today, so M2 is handler work, not integration plumbing.
+⚠ 2.0.4 closed a memory-safety defect that only manifested *here* — see the addendum to
+[`docs/audit/2026-08-20-audit-m1.md`](../audit/2026-08-20-audit-m1.md).
 
 ### M3 — Definitions, presets, agents (v0.4.0)
 

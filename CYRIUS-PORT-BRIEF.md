@@ -7,6 +7,15 @@ adversarial refutation pass over every claimed capability gap (35 agents complet
 Companion to [`ORACLE-AUDIT.md`](ORACLE-AUDIT.md), which documents what the Python oracle in
 `python-port/` actually does — including where it is wrong.
 
+> ⚠ **This is a research snapshot dated 2026-08-19, not a live document.** Its version numbers
+> (Cyrius 6.5.29, AgnosAI 2.0.1→2.0.2) were current when it was written and are deliberately left
+> as written so the record stands. Its §7 decisions remain binding; §5's capability findings remain
+> accurate.
+>
+> For where the port actually is, start at
+> [`docs/development/handoff.md`](docs/development/handoff.md), then
+> [`state.md`](docs/development/state.md) and [`roadmap.md`](docs/development/roadmap.md).
+
 ---
 
 ## 0. Headline
@@ -268,7 +277,7 @@ From `cyrius/CLAUDE.md` and `agnosai/CLAUDE.md` — these constrain *how* the wo
 
 | Repo | Change | Version |
 |---|---|---|
-| `agnosai` | `[lib]` stanza + `cyrius distlib` → `dist/agnosai.cyr` (§3). Fix the hardcoded `AGNOSAI_VERSION = "1.1.0"` at `src/server/routes/mod.cyr:44` while there | 2.0.1 → **2.0.2** |
+| `agnosai` | ✅ **done.** `[lib]` stanza + `cyrius distlib` → `dist/agnosai.cyr` (§3); the hardcoded `AGNOSAI_VERSION` fixed | 2.0.1 → 2.0.2, now consumed at **2.0.4** |
 | `yantra` | `Page.captureScreenshot` on the CDP surface (D4) | TBD |
 
 ### 7.2 Resolved 2026-08-20

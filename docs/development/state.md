@@ -3,6 +3,10 @@
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
 > Last refreshed: 2026-08-21.
+>
+> **Picking this port up?** Start at [`handoff.md`](handoff.md) — orientation,
+> the build procedure that avoids an unreproducible lock, and what M2 must do.
+> This file is the numbers.
 
 ## Version
 
