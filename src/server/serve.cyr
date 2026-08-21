@@ -262,6 +262,13 @@ fn agnostic_serve_mount(cfg): i64 {
     # `/ready` answers 503 and an orchestrator holds traffic off it. `/health`
     # stays 200 — the process is alive, and restarting it would not help. That
     # split is ADR 0001.
+    agnostic_definitions_init();
+    # ⚠ Disclosure, not type — the same device M2 uses for placeholder mode. No
+    # property of a stored definition distinguishes durable from not, so an
+    # operator is told once at startup and every response carries
+    # `"storage":"memory"`. M4 replaces the store and flips both.
+    sakshi_warn("agent definition store is memory-resident; definitions do not survive restart", 77);
+
     agnostic_ready_register(str_from("engine"), &agnostic_engine_is_ready);
 
     # ⚠ **The two size ceilings interact, and the interaction leaks.** A request

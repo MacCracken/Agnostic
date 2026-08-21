@@ -1,0 +1,219 @@
+# agnostic/routes/definitions — agent definition CRUD.
+#
+# ## The status contract
+#
+# | Route | Codes |
+# |---|---|
+# | `GET /api/v1/agents/definitions` | 200 |
+# | `POST /api/v1/agents/definitions` | **201** · 400 · 409 · 422 · **507** |
+# | `GET /api/v1/agents/definitions/{key}` | 200 · 404 · 422 |
+# | `PUT /api/v1/agents/definitions/{key}` | 200 · 400 · 404 · 422 |
+# | `DELETE /api/v1/agents/definitions/{key}` | 200 · 404 · 422 |
+#
+# **201, not 202** — and the contrast with `POST /api/v1/crews` is the point. A
+# crew is *accepted work that is not finished*, so 202 and a poll. A definition
+# **is** complete when the call returns.
+#
+# **409 on `POST` to an existing key; 404 on `PUT` to an absent one. No upsert.**
+# An upsert makes a typo'd key silently create a second definition and leaves the
+# caller unable to tell which happened.
+#
+# **507, not 503, when the store is full.** In M2's vocabulary 503 means *the
+# engine cannot act*; reusing it would make two different faults indistinguishable
+# to a retry policy. One is retriable after a `DELETE`, the other is not.
+#
+# **200 on `DELETE`, not 204.** `_agnostic_serve_send` always writes a
+# Content-Type and a body, so a genuine 204 needs a no-body arm in `serve.cyr`.
+# Inventing a response mode for one route is not worth it, and 200-with-a-body
+# matches `POST /api/v1/crews/{id}/cancel`.
+#
+# ## ⚠ Every response says where the definition lives
+#
+# `"storage": "memory"` is on all five. The store is process-lifetime and a
+# restart empties it, and no property of the record can distinguish durable from
+# not — so it is disclosed rather than inferred, the same way M2 discloses
+# placeholder mode. **M4 flips the literal to `"patra"` and nothing else on the
+# wire moves.**
+#
+# This module reaches the store only through `agnostic_definitions_*`, never
+# through `_agnostic_definitions`, so M4 can replace the storage without touching
+# a handler.
+
+var AGNOSTIC_JK_DEFINITION  = str_from("definition");
+var AGNOSTIC_JK_DEFINITIONS = str_from("definitions");
+var AGNOSTIC_JK_STORAGE     = str_from("storage");
+var AGNOSTIC_JV_MEMORY      = str_from("memory");
+var AGNOSTIC_JV_DELETED     = str_from("deleted");
+
+# Where definitions live. One literal, so M4 has one thing to change.
+fn agnostic_definitions_storage(): i64 {
+    return AGNOSTIC_JV_MEMORY;
+}
+
+# Stamp `storage` onto a response body.
+fn _agnostic_def_stamp(a, obj): i64 {
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STORAGE,
+      bayan_json_v_str_new_a(a, agnostic_definitions_storage()));
+    return obj;
+}
+
+# The body every single-definition response carries: the record, the fields that
+# were retained but shape nothing, and where it lives.
+fn _agnostic_def_body_a(a, d): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DEFINITION,
+      agnostic_agent_def_to_value_a(a, d));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_UNFORWARDED,
+      agnostic_agent_def_unforwarded_a(a, d));
+    return _agnostic_def_stamp(a, obj);
+}
+
+# The 422 a malformed key earns.
+#
+# ⚠ 422, not 404 — the caller's key is not a legal key, which is a different fact
+# from no definition having that name. Mirrors `_agnostic_crew_bad_id_a`.
+fn _agnostic_def_bad_key_a(a): i64 {
+    return agnostic_response_error_a(a, AGNOSTIC_HTTP_UNPROCESSABLE,
+      str_from_a(a, "key must match [a-z0-9][a-z0-9-]* and be at most 100 characters"));
+}
+
+# The 404 an absent key earns.
+fn _agnostic_def_not_found_a(a): i64 {
+    return agnostic_response_error_a(a, HTTP_NOT_FOUND,
+      str_from_a(a, "agent definition not found"));
+}
+
+# Decode a request body into a definition, or answer with the rejection.
+# Returns the definition, storing a ready-made error response through `out_resp`.
+fn _agnostic_def_decode(a, body: Str, out_resp): i64 {
+    store64(out_resp, 0);
+    var v = agnostic_decode_a(a, body);
+    if (v == 0) {
+        store64(out_resp, agnostic_response_error_a(a, HTTP_BAD_REQUEST,
+            str_from_a(a, "malformed JSON body")));
+        return 0;
+    }
+    var reject: i64[1];
+    store64(&reject, 0);
+    # -1: not inside an `agents` array, so messages go out unprefixed.
+    var d = agnostic_agent_def_decode_a(a, v, 0 - 1, &reject);
+    if (d == 0) {
+        var rj = load64(&reject);
+        store64(out_resp, agnostic_response_error_a(a, agnostic_reject_status(rj),
+            agnostic_reject_message(rj)));
+        return 0;
+    }
+    return d;
+}
+
+# `GET /api/v1/agents/definitions` — every stored definition, as summaries.
+fn agnostic_route_definitions_list_a(a): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+    var arr = bayan_json_v_arr_new_a(a);
+    if (arr == 0) { return 0; }
+
+    var keys = agnostic_definitions_keys();
+    var shown = 0;
+    var i = 0;
+    while (i < vec_len(keys)) {
+        # A key removed between the snapshot and this fetch answers 0 and is
+        # skipped — see `agnostic_definitions_keys`. `total` counts what is in
+        # the array, never what the snapshot happened to hold.
+        var d = agnostic_definitions_get(vec_get(keys, i));
+        if (d != 0) {
+            bayan_json_v_arr_push_a(a, arr, agnostic_agent_def_summary_a(a, d));
+            shown = shown + 1;
+        }
+        i = i + 1;
+    }
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DEFINITIONS, arr);
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_TOTAL, bayan_json_v_int_new_a(a, shown));
+    return agnostic_response_json_a(a, HTTP_OK, _agnostic_def_stamp(a, obj));
+}
+
+# `POST /api/v1/agents/definitions` — create one. 201, or 409 if the key is taken.
+fn agnostic_route_definition_create_a(a, body: Str): i64 {
+    var resp: i64[1];
+    var d = _agnostic_def_decode(a, body, &resp);
+    if (d == 0) { return load64(&resp); }
+
+    var key = agnostic_agent_def_key(d);
+    var rc = agnostic_definitions_create(key, d);
+
+    if (rc == AGNOSTIC_DEF_EXISTS) {
+        return agnostic_response_error_a(a, AGNOSTIC_HTTP_CONFLICT,
+          str_from_a(a, "an agent definition with this key already exists; use PUT to replace it"));
+    }
+    if (rc == AGNOSTIC_DEF_FULL) {
+        # ⚠ 507, and the message says what to do about it. The store never
+        # evicts, so this is a real ceiling rather than a transient — a retry
+        # without a delete will fail identically.
+        return agnostic_response_error_a(a, AGNOSTIC_HTTP_INSUFFICIENT_STORAGE,
+          str_from_a(a, "the definition store is full; delete a definition before creating another"));
+    }
+    if (rc != AGNOSTIC_DEF_OK) {
+        return agnostic_response_error_a(a, HTTP_INTERNAL,
+          str_from_a(a, "could not store the agent definition"));
+    }
+
+    var b = _agnostic_def_body_a(a, d);
+    if (b == 0) { return 0; }
+    return agnostic_response_json_a(a, AGNOSTIC_HTTP_CREATED, b);
+}
+
+# `GET /api/v1/agents/definitions/{key}` — one definition.
+fn agnostic_route_definition_get_a(a, key: Str): i64 {
+    if (agnostic_key_is_valid(key) == 0) { return _agnostic_def_bad_key_a(a); }
+    var d = agnostic_definitions_get(key);
+    if (d == 0) { return _agnostic_def_not_found_a(a); }
+    var b = _agnostic_def_body_a(a, d);
+    if (b == 0) { return 0; }
+    return agnostic_response_json_a(a, HTTP_OK, b);
+}
+
+# `PUT /api/v1/agents/definitions/{key}` — replace one. 404 if absent; never creates.
+#
+# ⚠ **The path key wins, and a body that disagrees is a 400.** Silently
+# preferring one over the other would let `PUT /…/alpha` with `{"key":"beta"}`
+# write to a name the caller did not address — and whichever side lost, the
+# caller could not tell from the response.
+fn agnostic_route_definition_replace_a(a, key: Str, body: Str): i64 {
+    if (agnostic_key_is_valid(key) == 0) { return _agnostic_def_bad_key_a(a); }
+
+    var resp: i64[1];
+    var d = _agnostic_def_decode(a, body, &resp);
+    if (d == 0) { return load64(&resp); }
+
+    if (str_eq(agnostic_agent_def_key(d), key) == 0) {
+        return agnostic_response_error_a(a, HTTP_BAD_REQUEST,
+          str_from_a(a, "the 'key' in the body must match the key in the path"));
+    }
+
+    var rc = agnostic_definitions_replace(key, d);
+    if (rc == AGNOSTIC_DEF_MISSING) { return _agnostic_def_not_found_a(a); }
+    if (rc != AGNOSTIC_DEF_OK) {
+        return agnostic_response_error_a(a, HTTP_INTERNAL,
+          str_from_a(a, "could not store the agent definition"));
+    }
+
+    var b = _agnostic_def_body_a(a, d);
+    if (b == 0) { return 0; }
+    return agnostic_response_json_a(a, HTTP_OK, b);
+}
+
+# `DELETE /api/v1/agents/definitions/{key}` — remove one.
+fn agnostic_route_definition_delete_a(a, key: Str): i64 {
+    if (agnostic_key_is_valid(key) == 0) { return _agnostic_def_bad_key_a(a); }
+    if (agnostic_definitions_remove(key) != AGNOSTIC_DEF_OK) {
+        return _agnostic_def_not_found_a(a);
+    }
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_KEY, bayan_json_v_str_new_a(a, key));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS,
+      bayan_json_v_str_new_a(a, AGNOSTIC_JV_DELETED));
+    return agnostic_response_json_a(a, HTTP_OK, _agnostic_def_stamp(a, obj));
+}

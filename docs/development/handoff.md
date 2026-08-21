@@ -2,7 +2,7 @@
 
 > **Start here.** This is the orientation document for picking up the Python → Cyrius port.
 > It is deliberately short and links outward rather than restating.
-> Last refreshed: **2026-08-21**, after M2.
+> Last refreshed: **2026-08-21**, after M3.
 
 Read in this order:
 
@@ -12,29 +12,28 @@ Read in this order:
 | [`state.md`](state.md) | Live numbers — versions, surface area, dep set, gates |
 | [`roadmap.md`](roadmap.md) | M0–M9 sequencing and per-milestone gates |
 | [`../../CYRIUS-PORT-BRIEF.md`](../../CYRIUS-PORT-BRIEF.md) | Research snapshot (2026-08-19): language notes, dep stack, **§7 decisions — binding** |
-| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 86 verified defects in the Python oracle. §3 gated M2; **§2.2 gates M3** |
+| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 86 verified defects in the Python oracle. §3 gated M2, §2.2 gated M3; **§3.15 is M6's problem** |
 | [`../adr/`](../adr/) | Two ADRs: health/readiness split, daimon Tier 1 deferral |
 
 ---
 
 ## 1. Where the port is
 
-**M0, M1 and M2 are complete. M3 — definitions, presets, agents — is next.**
+**M0 through M3 are complete. M4 — persistence and the audit chain — is next.**
 
-Agnostic runs crews today. On top of M1's HTTP foundation (pooled `sandhi` server, `:name` routing,
-per-request arena, strict env config, JSON logging with thread-local trace ids, `/health` +
-`/ready`, signal-driven graceful shutdown) it now submits crews to AgnosAI in-process and answers
-**202-then-poll**: `POST /api/v1/crews`, `GET /api/v1/crews/{id}`, `.../cancel`, `.../events`.
-17 source files, 4,148 lines, 269 top-level definitions.
-**12 test suites, 496 assertions, 0 failed.**
+Agnostic runs crews and serves its own catalogue. On M1's HTTP foundation it
+submits crews to AgnosAI in-process with **202-then-poll**, serves the canonical
+**18-preset library**, and offers **agent-definition CRUD**. 25 source files,
+6,502 lines, 396 top-level definitions.
+**14 test suites, 702 assertions, 0 failed.**
 
-Version is **0.1.0** and stays there. Per decision #4 the whole port ships as **one release,
-1.0.0** — no intermediate tags, so `main` stays green continuously rather than being stabilised
-once per milestone. Agnostic was never SemVer before (the Python line was CalVer, `2026.3.18`);
-1.0.0 is the first.
+Version is **0.1.0** and stays there. Per decision #4 the whole port ships as
+**one release, 1.0.0** — no intermediate tags, so `main` stays green continuously
+rather than being stabilised once per milestone.
 
-`[deps.agnosai]` is pinned at **2.0.4**, linked in-process, and now genuinely exercised — the crew
-surface calls `agnosai_orchestrator_submit_crew`, reads the registry, and drains the event bus.
+`[deps.agnosai]` is pinned at **2.0.4** and genuinely exercised: the crew surface
+submits, polls the registry and drains the event bus; the definition surface
+builds engine agent records through its setters.
 
 ---
 
@@ -73,54 +72,64 @@ sh scripts/check-clean.sh && sh scripts/check-symbols.sh && cyrius test
 
 ---
 
-## 3. What M2 established, and what M3 inherits
+## 3. What M2 and M3 established, and what M4 inherits
 
-M2's gate was `ORACLE-AUDIT.md` §3 — four high-severity defects, three sharing one root cause: a
-result type too thin to branch on. All four are designed out, each by a mechanism rather than by
-care, and each pinned by a suite:
+**M2's gate was `ORACLE-AUDIT.md` §3** — four defects, all designed out by
+mechanism and each pinned by a suite: the vacuous-success demotion in
+`outcome.cyr`, engine-assigned ids only, one task model, and the terminal latch
+in `ledger.cyr`.
 
-| Defect | Mechanism | Pinned by |
-|---|---|---|
-| §3.1 failed reported as completed | `_agnostic_outcome_normalise` demotes COMPLETED-with-no-results to FAILED before the record exists | `tests/outcome.tcyr` |
-| §3.2 cancel addressing an unknown id | every id originates in `agnosai_crew_new`; a refusal is returned, not discarded | `tests/crews_route.tcyr` |
-| §3.3 two task models | `tasks` required, no fallback path, an unlisted key is a 422 naming it | `tests/crew_request.tcyr` |
-| §3.4 terminal overwritten | `agnostic_ledger_latch` refuses to write over a terminal status | `tests/ledger.tcyr` |
+**M3's gate was §2.2** — fourteen fields dropped in translation. It grew a third
+disposition in the doing, and that is the part worth carrying:
 
-⚠ **The lesson generalises, and M3 inherits it: an empty result set is not success.** `all()` over an
-empty collection is vacuously true in Python — and `agnosai_crew_runner_run` makes the identical
-mistake in Cyrius, setting COMPLETED and only downgrading inside a loop over `results` that does not
-execute when the set is empty. Assume any new aggregate has the same hole until you have looked.
+> A field is **FORWARDED** when the engine has a slot that acts on it, **REFUSED**
+> with a 422 naming the missing capability when it does not, and **RETAINED** when
+> Agnostic's own content carries it but the engine cannot use it — kept,
+> round-tripped, and **named in `unforwarded`**. Three, all visible on the wire.
+> There is no fourth.
 
-**M3 is definitions, presets and agents**, and its gate is field forwarding: every field either
-forwarded or explicitly rejected, never silently dropped. That pattern is already built and under
-test — `src/engine/request.cyr` is the worked example. Extend it rather than re-inventing it.
+⚠ **Two lessons generalise past their milestone:**
 
-⚠ **`gpu_strict` is the field to understand before touching agent definitions.** It is **not**
-`gpu_required`: the oracle declares both (`agents/base.py:61-62`) and hard-fails only on
-`gpu_required AND gpu_strict` (`config/gpu_scheduler.py:196`) — `required` asks for a GPU, `strict`
-says fail rather than silently fall back to CPU. The Cyrius engine cannot express strictness at all:
-zero occurrences in `lib/agnosai.cyr`, and `agnosai_agent_with_gpu` takes no such parameter. M2
-therefore **refuses** it, with a message naming the missing capability rather than reading like a
-typo. Do not "fix" this by mapping it onto `gpu_required` — that reinstates the exact silent CPU
-fallback `ORACLE-AUDIT.md` §3.11 records.
+- **An empty result set is not success.** `all()` over an empty collection is
+  vacuously true in Python, and `agnosai_crew_runner_run` makes the identical
+  mistake in Cyrius. Assume any new aggregate has the same hole until you look.
+- **An unspecified value must not acquire a concrete one.** M3 shipped a bug
+  where `gpu_required` alone overwrote the engine's "no floor" sentinel with 0,
+  putting a value on the wire the caller never sent. Found by live testing, not
+  by the suite — the same class of defect as a dropped field, in the other
+  direction.
 
-⚠ **Verify the oracle's 18 presets are viable before porting them.** A preset naming a tool the
-Cyrius registry cannot resolve fails **silently** — the crew assembles empty rather than erroring,
-which is §3.1's shape in different clothes. Agnostic's preset library is canonical (see §4).
+**M4 is persistence and the audit chain**, and two seams were built for it:
 
-### Three things M2 leaves open, deliberately
+- `agnostic_definitions_*` — nine functions and one storage literal.
+  `src/routes/definitions.cyr` touches the store only through them, so M4
+  reimplements against `patra` and changes no handler. `"storage":"memory"`
+  becomes `"patra"` and nothing else on the wire moves.
+- `src/engine/ledger.cyr` — the same shape for crew outcomes, which are also
+  memory-resident and capped today.
 
-- **Placeholder mode is indistinguishable from real work by results alone.** With no
-  `AGNOSTIC_LLM_URL`, `agnosai_execute_task` takes its `client == 0` arm and echoes the task
-  description back as output with status COMPLETED. Closed by *disclosure* — `engine_mode` on every
-  submit and poll response, plus a WARN at mount — not by type, because no property of a result type
-  can separate them. **Any new surface reporting crew output must disclose it too.**
-- **The crew routes are unauthenticated.** `agnostic_route_needs_auth` answers 1 for all four, but
-  the dispatch ladder's auth rung is still a comment until M5. The loopback default bind is the only
-  thing in front of them.
-- **Results are memory-resident and capped** — 1,024 crews, 256 progress events each. Past that a
-  poll answers `unknown`, never a wrong answer. Durable results are M4's, and
-  `src/engine/ledger.cyr` is the seam they land on.
+⚠ **Agent keys are `[a-z0-9][a-z0-9-]*`, at most 100 bytes, and that is
+load-bearing for M4.** A key that cannot contain `/` or `.` makes an on-disk path
+built from one safe **by construction** rather than by validation — which is the
+cheap version of M4's "path-traversal validation on every externally-derived
+path" bullet. Do not widen the character set.
+
+⚠ **`patra` constraints to design around, not discover:** one index per table,
+per-write fsync by default, and single-writer. All three are in the M5 section of
+the roadmap and they apply to M4's tables just as much.
+
+### Carried forward, still open
+
+- **Placeholder mode is indistinguishable from real work by results alone** —
+  closed by disclosure (`engine_mode` on every crew response, a WARN at mount),
+  not by type. Any new surface reporting crew output must disclose it too.
+- **Every route past `/health` and `/ready` is unauthenticated.**
+  `agnostic_route_needs_auth` answers 1 for all eleven, but the dispatch ladder's
+  auth rung is still a comment until M5. The loopback default bind is the only
+  thing in front of them, and M3 widened the surface considerably.
+- **§3.15 is M6's.** The 38-name tool manifest is pinned by `tests/presets.tcyr`;
+  two of the names have no implementation anywhere. A registry miss must be an
+  **error**, never a silently smaller agent.
 
 ## 4. Settled — do not re-open
 
@@ -178,6 +187,20 @@ then, against a real requirement. Out of scope for v1.0.
   `_agnosai_orch_evict_locked` drops **every** finished crew once the registry holds 1000, so a
   completed crew can 404. Both are worked around in `src/engine/`, not upstream; read those module
   headers before changing either.
+- **A Cyrius line continuation KEEPS the newline.** `"abc\<newline>def"` is 7
+  bytes, not 6 — verified with a probe. So a generated string literal must never
+  break inside a JSON string: the newline would be spliced into the value, and a
+  raw newline inside a JSON string is illegal JSON. There is no C-style
+  adjacent-literal concatenation to split with either, and `#skip-lint` is scoped
+  to a **line**, so it cannot be placed on an offending line that sits inside a
+  literal. `scripts/gen-presets.sh` breaks only between JSON tokens for this
+  reason, and `check-clean.sh` skips lint for files marked `GENERATED FILE`.
+- **`src/app.cyr` holds the include order; add new modules there.** Every suite
+  reaching the router includes it. Putting the order in `main.cyr` meant a new
+  route module broke all of them with "undefined function" — three times before
+  the file existed. And a key used by two modules belongs in
+  `src/http/status.cyr`, which is included first: a top-level `var` initialiser
+  reading a global declared later silently evaluates to 0.
 - **`CYRIUS_PKG_VERSION` resolves only in the entry file**, not in `include`d files — filed upstream
   (`2026-08-20-pkgver-not-visible-in-included-files.md`, open at 6.5.33). Workaround in place: read
   it in `main.cyr` and hand it to the module via a setter.

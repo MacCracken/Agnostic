@@ -114,10 +114,21 @@ Agnostic rather than upstream:
 `max_concurrent_tasks` — it is stored, serialised, and enforced by nothing. `max_duration_secs` is
 genuinely read, so `AGNOSTIC_CREW_TIMEOUT_SECS` stays.
 
-### M3 — Definitions, presets, agents (v0.4.0)
+### M3 — Definitions, presets, agents (v0.4.0) — ✅ 2026-08-21
 
 - Agent definition CRUD; preset listing
 - Every field either forwarded or explicitly rejected — never silently dropped
+
+**121 new assertions across 2 suites** (702 total across 14), 0 failed. All three
+gates green. Verified live: 201/409/404/422/507 each on its own path, the twelve
+refusals each answering by name, and the preset library served end to end.
+
+⚠ **The field-forwarding gate grew a third disposition.** "Forwarded or rejected"
+turned out to be too few: `focus` and `allow_delegation` are carried by the
+canonical preset library, so dropping them would lose Agnostic's own content —
+and the engine has no slot for either, so forwarding is impossible. They are
+**retained** and **named** in an `unforwarded` array on every response. Three
+dispositions, all visible on the wire, no fourth.
   (`ORACLE-AUDIT.md` §2.2 lists six fields the oracle dropped, `gpu_strict` being the sharp one:
   a hard-fail GPU requirement became a silent CPU fallback)
 

@@ -231,10 +231,101 @@ fn test_preset_dispatch() {
       "and a write is 405");
 }
 
+fn test_definition_routes() {
+    test_group("router/definitions");
+
+    var a = arena_allocator(65536);
+
+    var l = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/agents/definitions"));
+    assert_eq(agnostic_route_match_id(l), AGNOSTIC_ROUTE_DEF_LIST, "GET list");
+    var c = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/agents/definitions"));
+    assert_eq(agnostic_route_match_id(c), AGNOSTIC_ROUTE_DEF_CREATE, "POST create");
+
+    var g = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/agents/definitions/qa-1"));
+    assert_eq(agnostic_route_match_id(g), AGNOSTIC_ROUTE_DEF_GET, "GET one");
+    assert_eq(str_eq_cstr(agnostic_route_match_param(g), "qa-1"), 1, "the key is captured");
+    var p = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_PUT, str_from("/api/v1/agents/definitions/qa-1"));
+    assert_eq(agnostic_route_match_id(p), AGNOSTIC_ROUTE_DEF_REPLACE, "PUT replace");
+    var dl = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_DELETE, str_from("/api/v1/agents/definitions/qa-1"));
+    assert_eq(agnostic_route_match_id(dl), AGNOSTIC_ROUTE_DEF_DELETE, "DELETE one");
+
+    # ⚠ The collection and the item cannot swallow each other: the matcher
+    # requires an exact segment count, 4 against 5.
+    assert_eq(agnostic_route_match_id(agnostic_route_resolve_a(a, AGNOSTIC_METHOD_PUT,
+          str_from("/api/v1/agents/definitions"))), AGNOSTIC_ROUTE_NONE, "PUT on the collection does not resolve");
+
+    # `/api/v1/agents` alone is deliberately not a route — an "agents" collection
+    # would mean running agents, which are not addressable objects.
+    var bare = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/agents"));
+    assert_eq(agnostic_route_match_id(bare), AGNOSTIC_ROUTE_NONE, "/api/v1/agents is not a route");
+    assert_eq(agnostic_route_match_method_mismatch(bare), 0, "and 404s rather than 405s");
+
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_DEF_CREATE), 1, "create needs auth");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_DEF_DELETE), 1, "delete needs auth");
+}
+
+fn test_definition_dispatch() {
+    test_group("router/definition-dispatch");
+
+    agnostic_definitions_reset();
+    var a = arena_allocator(262144);
+    var body = "{\"key\":\"qa-1\",\"role\":\"tester\",\"goal\":\"find bugs\",\"focus\":\"orchestration\"}";
+
+    var created = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
+      str_from("/api/v1/agents/definitions"), str_from(body), 1048576);
+    assert_eq(agnostic_response_status(created), AGNOSTIC_HTTP_CREATED,
+      "creating a definition is 201, not 202 — it is complete when the call returns");
+
+    var cb = agnostic_response_body(created);
+    assert_eq(str_eq_cstr(agnostic_req_str(cb, AGNOSTIC_JK_STORAGE), "memory"), 1,
+      "and every response says where it lives");
+    assert_eq(bayan_json_v_arr_len(bayan_json_v_obj_get_by_str(cb, AGNOSTIC_JK_UNFORWARDED)), 1,
+      "naming the field that was retained but shapes nothing");
+
+    # 409, not an upsert.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
+          str_from("/api/v1/agents/definitions"), str_from(body), 1048576)), AGNOSTIC_HTTP_CONFLICT,
+      "creating the same key twice is 409");
+
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576)), HTTP_OK, "GET one is 200");
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/agents/definitions/absent"), str_from(""), 1048576)), HTTP_NOT_FOUND,
+      "an absent key is 404");
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/agents/definitions/NOT_A_KEY"), str_from(""), 1048576)),
+      AGNOSTIC_HTTP_UNPROCESSABLE, "a malformed key is 422, not 404");
+
+    # PUT to an absent key never creates.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_PUT,
+          str_from("/api/v1/agents/definitions/absent"),
+          str_from("{\"key\":\"absent\",\"role\":\"r\",\"goal\":\"g\"}"), 1048576)),
+      HTTP_NOT_FOUND, "PUT to an absent key is 404, never a quiet create");
+
+    # A body whose key disagrees with the path is a 400, not a silent preference.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_PUT,
+          str_from("/api/v1/agents/definitions/qa-1"),
+          str_from("{\"key\":\"other\",\"role\":\"r\",\"goal\":\"g\"}"), 1048576)),
+      HTTP_BAD_REQUEST, "a body key that disagrees with the path is 400");
+
+    var listed = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+      str_from("/api/v1/agents/definitions"), str_from(""), 1048576);
+    assert_eq(bayan_json_v_int(bayan_json_v_obj_get_by_str(
+          agnostic_response_body(listed), AGNOSTIC_JK_TOTAL)), 1, "the listing counts what it returned");
+
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_DELETE,
+          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576)), HTTP_OK, "DELETE is 200");
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_DELETE,
+          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576)), HTTP_NOT_FOUND,
+      "and deleting twice is 404");
+}
+
 fn main() {
     alloc_init();
     thread_local_init();
     test_method_parse();
+    test_definition_routes();
+    test_definition_dispatch();
     test_preset_routes();
     test_preset_dispatch();
     test_path_matching();

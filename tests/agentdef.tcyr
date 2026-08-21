@@ -1,0 +1,343 @@
+# agnostic/engine/agentdef + definitions — one agent model, three dispositions.
+#
+# ORACLE-AUDIT.md §2.2 records fourteen fields the oracle dropped in translation.
+# This suite asserts that none of them can be dropped here: every one is either
+# forwarded to an engine setter, retained and named in `unforwarded`, or refused
+# with a 422 that says which capability is missing.
+include "src/app.cyr"
+
+fn _t_has(s: Str, needle): i64 {
+    var n = str_len(s);
+    var d = str_data(s);
+    var m = 0;
+    while ((load8(needle + m) & 0xFF) != 0) { m = m + 1; }
+    if (m > n) { return 0; }
+    var i = 0;
+    while (i <= n - m) {
+        var j = 0;
+        while (j < m) {
+            if ((load8(d + i + j) & 0xFF) != (load8(needle + j) & 0xFF)) { break; }
+            j = j + 1;
+        }
+        if (j == m) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _t_decode(a, body, out) {
+    store64(out, 0);
+    var v = agnostic_decode_a(a, str_from(body));
+    if (v == 0) { return 0; }
+    return agnostic_agent_def_decode_a(a, v, 0 - 1, out);
+}
+
+var _T_MIN = "{\"key\":\"qa-1\",\"role\":\"tester\",\"goal\":\"find bugs\"}";
+
+fn test_minimum_decodes() {
+    test_group("agentdef/valid");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var d = _t_decode(a, _T_MIN, &rj);
+
+    assert_neq(d, 0, "a minimal definition decodes");
+    assert_eq(load64(&rj), 0, "with no rejection");
+    assert_eq(str_eq_cstr(agnostic_agent_def_key(d), "qa-1"), 1, "key read");
+
+    var e = agnostic_agent_def_engine(d);
+    assert_neq(e, 0, "wrapping an engine record");
+    assert_eq(str_eq_cstr(agnosai_agent_role(e), "tester"), 1, "role forwarded");
+    assert_eq(str_eq_cstr(agnosai_agent_goal(e), "find bugs"), 1, "goal forwarded");
+
+    # The engine defaults `name` to the key when none is given.
+    assert_eq(str_eq_cstr(agnosai_agent_name(e), "qa-1"), 1, "name defaults to key");
+    assert_eq(agnostic_agent_def_unforwarded_count(d), 0, "nothing was retained-but-inert");
+}
+
+fn test_every_forwarded_field_arrives() {
+    test_group("agentdef/forward");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var d = _t_decode(a,
+      "{\"key\":\"qa-1\",\"role\":\"r\",\"goal\":\"g\",\"name\":\"Ann\",\"backstory\":\"veteran\",\"domain\":\"quality\",\"complexity\":\"high\",\"llm_model\":\"m1\",\"tools\":[\"RegressionTestingTool\",\"LoadTestingTool\"],\"gpu_required\":true,\"gpu_preferred\":true,\"gpu_memory_min_mb\":8192}",
+      &rj);
+    assert_neq(d, 0, "every forwarded field is accepted");
+
+    var e = agnostic_agent_def_engine(d);
+    assert_eq(str_eq_cstr(agnosai_agent_name(e), "Ann"), 1, "name");
+    assert_eq(str_eq_cstr(agnosai_agent_backstory(e), "veteran"), 1, "backstory");
+    assert_eq(str_eq_cstr(agnosai_agent_domain(e), "quality"), 1, "domain");
+    assert_eq(str_eq_cstr(agnosai_agent_complexity(e), "high"), 1, "complexity");
+    assert_eq(str_eq_cstr(agnosai_agent_llm_model(e), "m1"), 1, "llm_model");
+    assert_eq(vec_len(agnosai_agent_tools(e)), 2, "tools");
+    assert_eq(agnosai_agent_gpu_required(e), 1, "gpu_required");
+    assert_eq(agnosai_agent_gpu_preferred(e), 1, "gpu_preferred");
+    assert_eq(agnosai_agent_gpu_memory_min_mb(e), 8192, "gpu_memory_min_mb");
+}
+
+fn test_retained_fields_round_trip() {
+    test_group("agentdef/retain");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # ⭐ THE THIRD DISPOSITION.
+    #
+    # All 76 preset agents carry `focus`; 18 carry `allow_delegation`. Neither
+    # reaches the engine — `_agnosai_crew_build_system_prompt` has no focus slot
+    # and `allow_delegation` appears zero times in lib/agnosai.cyr. Dropping them
+    # would lose Agnostic's own canonical content; forwarding them is impossible.
+    # So they are RETAINED, round-tripped verbatim, and NAMED.
+    var d = _t_decode(a,
+      "{\"key\":\"qa-1\",\"role\":\"r\",\"goal\":\"g\",\"focus\":\"orchestration\",\"allow_delegation\":true}",
+      &rj);
+    assert_neq(d, 0, "both retained fields are accepted");
+    assert_eq(str_eq_cstr(agnostic_agent_def_focus(d), "orchestration"), 1, "focus is kept");
+    assert_eq(agnostic_agent_def_delegation(d), 1, "allow_delegation is kept");
+    assert_eq(agnostic_agent_def_unforwarded_count(d), 2, "and both are counted as inert");
+
+    var v = agnostic_agent_def_to_value_a(a, d);
+    assert_eq(str_eq_cstr(agnostic_req_str(v, AGNOSTIC_JK_FOCUS), "orchestration"), 1,
+      "focus round-trips onto the wire");
+
+    var arr = agnostic_agent_def_unforwarded_a(a, d);
+    assert_eq(bayan_json_v_arr_len(arr), 2, "and both are named in `unforwarded`");
+    assert_eq(str_eq_cstr(bayan_json_v_str(bayan_json_v_arr_get(arr, 0)), "focus"), 1, "focus named");
+    assert_eq(str_eq_cstr(bayan_json_v_str(bayan_json_v_arr_get(arr, 1)), "allow_delegation"), 1,
+      "allow_delegation named");
+
+    # ⚠ `false` and "not specified" are different facts. A round-trip that
+    # collapsed them would be losing a field quietly.
+    var f = _t_decode(a, "{\"key\":\"k\",\"role\":\"r\",\"goal\":\"g\",\"allow_delegation\":false}", &rj);
+    assert_eq(agnostic_agent_def_delegation(f), 0, "explicit false is stored as false");
+    assert_eq(agnostic_agent_def_unforwarded_count(f), 1, "and still counts as sent");
+
+    var absent = _t_decode(a, _T_MIN, &rj);
+    assert_eq(agnostic_agent_def_delegation(absent), AGNOSTIC_REQ_UNSET, "absent is UNSET, not false");
+    assert_eq(bayan_json_v_arr_len(agnostic_agent_def_unforwarded_a(a, absent)), 0,
+      "and `unforwarded` is empty — present, but empty");
+}
+
+fn test_refusal_table() {
+    test_group("agentdef/refuse");
+
+    # ⭐ ORACLE-AUDIT.md §2.2's dropped fields, each refused BY NAME.
+    #
+    # The oracle discarded these silently. Each here earns a 422 that says which
+    # capability is missing — because "unknown field" reads as a typo when the
+    # caller has asked for something real that the platform cannot do.
+    assert_neq(agnostic_agent_def_refused_reason(str_from("gpu_strict")), 0, "gpu_strict refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("llm_temperature")), 0, "llm_temperature refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("verbose")), 0, "verbose refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("metadata")), 0, "metadata refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("celery_queue")), 0, "celery_queue refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("redis_prefix")), 0, "redis_prefix refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("tool_instances")), 0, "tool_instances refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("personality")), 0, "personality refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("hardware")), 0, "hardware refused");
+    assert_neq(agnostic_agent_def_refused_reason(str_from("workflow_mode")), 0, "workflow_mode refused");
+
+    # ⚠ `agent_key` is the mistake to expect: the oracle AND the engine both
+    # spell it that way, and Agnostic spells it `key`. The refusal names the
+    # right field rather than reading as a typo.
+    var ak = agnostic_agent_def_refused_reason(str_from("agent_key"));
+    assert_neq(ak, 0, "agent_key refused");
+    assert_eq(_t_has(ak, "use 'key'"), 1, "and points at the field that works");
+
+    assert_eq(agnostic_agent_def_refused_reason(str_from("key")), 0, "a real field is not refused");
+    assert_eq(agnostic_agent_def_refused_reason(str_from("focus")), 0, "nor a retained one");
+    assert_eq(agnostic_agent_def_refused_reason(0), 0, "a null key is not refused");
+}
+
+fn test_refusal_beats_unknown_field() {
+    test_group("agentdef/refuse-order");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # ⚠ The refusal check runs BEFORE the allow-list, so a refused capability
+    # never degrades into the generic message.
+    var d = _t_decode(a,
+      "{\"key\":\"k\",\"role\":\"r\",\"goal\":\"g\",\"gpu_strict\":true}", &rj);
+    assert_eq(d, 0, "refused");
+    assert_eq(agnostic_reject_status(load64(&rj)), AGNOSTIC_HTTP_UNPROCESSABLE, "as 422");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "hard-fail"), 1, "naming the capability");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "unknown field"), 0,
+      "and NOT as a generic unknown field");
+
+    # A genuinely unknown key still gets the generic message.
+    var u = _t_decode(a, "{\"key\":\"k\",\"role\":\"r\",\"goal\":\"g\",\"nonsense\":1}", &rj);
+    assert_eq(u, 0, "an unknown field is refused too");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "nonsense"), 1, "named");
+
+    # On the standalone surface the message carries no `agents[N]:` prefix —
+    # one decoder, two surfaces, and the caller is told where they are.
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "agents["), 0,
+      "and is unprefixed off the crew surface");
+}
+
+fn test_required_and_key_syntax() {
+    test_group("agentdef/required");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    assert_eq(_t_decode(a, "{\"role\":\"r\",\"goal\":\"g\"}", &rj), 0, "'key' is required");
+    assert_eq(_t_decode(a, "{\"key\":\"k\",\"goal\":\"g\"}", &rj), 0, "'role' is required");
+    assert_eq(_t_decode(a, "{\"key\":\"k\",\"role\":\"r\"}", &rj), 0, "'goal' is required");
+    assert_eq(_t_decode(a, "[1,2]", &rj), 0, "a non-object is refused");
+
+    # ⚠ The key syntax is what makes M4's on-disk path safe BY CONSTRUCTION —
+    # a key that cannot contain `/` or `.` has nothing to traverse with.
+    assert_eq(agnostic_key_is_valid(str_from("qa-manager")), 1, "a normal key");
+    assert_eq(agnostic_key_is_valid(str_from("a1")), 1, "digits are fine");
+    assert_eq(agnostic_key_is_valid(str_from("")), 0, "empty is not");
+    assert_eq(agnostic_key_is_valid(str_from("-lead")), 0, "cannot start with a dash");
+    assert_eq(agnostic_key_is_valid(str_from("QA")), 0, "uppercase is not");
+    assert_eq(agnostic_key_is_valid(str_from("qa manager")), 0, "spaces are not");
+    assert_eq(agnostic_key_is_valid(str_from("../etc/passwd")), 0, "and neither is a traversal");
+    assert_eq(agnostic_key_is_valid(str_from("a/b")), 0, "nor a slash");
+    assert_eq(agnostic_key_is_valid(0), 0, "a null key is invalid, not a fault");
+}
+
+fn test_wire_form_is_ours() {
+    test_group("agentdef/render");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var d = _t_decode(a, _T_MIN, &rj);
+    var v = agnostic_agent_def_to_value_a(a, d);
+
+    assert_eq(str_eq_cstr(agnostic_req_str(v, AGNOSTIC_JK_KEY), "qa-1"), 1, "emits 'key'");
+
+    # ⚠ NOT the engine's renderer. `agnosai_agent_to_value_a` emits `agent_key`,
+    # `hardware`, and `"personality": null` — three keys our own decoder refuses.
+    assert_eq(bayan_json_v_obj_get_by_str(v, str_from("agent_key")), 0, "never 'agent_key'");
+    assert_eq(bayan_json_v_obj_get_by_str(v, str_from("personality")), 0, "never 'personality'");
+    assert_eq(bayan_json_v_obj_get_by_str(v, str_from("hardware")), 0, "never 'hardware'");
+
+    # ⚠ The engine's unset for gpu_memory_min_mb is AGNOSAI_NO_LIMIT (-1).
+    # Emitting the sentinel would put a negative byte count on the wire that our
+    # own decoder rejects — so it goes out as null.
+    var mm = bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_GPU_MEM);
+    assert_neq(mm, 0, "gpu_memory_min_mb is always present");
+    assert_eq(bayan_json_v_is_null(mm), 1, "as null when unset, never as -1");
+
+    # ⚠ Regression: found live. The three GPU fields share ONE engine setter, so
+    # sending `gpu_required` alone still writes all three — and passing 0 for the
+    # unspecified floor overwrote the engine's `AGNOSAI_NO_LIMIT` with a concrete
+    # 0 MB, which went out as `"gpu_memory_min_mb": 0` for a field the caller
+    # never sent. An unspecified value must not acquire a concrete one.
+    var gpu = _t_decode(a, "{\"key\":\"k\",\"role\":\"r\",\"goal\":\"g\",\"gpu_required\":true}", &rj);
+    assert_eq(agnosai_agent_gpu_memory_min_mb(agnostic_agent_def_engine(gpu)), AGNOSAI_NO_LIMIT,
+      "requesting a GPU without a floor leaves the floor unset");
+    var gv = agnostic_agent_def_to_value_a(a, gpu);
+    assert_eq(bayan_json_v_is_null(bayan_json_v_obj_get_by_str(gv, AGNOSTIC_JK_GPU_MEM)), 1,
+      "and it renders as null, not 0");
+    assert_eq(bayan_json_v_bool(bayan_json_v_obj_get_by_str(gv, AGNOSTIC_JK_GPU_REQ)), 1,
+      "while gpu_required is still true");
+
+    # Absent optionals are omitted, not null.
+    assert_eq(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_BACKSTORY), 0, "absent backstory omitted");
+    assert_eq(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_FOCUS), 0, "absent focus omitted");
+
+    # And a decode of our own render must succeed — a renderer whose output its
+    # own decoder rejects is broken however the bytes look.
+    var round = agnostic_agent_def_decode_a(a, v, 0 - 1, &rj);
+    assert_neq(round, 0, "our own wire form round-trips through our own decoder");
+    assert_eq(str_eq_cstr(agnostic_agent_def_key(round), "qa-1"), 1, "preserving the key");
+}
+
+fn test_store_crud() {
+    test_group("definitions/store");
+
+    agnostic_definitions_reset();
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var d = _t_decode(a, _T_MIN, &rj);
+    var key = agnostic_agent_def_key(d);
+
+    assert_eq(agnostic_definitions_count(), 0, "starts empty");
+    assert_eq(agnostic_definitions_create(key, d), AGNOSTIC_DEF_OK, "create succeeds");
+    assert_eq(agnostic_definitions_count(), 1, "and is stored");
+    assert_eq(agnostic_definitions_get(key), d, "and fetches back");
+
+    # ⚠ NO UPSERT, in either direction. An upsert makes a typo'd key silently
+    # create a second definition with no way to tell which happened.
+    assert_eq(agnostic_definitions_create(key, d), AGNOSTIC_DEF_EXISTS,
+      "creating over an existing key is refused");
+    assert_eq(agnostic_definitions_replace(str_from("nope"), d), AGNOSTIC_DEF_MISSING,
+      "replacing an absent key is refused");
+
+    var d2 = _t_decode(a, "{\"key\":\"qa-1\",\"role\":\"lead\",\"goal\":\"g\"}", &rj);
+    assert_eq(agnostic_definitions_replace(key, d2), AGNOSTIC_DEF_OK, "replace succeeds");
+    assert_eq(str_eq_cstr(agnosai_agent_role(agnostic_agent_def_engine(
+            agnostic_definitions_get(key))), "lead"), 1, "and the new record is what answers");
+    assert_eq(agnostic_definitions_count(), 1, "without growing the store");
+
+    assert_eq(vec_len(agnostic_definitions_keys()), 1, "the key snapshot has one entry");
+
+    assert_eq(agnostic_definitions_remove(key), AGNOSTIC_DEF_OK, "remove succeeds");
+    assert_eq(agnostic_definitions_count(), 0, "and the store is empty");
+    assert_eq(agnostic_definitions_get(key), 0, "and the key stops answering");
+    assert_eq(agnostic_definitions_remove(key), AGNOSTIC_DEF_MISSING, "removing twice is refused");
+}
+
+fn test_store_is_bounded_and_never_evicts() {
+    test_group("definitions/cap");
+
+    agnostic_definitions_reset();
+    var a = arena_allocator(1048576);
+    var rj: i64[1];
+
+    var all_ok = 1;
+    var i = 0;
+    while (i < AGNOSTIC_DEFINITIONS_MAX) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{\"key\":\"k");
+        str_builder_add_int(sb, i);
+        str_builder_add_cstr(sb, "\",\"role\":\"r\",\"goal\":\"g\"}");
+        var body = str_builder_build(sb);
+        var v = agnostic_decode_a(a, body);
+        var d = agnostic_agent_def_decode_a(a, v, 0 - 1, &rj);
+        if (agnostic_definitions_create(agnostic_agent_def_key(d), d) != AGNOSTIC_DEF_OK) {
+            all_ok = 0;
+        }
+        i = i + 1;
+    }
+    # One assertion for the loop, not 256 — a suite whose count is dominated by a
+    # fill loop reports its size rather than its coverage.
+    assert_eq(all_ok, 1, "every create up to the cap succeeds");
+    assert_eq(agnostic_definitions_count(), AGNOSTIC_DEFINITIONS_MAX, "at the cap");
+
+    var over = _t_decode(a, "{\"key\":\"one-too-many\",\"role\":\"r\",\"goal\":\"g\"}", &rj);
+    assert_eq(agnostic_definitions_create(agnostic_agent_def_key(over), over), AGNOSTIC_DEF_FULL,
+      "one more is refused with FULL");
+
+    # ⚠ And crucially it does NOT evict. The ledger drops terminal entries at its
+    # cap because nobody named them; evicting a definition the user created would
+    # 404 something they made.
+    assert_eq(agnostic_definitions_count(), AGNOSTIC_DEFINITIONS_MAX, "nothing was evicted");
+    assert_neq(agnostic_definitions_get(str_from("k0")), 0, "the first definition still answers");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_minimum_decodes();
+    test_every_forwarded_field_arrives();
+    test_retained_fields_round_trip();
+    test_refusal_table();
+    test_refusal_beats_unknown_field();
+    test_required_and_key_syntax();
+    test_wire_form_is_ours();
+    test_store_crud();
+    test_store_is_bounded_and_never_evicts();
+    return assert_summary();
+}
+
+var _agnostic_agentdef_test_exit = main();
+if (_agnostic_agentdef_test_exit > 0) { _agnostic_agentdef_test_exit = 1; }
+sys_exit_group(_agnostic_agentdef_test_exit);

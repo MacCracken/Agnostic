@@ -2,10 +2,10 @@
 
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
-> Last refreshed: 2026-08-21, after M2.
+> Last refreshed: 2026-08-21, after M3.
 >
 > **Picking this port up?** Start at [`handoff.md`](handoff.md) — orientation,
-> the build procedure that avoids an unreproducible lock, and what M2 must do.
+> the build procedure that avoids an unreproducible lock, and what M4 must do.
 > This file is the numbers.
 
 ## Version
@@ -29,8 +29,8 @@ Python line was CalVer (`2026.3.18`).
 
 ## Source
 
-**M2 complete; M3 in progress** — 21 files, 5,536 lines, 326 top-level
-definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
+**M3 complete** — 25 files, 6,502 lines, 396 top-level definitions, all
+`agnostic_*`-prefixed. 837 of those lines are the generated
 `src/presets_data.cyr`.
 
 | module | role |
@@ -44,10 +44,14 @@ definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
 | `src/engine/ledger.cyr` | what Agnostic remembers about submitted crews; the terminal latch |
 | `src/engine/request.cyr` | one task model, allow-list decoded, DAG validated |
 | `src/engine/crew.cyr` | the orchestrator bridge — submit, poll, cancel |
+| `src/engine/reject.cyr` | how a request says no; the typed-field readers |
+| `src/engine/agentdef.cyr` | **one** agent model — forwarded, retained, or refused |
+| `src/engine/definitions.cyr` | the in-memory definition store, until M4 |
 | `src/engine/presets.cyr` | the canonical preset library, parsed once at mount |
 | `src/presets_data.cyr` | **generated** — the 18 documents as Cyrius literals |
 | `src/routes/health.cyr` | `/health` and `/ready` |
 | `src/routes/crews.cyr` | the crew surface |
+| `src/routes/definitions.cyr` | agent definition CRUD |
 | `src/routes/presets.cyr` | the preset surface, read-only |
 | `src/server/serve.cyr` | the only module that touches a socket |
 | `src/app.cyr` | the canonical include order — **no definitions** |
@@ -70,6 +74,16 @@ The crew surface, and what each code means:
 | `GET /api/v1/crews/{id}/events` | 200 · 404 · 422 |
 | `GET /api/v1/presets` | 200 — summaries, not documents |
 | `GET /api/v1/presets/{name}` | 200 · 404 unknown name |
+| `GET /api/v1/agents/definitions` | 200 |
+| `POST /api/v1/agents/definitions` | **201** · 400 · **409** · 422 · **507** |
+| `GET /api/v1/agents/definitions/{key}` | 200 · 404 · 422 |
+| `PUT /api/v1/agents/definitions/{key}` | 200 · 400 · 404 · 422 |
+| `DELETE /api/v1/agents/definitions/{key}` | 200 · 404 · 422 |
+
+⚠ **201 for a definition, 202 for a crew.** A crew is accepted work that is not
+finished; a definition *is* complete when the call returns. **No upsert** in
+either direction: `POST` to an existing key is 409, `PUT` to an absent one is 404
+— an upsert turns a typo'd key into a second silently-created definition.
 
 ⚠ `GET /api/v1/crews` is in the table with no handler, so it answers **405**
 rather than a 404 claiming the collection does not exist. A listing endpoint
@@ -81,7 +95,7 @@ It is never built or shipped, and it is **not** a specification —
 
 ## Tests
 
-**13 suites, 581 assertions, 0 failed** (`cyrius test`, run under the pin).
+**14 suites, 702 assertions, 0 failed** (`cyrius test`, run under the pin).
 
 ⚠ Counts here are assertion-suite lines only. `cyrius test`'s final
 `N passed, 0 failed` line is the **suite** tally, not a suite — earlier figures
@@ -98,6 +112,9 @@ in this repo (`222`) and in agnosai (`8,038`) double-counted it.
   required, there is no fallback, and a cyclic graph is refused before submission
 - `tests/crews_route.tcyr` — **59 assertions**, the surface end to end, including
   the §3.2 barrier: an id we never submitted is a 404 that relabels nothing
+- `tests/agentdef.tcyr` — **97 assertions**, the one agent model: every field
+  forwarded, retained or refused by name, plus the store's no-upsert and
+  never-evict policies
 - `tests/presets.tcyr` — **71 assertions**, the canonical library: all 18 parse,
   the declared order, the off-canon `complete` domain, and the **38-name tool
   manifest** that is M6's contract
@@ -198,10 +215,43 @@ headroom and was left unchanged.
 (`ArtifactManagementTool`, `CIPipelineIntegrationTool`) have no implementation
 anywhere and M6 owes a decision on each.
 
+## Agent definitions
+
+**One model, three dispositions, all of them visible on the wire.** A crew's
+`agents` array and a stored definition are decoded by
+`agnostic_agent_def_decode_a` and by nothing else.
+
+| Disposition | Count | What it means |
+|---|---|---|
+| FORWARDED | 12 | the engine has a slot that acts on it |
+| RETAINED | 2 | `focus`, `allow_delegation` — kept, round-tripped, and **named** in `unforwarded` |
+| REFUSED | 12 | a 422 naming the missing capability |
+
+Membership of RETAINED was decided by one test: does the canonical preset library
+carry it? All 76 preset agents carry `focus`; 18 carry `allow_delegation`.
+Neither reaches the engine, so saying so beats dropping it.
+
+⚠ **`agent_key` is refused with a message pointing at `key`.** The oracle and the
+engine both spell it `agent_key`; Agnostic spells it `key`, because M2's crew
+decoder already did and one model cannot have two spellings.
+
+⚠ **`hardware` is the one field refused despite the engine having a slot** — the
+record is `ai-hwaccel`-shaped and Agnostic has no decoder for it. Every other
+refusal is refused because the engine genuinely cannot act on it.
+
+⚠ **The store is memory-resident and never evicts.** 256 definitions; past that
+`POST` answers **507**, and every existing key still answers. Disclosed by
+`"storage": "memory"` on all five responses and a WARN at mount — M4 flips the
+literal to `"patra"` and nothing else on the wire moves. `src/routes/definitions.cyr`
+reaches the store only through `agnostic_definitions_*`, so M4 changes no handler.
+
 ## Next
 
-See [`roadmap.md`](roadmap.md). **M3 — definitions, presets, agents.** The preset
-half is done; agent-definition CRUD is what remains. The
+See [`roadmap.md`](roadmap.md). **M4 — persistence and the audit chain.** It
+inherits two seams built for it: `agnostic_definitions_*` (nine functions, one
+storage literal) and `src/engine/ledger.cyr`. Agent keys are constrained to
+`[a-z0-9][a-z0-9-]*`, so an on-disk path built from one is safe **by
+construction** rather than by validation — do not widen that character set. The
 field-forwarding gate it turns on is already built and under test:
 `src/engine/request.cyr` establishes the pattern M3 extends.
 

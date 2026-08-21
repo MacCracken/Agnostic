@@ -1,0 +1,606 @@
+# agnostic/engine/agentdef — one agent definition, decoded one way.
+#
+# A crew's `agents` array and a stored agent definition are the **same model**.
+# They are decoded by the function below and by nothing else, because two
+# decoders for one concept is how the two ends drift — which is `ORACLE-AUDIT.md`
+# §3.3 stated at the level of a field rather than a task list.
+#
+# ## Three dispositions, all of them visible on the wire
+#
+# `ORACLE-AUDIT.md` §2.2 records fourteen fields the oracle dropped in
+# translation. Nothing here is dropped. Every key a client can send has exactly
+# one of three fates, and a client can tell which:
+#
+#   * **FORWARDED** — the engine has a slot that acts on it. Twelve keys.
+#   * **RETAINED** — Agnostic's own record holds it, it round-trips verbatim, and
+#     it is named in the `unforwarded` array on every response carrying the
+#     definition. Two keys: `focus` and `allow_delegation`.
+#   * **REFUSED** — a 422 naming the missing capability. Twelve keys, each with
+#     its own message.
+#
+# There is no fourth. A key that is none of these is an unknown field, which is
+# also a 422.
+#
+# ## Why `focus` and `allow_delegation` are retained rather than refused
+#
+# Membership was decided by one test: **does the canonical preset library carry
+# it?** All 76 preset agents carry `focus`; 18 carry `allow_delegation`. That
+# library is Agnostic's own content, and this milestone forbids losing it — so a
+# definition round-tripped through this decoder must come back whole.
+#
+# Neither reaches the engine. `_agnosai_crew_build_system_prompt` composes four
+# blocks — name/role/goal, backstory, domain, tools — and has no focus slot;
+# `allow_delegation` appears zero times in `lib/agnosai.cyr`. Saying so in
+# `unforwarded` is the honest middle: the field is kept, and the client is told
+# it shapes nothing.
+#
+# ## ⚠ `agent_key` is refused, and it is the mistake to expect
+#
+# The oracle spells it `agent_key`. The engine spells it `agent_key`. Agnostic
+# spells it **`key`** — because M2's crew decoder already did, and one model
+# cannot have two spellings. A client sending `agent_key` therefore gets a
+# refusal that names the right field rather than a bare "unknown field", which
+# would read as a typo when it is a reasonable guess.
+#
+# ## ⚠ `hardware` is the one field refused despite the engine having a slot
+#
+# `AGN_AGENT_HARDWARE` exists and `agnosai_agent_with_hardware` sets it, but the
+# record is `ai-hwaccel`-shaped and Agnostic has no decoder for it. Forwarding a
+# half-decoded requirement is worse than refusing one, and
+# `agnosai_agent_hardware_requirement` derives an equivalent from the GPU trio
+# anyway. It is the natural candidate to open up later; every other refusal here
+# is refused because the engine genuinely cannot act on it.
+
+# An agent definition — 24 bytes.
+#
+# The engine's record plus the two fields it has no slot for. Composition rather
+# than a parallel copy: everything the engine acts on stays in exactly one place,
+# so a field cannot be set here and read from there.
+enum AgnosticAgentDefOff {
+    AGNOSTIC_AD_ENGINE     = 0;
+    AGNOSTIC_AD_FOCUS      = 8;
+    AGNOSTIC_AD_DELEGATION = 16;
+    AGNOSTIC_AD_SIZE       = 24;
+}
+
+# The refusal messages, interned once at load time.
+#
+# Interned rather than built per call for the same reason `AGNOSTIC_OC_EMPTY_MSG`
+# is: a refusal path allocating from the global bump — which has no `free()` — is
+# a leak on the arm an unauthenticated scanner hits hardest.
+var AGNOSTIC_RF_GPU_STRICT = str_from(
+  "'gpu_strict' is unsupported: the engine cannot hard-fail on GPU; use 'gpu_required'");
+var AGNOSTIC_RF_LLM_TEMP = str_from(
+  "'llm_temperature' is unsupported: temperature is set per crew, not per agent");
+var AGNOSTIC_RF_VERBOSE = str_from(
+  "'verbose' is unsupported: logging verbosity is a server setting, AGNOSTIC_LOG_LEVEL");
+var AGNOSTIC_RF_METADATA = str_from(
+  "'metadata' is unsupported: an agent definition has no metadata slot");
+var AGNOSTIC_RF_CELERY_QUEUE = str_from(
+  "'celery_queue' is unsupported: there is no broker tier; the engine owns the queue");
+var AGNOSTIC_RF_REDIS_PREFIX = str_from(
+  "'redis_prefix' is unsupported: there is no Redis tier");
+var AGNOSTIC_RF_CELERY_TASK = str_from(
+  "'celery_task' is unsupported: there is no broker tier");
+var AGNOSTIC_RF_TOOL_INSTANCES = str_from(
+  "'tool_instances' has no wire form; name tools by string in 'tools'");
+var AGNOSTIC_RF_PERSONALITY = str_from(
+  "'personality' is unsupported: the engine does not model it");
+var AGNOSTIC_RF_HARDWARE = str_from(
+  "'hardware' is unsupported: describe placement with gpu_required and gpu_memory_min_mb");
+var AGNOSTIC_RF_AGENT_KEY = str_from(
+  "'agent_key' is not a field: use 'key'");
+var AGNOSTIC_RF_WORKFLOW = str_from(
+  "'workflow_mode' is a preset-level field, not an agent field");
+
+# The wire keys this module owns.
+var AGNOSTIC_JK_KEY         = str_from("key");
+var AGNOSTIC_JK_ROLE        = str_from("role");
+var AGNOSTIC_JK_GOAL        = str_from("goal");
+var AGNOSTIC_JK_BACKSTORY   = str_from("backstory");
+var AGNOSTIC_JK_COMPLEXITY  = str_from("complexity");
+var AGNOSTIC_JK_LLM_MODEL   = str_from("llm_model");
+var AGNOSTIC_JK_GPU_REQ     = str_from("gpu_required");
+var AGNOSTIC_JK_GPU_PREF    = str_from("gpu_preferred");
+var AGNOSTIC_JK_GPU_MEM     = str_from("gpu_memory_min_mb");
+var AGNOSTIC_JK_FOCUS       = str_from("focus");
+var AGNOSTIC_JK_DELEGATION  = str_from("allow_delegation");
+var AGNOSTIC_JK_UNFORWARDED = str_from("unforwarded");
+
+# Whether `key` is a legal agent key: `[a-z0-9][a-z0-9-]*`, at most 100 bytes.
+#
+# The oracle's syntax, kept deliberately — all 45 preset agent keys and all 18
+# preset names satisfy it.
+#
+# ⚠ **A key that can never contain `/` or `.` is what makes M4's on-disk path
+# safe by construction rather than by validation.** Path-traversal checking on an
+# externally-derived path is a named M4 gate; a character set this narrow means
+# there is nothing to traverse with in the first place. Do not widen it without
+# reading that bullet.
+fn agnostic_key_is_valid(key: Str): i64 {
+    if (key == 0) { return 0; }
+    var n = str_len(key);
+    if (n == 0 || n > 100) { return 0; }
+    var d = str_data(key);
+    var first = load8(d) & 255;
+    var ok_first = 0;
+    if (first >= 97 && first <= 122) { ok_first = 1; }
+    if (first >= 48 && first <= 57) { ok_first = 1; }
+    if (ok_first == 0) { return 0; }
+    var i = 1;
+    while (i < n) {
+        var c = load8(d + i) & 255;
+        var ok = 0;
+        if (c >= 97 && c <= 122) { ok = 1; }
+        if (c >= 48 && c <= 57) { ok = 1; }
+        if (c == 45) { ok = 1; }
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The refusal reason for `key`, or 0 when it is not a refused name.
+#
+# Public so `tests/agentdef.tcyr` can assert the table directly rather than
+# through twelve decode round-trips.
+fn agnostic_agent_def_refused_reason(key: Str): i64 {
+    if (key == 0) { return 0; }
+    if (str_eq_cstr(key, "gpu_strict") == 1)     { return AGNOSTIC_RF_GPU_STRICT; }
+    if (str_eq_cstr(key, "llm_temperature") == 1) { return AGNOSTIC_RF_LLM_TEMP; }
+    if (str_eq_cstr(key, "verbose") == 1)        { return AGNOSTIC_RF_VERBOSE; }
+    if (str_eq_cstr(key, "metadata") == 1)       { return AGNOSTIC_RF_METADATA; }
+    if (str_eq_cstr(key, "celery_queue") == 1)   { return AGNOSTIC_RF_CELERY_QUEUE; }
+    if (str_eq_cstr(key, "redis_prefix") == 1)   { return AGNOSTIC_RF_REDIS_PREFIX; }
+    if (str_eq_cstr(key, "celery_task") == 1)    { return AGNOSTIC_RF_CELERY_TASK; }
+    if (str_eq_cstr(key, "tool_instances") == 1) { return AGNOSTIC_RF_TOOL_INSTANCES; }
+    if (str_eq_cstr(key, "personality") == 1)    { return AGNOSTIC_RF_PERSONALITY; }
+    if (str_eq_cstr(key, "hardware") == 1)       { return AGNOSTIC_RF_HARDWARE; }
+    if (str_eq_cstr(key, "agent_key") == 1)      { return AGNOSTIC_RF_AGENT_KEY; }
+    if (str_eq_cstr(key, "workflow_mode") == 1)  { return AGNOSTIC_RF_WORKFLOW; }
+    return 0;
+}
+
+# The first refused key present in `v`, or 0.
+#
+# ⚠ Runs **before** the allow-list check, so a refused field wins over the
+# generic "unknown field" message. A caller asking for a capability that does not
+# exist must learn that, not be told they made a typo.
+fn _agnostic_agent_def_refused(v): i64 {
+    if (v == 0) { return 0; }
+    var n = bayan_json_v_obj_len(v);
+    var i = 0;
+    while (i < n) {
+        var key = bayan_json_v_obj_key(v, i);
+        if (agnostic_agent_def_refused_reason(key) != 0) { return key; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# The allow-list: every key an agent definition may carry.
+fn agnostic_agent_def_fields_a(a): i64 {
+    var f = agnostic_fields_a(a);
+    agnostic_field_a(a, f, "key");
+    agnostic_field_a(a, f, "name");
+    agnostic_field_a(a, f, "role");
+    agnostic_field_a(a, f, "goal");
+    agnostic_field_a(a, f, "backstory");
+    agnostic_field_a(a, f, "domain");
+    agnostic_field_a(a, f, "tools");
+    agnostic_field_a(a, f, "complexity");
+    agnostic_field_a(a, f, "llm_model");
+    agnostic_field_a(a, f, "gpu_required");
+    agnostic_field_a(a, f, "gpu_preferred");
+    agnostic_field_a(a, f, "gpu_memory_min_mb");
+    agnostic_field_a(a, f, "focus");
+    agnostic_field_a(a, f, "allow_delegation");
+    return f;
+}
+
+# Reject, prefixing `agents[N]: ` when `index` names a position in an array.
+#
+# One decoder serves the crew surface and the definition surface, and only the
+# first has an index to report. `index < 0` means "not in an array", and the
+# message goes out unprefixed.
+fn _agnostic_ad_reject(a, out, index, status, msg: Str): i64 {
+    if (index < 0) { return _agnostic_reject(a, out, status, msg); }
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "agents[");
+    str_builder_add_int(sb, index);
+    str_builder_add_cstr(sb, "]: ");
+    str_builder_add(sb, msg);
+    return _agnostic_reject(a, out, status, str_builder_build(sb));
+}
+
+# The engine definition inside an Agnostic one.
+fn agnostic_agent_def_engine(d): i64 {
+    if (d == 0) { return 0; }
+    return load64(d + AGNOSTIC_AD_ENGINE);
+}
+
+# The agent's key.
+fn agnostic_agent_def_key(d): i64 {
+    var e = agnostic_agent_def_engine(d);
+    if (e == 0) { return 0; }
+    return agnosai_agent_key(e);
+}
+
+# The retained `focus`, or 0 when the definition carries none.
+#
+# ⚠ Retained, never forwarded. The engine's prompt builder has no focus slot, so
+# this shapes nothing — which is why it is named in `unforwarded`.
+fn agnostic_agent_def_focus(d): i64 {
+    if (d == 0) { return 0; }
+    return load64(d + AGNOSTIC_AD_FOCUS);
+}
+
+# The retained `allow_delegation`: 1, 0, or AGNOSTIC_REQ_UNSET when absent.
+#
+# Three states, not two. `false` and "not specified" are different facts, and a
+# round-trip that turned the second into the first would be losing a field
+# quietly — the thing this module exists to prevent.
+fn agnostic_agent_def_delegation(d): i64 {
+    if (d == 0) { return AGNOSTIC_REQ_UNSET; }
+    return load64(d + AGNOSTIC_AD_DELEGATION);
+}
+
+# How many retained-but-unforwarded fields this definition actually carries.
+fn agnostic_agent_def_unforwarded_count(d): i64 {
+    var n = 0;
+    if (agnostic_agent_def_focus(d) != 0) { n = n + 1; }
+    if (agnostic_agent_def_delegation(d) != AGNOSTIC_REQ_UNSET) { n = n + 1; }
+    return n;
+}
+
+# Decode one agent definition. Returns the record, or 0 with a rejection in `out`.
+#
+# `index >= 0` prefixes every message with `agents[N]: `; pass -1 for the
+# standalone definition surface.
+#
+# ⚠ **Global allocator for everything the record holds.** The definition outlives
+# the request that created it — a crew spec is registered and run on a detached
+# thread, and a stored definition is fetched by a later request. `a` is used only
+# for the rejection record, which does belong to this request.
+#
+# The order is `src/http/codec.cyr`'s and it matters: reject a non-object, then
+# refused capabilities, then unknown keys, then required fields, then optional.
+# Shape before content means a request is refused whole rather than half-applied.
+fn agnostic_agent_def_decode_a(a, v, index, out): i64 {
+    if (bayan_json_v_is_obj(v) != 1) {
+        return _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "an agent must be a JSON object"));
+    }
+
+    var refused = _agnostic_agent_def_refused(v);
+    if (refused != 0) {
+        return _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          agnostic_agent_def_refused_reason(refused));
+    }
+
+    var unknown = agnostic_unknown_field(v, agnostic_agent_def_fields_a(a));
+    if (unknown != 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "unknown field '");
+        str_builder_add(sb, unknown);
+        str_builder_add_cstr(sb, "'");
+        return _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_builder_build(sb));
+    }
+
+    var key = agnostic_req_str(v, AGNOSTIC_JK_KEY);
+    if (key == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "'key' is required and must be a string"));
+    }
+    var role = agnostic_req_str(v, AGNOSTIC_JK_ROLE);
+    if (role == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "'role' is required and must be a string"));
+    }
+    var goal = agnostic_req_str(v, AGNOSTIC_JK_GOAL);
+    if (goal == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "'goal' is required and must be a string"));
+    }
+    if (str_len(key) == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "'key' must not be empty"));
+    }
+    if (agnostic_key_is_valid(key) == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "'key' must match [a-z0-9][a-z0-9-]* and be at most 100 characters"));
+    }
+    if (_agnostic_str_field_ok(role) < 0 || _agnostic_str_field_ok(goal) < 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "a field exceeds the maximum length"));
+    }
+
+    var e = agnosai_agent_new(str_clone(key), str_clone(role), str_clone(goal));
+    if (e == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_INTERNAL,
+          str_from_a(a, "could not allocate the agent definition"));
+    }
+
+    if (_agnostic_ad_opt_str(a, out, index, v, AGNOSTIC_JK_NAME, e, 0) == 0) { return 0; }
+    if (_agnostic_ad_opt_str(a, out, index, v, AGNOSTIC_JK_BACKSTORY, e, 1) == 0) { return 0; }
+    if (_agnostic_ad_opt_str(a, out, index, v, AGNOSTIC_JK_DOMAIN, e, 2) == 0) { return 0; }
+    if (_agnostic_ad_opt_str(a, out, index, v, AGNOSTIC_JK_COMPLEXITY, e, 3) == 0) { return 0; }
+    if (_agnostic_ad_opt_str(a, out, index, v, AGNOSTIC_JK_LLM_MODEL, e, 4) == 0) { return 0; }
+    if (_agnostic_ad_tools(a, out, index, v, e) == 0) { return 0; }
+    if (_agnostic_ad_gpu(a, out, index, v, e) == 0) { return 0; }
+
+    var d = alloc(AGNOSTIC_AD_SIZE);
+    if (d == 0) {
+        return _agnostic_ad_reject(a, out, index, HTTP_INTERNAL,
+          str_from_a(a, "could not allocate the agent definition"));
+    }
+    store64(d + AGNOSTIC_AD_ENGINE, e);
+    store64(d + AGNOSTIC_AD_FOCUS, 0);
+    store64(d + AGNOSTIC_AD_DELEGATION, AGNOSTIC_REQ_UNSET);
+
+    var focus = agnostic_opt_str(v, AGNOSTIC_JK_FOCUS, 0 - 1);
+    if (focus == 0) {
+        return _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'focus' must be a string"));
+    }
+    if (focus != 0 - 1) {
+        if (_agnostic_str_field_ok(focus) < 0) {
+            return _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+              str_from_a(a, "'focus' exceeds the maximum length"));
+        }
+        store64(d + AGNOSTIC_AD_FOCUS, str_clone(focus));
+    }
+
+    var deleg = _agnostic_opt_bool(v, "allow_delegation");
+    if (deleg == AGNOSTIC_REQ_UNSET - 1) {
+        return _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'allow_delegation' must be a boolean"));
+    }
+    store64(d + AGNOSTIC_AD_DELEGATION, deleg);
+    return d;
+}
+
+# One optional string field, forwarded through the setter `which` names.
+# Returns 1 on success, 0 with a rejection stored.
+#
+# A dispatch integer rather than a function pointer: `fncall2` would need every
+# setter to share one signature, and the five here already do — but the integer
+# keeps the call sites readable and costs one compare.
+fn _agnostic_ad_opt_str(a, out, index, v, key: Str, e, which): i64 {
+    var s = agnostic_opt_str(v, key, 0 - 1);
+    if (s == 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "'");
+        str_builder_add(sb, key);
+        str_builder_add_cstr(sb, "' must be a string");
+        _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE, str_builder_build(sb));
+        return 0;
+    }
+    if (s == 0 - 1) { return 1; }
+    if (_agnostic_str_field_ok(s) < 0) {
+        var sb2 = str_builder_new();
+        str_builder_add_cstr(sb2, "'");
+        str_builder_add(sb2, key);
+        str_builder_add_cstr(sb2, "' exceeds the maximum length");
+        _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST, str_builder_build(sb2));
+        return 0;
+    }
+    var c = str_clone(s);
+    if (which == 0) { agnosai_agent_with_name(e, c); }
+    if (which == 1) { agnosai_agent_with_backstory(e, c); }
+    if (which == 2) { agnosai_agent_with_domain(e, c); }
+    if (which == 3) { agnosai_agent_with_complexity(e, c); }
+    if (which == 4) { agnosai_agent_with_llm_model(e, c); }
+    return 1;
+}
+
+# The `tools` array. Returns 1 on success, 0 with a rejection stored.
+#
+# ⚠ **Never filtered against a registry.** There is no tool registry in the
+# Cyrius tree yet — M6 owns it — and filtering against an empty one would drop
+# every tool silently, which is precisely what the oracle did to all 38 of its
+# preset tool names (`ORACLE-AUDIT.md` §3.15). Names are carried through
+# verbatim; resolution, and erroring on a miss, is M6's.
+fn _agnostic_ad_tools(a, out, index, v, e): i64 {
+    var tv = bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_TOOLS);
+    if (tv == 0) { return 1; }
+    if (bayan_json_v_is_null(tv) == 1) { return 1; }
+    if (bayan_json_v_is_arr(tv) != 1) {
+        _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'tools' must be an array of strings"));
+        return 0;
+    }
+    var n = bayan_json_v_arr_len(tv);
+    if (n > AGNOSTIC_REQ_MAX_TOOLS) {
+        _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "too many tools"));
+        return 0;
+    }
+    var tools = vec_new();
+    var i = 0;
+    while (i < n) {
+        var t = bayan_json_v_arr_get(tv, i);
+        if (bayan_json_v_is_str(t) != 1) {
+            _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+              str_from_a(a, "'tools' must be an array of strings"));
+            return 0;
+        }
+        vec_push(tools, str_clone(bayan_json_v_str(t)));
+        i = i + 1;
+    }
+    agnosai_agent_with_tools(e, tools);
+    return 1;
+}
+
+# The three GPU placement fields, which travel together through one engine
+# setter. Returns 1 on success, 0 with a rejection stored.
+fn _agnostic_ad_gpu(a, out, index, v, e): i64 {
+    var rq = _agnostic_opt_bool(v, "gpu_required");
+    if (rq == AGNOSTIC_REQ_UNSET - 1) {
+        _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'gpu_required' must be a boolean"));
+        return 0;
+    }
+    var pf = _agnostic_opt_bool(v, "gpu_preferred");
+    if (pf == AGNOSTIC_REQ_UNSET - 1) {
+        _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'gpu_preferred' must be a boolean"));
+        return 0;
+    }
+    var mm = _agnostic_opt_int(v, "gpu_memory_min_mb");
+    if (mm == AGNOSTIC_REQ_UNSET - 1) {
+        _agnostic_ad_reject(a, out, index, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'gpu_memory_min_mb' must be an integer"));
+        return 0;
+    }
+    if (mm != AGNOSTIC_REQ_UNSET && mm < 0) {
+        _agnostic_ad_reject(a, out, index, HTTP_BAD_REQUEST,
+          str_from_a(a, "'gpu_memory_min_mb' must not be negative"));
+        return 0;
+    }
+    if (rq == AGNOSTIC_REQ_UNSET && pf == AGNOSTIC_REQ_UNSET && mm == AGNOSTIC_REQ_UNSET) {
+        return 1;
+    }
+    var r = 0;
+    if (rq == 1) { r = 1; }
+    var p = 0;
+    if (pf == 1) { p = 1; }
+    # ⚠ **`AGNOSAI_NO_LIMIT`, not 0, when no floor was given.** The three GPU
+    # fields share one engine setter, so asking for `gpu_required` alone still
+    # writes all three — and passing 0 would overwrite the engine's own "unset"
+    # sentinel with a concrete floor of 0 MB. The wire then reports
+    # `"gpu_memory_min_mb": 0` for a field the caller never sent, which is an
+    # unspecified value acquiring a concrete one: the same class of defect as
+    # a dropped field, in the opposite direction.
+    var m = AGNOSAI_NO_LIMIT;
+    if (mm != AGNOSTIC_REQ_UNSET) { m = mm; }
+    agnosai_agent_with_gpu(e, r, p, m);
+    return 1;
+}
+
+# Render a definition as Agnostic's wire form.
+#
+# ⚠ **Not `agnosai_agent_to_value_a`.** The engine's renderer emits `agent_key`
+# where Agnostic's contract says `key`, emits `hardware`, and emits
+# `"personality": null` for a field the engine does not model — so using it would
+# put three keys on our wire that our decoder refuses, and would make an upstream
+# rename a breaking change to our API.
+#
+# Absent optional fields are omitted rather than rendered null, the same rule
+# `agnostic_outcome_to_value_a` follows for `error`.
+fn agnostic_agent_def_to_value_a(a, d): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0 || d == 0) { return obj; }
+    var e = agnostic_agent_def_engine(d);
+    if (e == 0) { return obj; }
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_KEY,
+      bayan_json_v_str_new_a(a, agnosai_agent_key(e)));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_NAME,
+      bayan_json_v_str_new_a(a, agnosai_agent_name(e)));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_ROLE,
+      bayan_json_v_str_new_a(a, agnosai_agent_role(e)));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_GOAL,
+      bayan_json_v_str_new_a(a, agnosai_agent_goal(e)));
+
+    var bs = agnosai_agent_backstory(e);
+    if (bs != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_BACKSTORY, bayan_json_v_str_new_a(a, bs));
+    }
+    var dom = agnosai_agent_domain(e);
+    if (dom != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DOMAIN, bayan_json_v_str_new_a(a, dom));
+    }
+    var cx = agnosai_agent_complexity(e);
+    if (cx != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_COMPLEXITY, bayan_json_v_str_new_a(a, cx));
+    }
+    var lm = agnosai_agent_llm_model(e);
+    if (lm != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_LLM_MODEL, bayan_json_v_str_new_a(a, lm));
+    }
+
+    var arr = bayan_json_v_arr_new_a(a);
+    var tools = agnosai_agent_tools(e);
+    if (tools != 0) {
+        var i = 0;
+        while (i < vec_len(tools)) {
+            bayan_json_v_arr_push_a(a, arr, bayan_json_v_str_new_a(a, vec_get(tools, i)));
+            i = i + 1;
+        }
+    }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_TOOLS, arr);
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_GPU_REQ,
+      bayan_json_v_bool_new_a(a, agnosai_agent_gpu_required(e)));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_GPU_PREF,
+      bayan_json_v_bool_new_a(a, agnosai_agent_gpu_preferred(e)));
+
+    # ⚠ The engine's "unset" for this field is `AGNOSAI_NO_LIMIT`, which is -1.
+    # Emitting the sentinel would put a negative byte count on the wire that our
+    # own decoder rejects as invalid — so it goes out as null.
+    var mm = agnosai_agent_gpu_memory_min_mb(e);
+    if (mm == AGNOSAI_NO_LIMIT) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_GPU_MEM, bayan_json_v_null_a(a));
+    } else {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_GPU_MEM, bayan_json_v_int_new_a(a, mm));
+    }
+
+    var focus = agnostic_agent_def_focus(d);
+    if (focus != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_FOCUS, bayan_json_v_str_new_a(a, focus));
+    }
+    var deleg = agnostic_agent_def_delegation(d);
+    if (deleg != AGNOSTIC_REQ_UNSET) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DELEGATION, bayan_json_v_bool_new_a(a, deleg));
+    }
+    return obj;
+}
+
+# The listing entry for one definition: key, name, role and domain — not the
+# whole record.
+#
+# ⚠ Same reasoning as `agnostic_preset_summary_a`. The store holds up to
+# `AGNOSTIC_DEFINITIONS_MAX` (256) definitions and a full one runs to a few
+# hundred bytes with its backstory and tools, so a full-record listing at the cap
+# would exceed the 65,536-byte default request arena — which spills into the
+# global bump, which has no `free()`. A caller listing definitions is choosing
+# one, and fetches the one it chose.
+fn agnostic_agent_def_summary_a(a, d): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0 || d == 0) { return obj; }
+    var e = agnostic_agent_def_engine(d);
+    if (e == 0) { return obj; }
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_KEY,
+      bayan_json_v_str_new_a(a, agnosai_agent_key(e)));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_NAME,
+      bayan_json_v_str_new_a(a, agnosai_agent_name(e)));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_ROLE,
+      bayan_json_v_str_new_a(a, agnosai_agent_role(e)));
+    var dom = agnosai_agent_domain(e);
+    if (dom != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DOMAIN, bayan_json_v_str_new_a(a, dom));
+    }
+    return obj;
+}
+
+# The `unforwarded` array: which retained fields this definition carries.
+#
+# ⚠ **Always present, even when empty.** A client scripting against this can read
+# `len(unforwarded)` unconditionally, and an empty array says "nothing you sent
+# was inert" rather than leaving them to infer it from a missing key. Naming the
+# inert fields is the whole difference between this and the oracle, which dropped
+# them and said nothing.
+fn agnostic_agent_def_unforwarded_a(a, d): i64 {
+    var arr = bayan_json_v_arr_new_a(a);
+    if (arr == 0 || d == 0) { return arr; }
+    if (agnostic_agent_def_focus(d) != 0) {
+        bayan_json_v_arr_push_a(a, arr, bayan_json_v_str_new_a(a, AGNOSTIC_JK_FOCUS));
+    }
+    if (agnostic_agent_def_delegation(d) != AGNOSTIC_REQ_UNSET) {
+        bayan_json_v_arr_push_a(a, arr, bayan_json_v_str_new_a(a, AGNOSTIC_JK_DELEGATION));
+    }
+    return arr;
+}

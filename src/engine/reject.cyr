@@ -1,0 +1,137 @@
+# agnostic/engine/reject — how a request says no, and the typed-field helpers.
+#
+# ## A pure extraction, and it was forced
+#
+# Every definition here was written for `src/engine/request.cyr` at M2 and lived
+# there. M3 adds `src/engine/agentdef.cyr`, which needs all of it — and
+# `request.cyr` in turn needs `agentdef`'s decoder, because a crew's `agents`
+# array and a stored agent definition are **one model**, not two. Including
+# `agentdef` after `request` would invert that dependency, and duplicating the
+# helpers would either trip `check-symbols.sh` rule 2 or, renamed to dodge it,
+# leave two subtly diverging copies of the rule that decides what a 422 is.
+#
+# So they moved down to a leaf. Nothing changed but the file.
+#
+# ## The three-way signal these helpers exist to preserve
+#
+# `absent`, `present-but-wrong-type` and `present-and-valid` are three different
+# facts, and collapsing any two is how a typo becomes a silent default. The
+# optional readers below answer `AGNOSTIC_REQ_UNSET` for absent and
+# `AGNOSTIC_REQ_UNSET - 1` for a type error, so a caller can tell them apart —
+# which is what lets the decoders answer 422 for `{"gpu_required": "false"}`
+# instead of quietly reading a non-empty string as true.
+
+# A rejected request — 16 bytes.
+#
+# Carries the HTTP status **and** the message, so the handler does not have to
+# infer one from the other. A decoder that returned only a message would push
+# the 400-vs-422 decision to a caller that no longer knows which rule failed.
+enum AgnosticRejectOff {
+    AGNOSTIC_RJ_STATUS  = 0;
+    AGNOSTIC_RJ_MESSAGE = 8;
+    AGNOSTIC_RJ_SIZE    = 16;
+}
+
+# Bounds. Deliberately at or below the engine's own
+# (`AGNOSAI_CREW_MAX_AGENTS` 100, `AGNOSAI_CREW_MAX_TASKS` 1000,
+# `AGNOSAI_CREW_MAX_STRING_LEN` 10000) so a request Agnostic accepts is one the
+# engine will also accept. A bound *above* the engine's would turn a clean 400
+# into a rejection deeper in, where the message is worse.
+var AGNOSTIC_REQ_MAX_AGENTS     = 100;
+var AGNOSTIC_REQ_MAX_TASKS      = 1000;
+var AGNOSTIC_REQ_MAX_STRING     = 10000;
+var AGNOSTIC_REQ_MAX_TOOLS      = 64;
+var AGNOSTIC_REQ_MAX_DEPS       = 64;
+var AGNOSTIC_REQ_MAX_CONCURRENCY = 64;
+var AGNOSTIC_REQ_DEFAULT_CONCURRENCY = 4;
+
+# The unset sentinel for an optional integer field.
+#
+# ⚠ **-1, not 0.** 0 is a legal priority (`AGNOSAI_PRIORITY_BACKGROUND`) and a
+# legal `gpu_memory_min_mb`. A 0 sentinel would make "background priority" and
+# "priority omitted" the same value, which is the same class of mistake as
+# `config.cyr`'s port parser refusing to use 0 for "unset".
+var AGNOSTIC_REQ_UNSET = 0 - 1;
+
+# Build a rejection in `a`. Returns 0 when the arena is exhausted.
+fn agnostic_reject_a(a, status, message: Str): i64 {
+    var r = alloc_via(a, AGNOSTIC_RJ_SIZE);
+    if (r == 0) { return 0; }
+    store64(r + AGNOSTIC_RJ_STATUS, status);
+    store64(r + AGNOSTIC_RJ_MESSAGE, message);
+    return r;
+}
+
+# The HTTP status a rejection carries. 400 for a null rejection.
+fn agnostic_reject_status(r): i64 {
+    if (r == 0) { return HTTP_BAD_REQUEST; }
+    return load64(r + AGNOSTIC_RJ_STATUS);
+}
+
+# The message a rejection carries, or a generic one when null.
+fn agnostic_reject_message(r): i64 {
+    if (r == 0) { return str_from("invalid request"); }
+    return load64(r + AGNOSTIC_RJ_MESSAGE);
+}
+
+# Store a rejection through `out` and return 0, so a decoder arm is one line.
+fn _agnostic_reject(a, out, status, message: Str): i64 {
+    if (out != 0) { store64(out, agnostic_reject_a(a, status, message)); }
+    return 0;
+}
+
+# A rejection naming the offending field, as `<prefix><field><suffix>`.
+#
+# Naming the field is the difference between an error a caller can act on and
+# one that sends them to read source. `ORACLE-AUDIT.md` §2.2's complaint is not
+# only that fields were dropped — it is that nothing said so.
+fn _agnostic_reject_field(a, out, status, prefix, field: Str, suffix): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add(sb, field);
+    str_builder_add_cstr(sb, suffix);
+    return _agnostic_reject(a, out, status, str_builder_build(sb));
+}
+
+# A rejection naming an indexed element, as `<prefix><index><suffix>`.
+fn _agnostic_reject_at(a, out, status, prefix, index, suffix): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, index);
+    str_builder_add_cstr(sb, suffix);
+    return _agnostic_reject(a, out, status, str_builder_build(sb));
+}
+
+# Whether a string field is within the length bound: 1 ok, -1 too long.
+#
+# Type is not checked here — `agnostic_req_str` / `agnostic_opt_str` have already
+# separated "absent" from "wrong type" by the time this runs, and folding a third
+# outcome in would blur a distinction those two exist to preserve.
+fn _agnostic_str_field_ok(s: Str): i64 {
+    if (str_len(s) > AGNOSTIC_REQ_MAX_STRING) { return 0 - 1; }
+    return 1;
+}
+
+# An optional boolean: 1, 0, AGNOSTIC_REQ_UNSET when absent, or
+# `AGNOSTIC_REQ_UNSET - 1` when present with the wrong type.
+#
+# ⚠ A JSON string `"false"` is **not** a boolean and reports the type error. The
+# note on `agnostic_req_bool` in `src/http/codec.cyr` has the reasoning: coercing
+# it would make `{"gpu_required": "false"}` read as true, since the string is
+# non-empty — the exact silent misreading this port refuses.
+fn _agnostic_opt_bool(v, key): i64 {
+    var f = bayan_json_v_obj_get_by_str(v, str_from(key));
+    if (f == 0) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_null(f) == 1) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_bool(f) != 1) { return AGNOSTIC_REQ_UNSET - 1; }
+    return bayan_json_v_bool(f);
+}
+
+# An optional integer, with the same three-way signalling as `_agnostic_opt_bool`.
+fn _agnostic_opt_int(v, key): i64 {
+    var f = bayan_json_v_obj_get_by_str(v, str_from(key));
+    if (f == 0) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_null(f) == 1) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_int(f) != 1) { return AGNOSTIC_REQ_UNSET - 1; }
+    return bayan_json_v_int(f);
+}

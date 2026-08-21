@@ -1,0 +1,185 @@
+# agnostic/engine/definitions — where agent definitions live until M4.
+#
+# ## The M2 ledger's shape, with three policy inversions
+#
+# The mechanics are `src/engine/ledger.cyr`'s and were proven there: a
+# `map_new_str()` behind one `mutex_new()`, global-allocated values because they
+# outlive the request that created them, a hard cap because `lib/alloc.cyr` has
+# **no `free()`**, and the rule that the lock is never held across a call into
+# the engine.
+#
+# The policy is deliberately the opposite in three places, because a definition
+# is **a named object the user created**, not an observation of something the
+# engine did:
+#
+#   1. **No latch.** `agnostic_ledger_latch` refuses to overwrite a terminal
+#      status — that is `ORACLE-AUDIT.md` §3.4's barrier. A definition is *meant*
+#      to be replaced. What guards it instead is that **create and replace are
+#      different operations**: `create` refuses an existing key, `replace`
+#      refuses an absent one. There is no upsert, because an upsert turns a
+#      typo'd key into a second silently-created definition and gives the caller
+#      no way to tell which happened.
+#   2. **No eviction.** The ledger drops terminal entries at its cap — an honest
+#      degradation for a crew nobody polled. Evicting a definition the user
+#      *named* would make `GET` 404 for something they created, which is the
+#      "successful run indistinguishable from a typo" failure in a worse place.
+#      At the cap `create` reports FULL and every existing key still answers.
+#   3. **A remove exists.** The engine's own
+#      `agnosai_app_state_definition_*` has insert, get, count and list — and no
+#      remove at all, which is one of three reasons this store is not that one.
+#      The others: it holds bare engine records, so `focus` and
+#      `allow_delegation` would have nowhere to live; and reaching it needs
+#      `agnosai_app_state_new` with six subsystems Agnostic does not construct.
+#
+# ## ⚠ Everything here is lost on restart, and that is disclosed
+#
+# Process-lifetime, exactly like crew outcomes. A restart empties the store and
+# every `GET` 404s. No property of the record can distinguish durable from not,
+# so it is closed the way M2 closed placeholder mode — by **disclosure**:
+# `"storage": "memory"` on every definitions response, and a WARN at mount.
+#
+# M4's job is to reimplement the functions below against `patra` with no change
+# to `src/routes/definitions.cyr`. That is why the route module must never touch
+# `_agnostic_definitions` directly.
+
+# What a store operation reports.
+#
+# Four outcomes rather than a boolean, because each maps to a different status
+# and collapsing them is what leaves a caller guessing — the same reasoning as
+# `AgnosticCancelResult` in `src/engine/crew.cyr`.
+enum AgnosticDefResult {
+    AGNOSTIC_DEF_OK      = 0;
+    AGNOSTIC_DEF_EXISTS  = 1;
+    AGNOSTIC_DEF_MISSING = 2;
+    AGNOSTIC_DEF_FULL    = 3;
+}
+
+# How many definitions the store holds.
+#
+# Bounded because the allocator has no `free()`. Unlike the ledger's cap this one
+# never evicts, so it is a real ceiling — `create` refuses past it and the caller
+# gets a 507 naming the condition. The cap disappears at M4.
+var AGNOSTIC_DEFINITIONS_MAX = 256;
+
+# Str-keyed map of key to `AgnosticAgentDef`.
+#
+# The record is stored directly rather than wrapped in an entry that repeats the
+# key: the key is already inside the engine record, and a second copy is a second
+# thing to keep in step.
+var _agnostic_definitions = 0;
+
+# The lock guarding the map. Pool workers run handlers concurrently, so two
+# clients creating the same key genuinely race.
+var _agnostic_definitions_mutex = 0;
+
+# Prepare the store. Mount time only, before any worker exists.
+fn agnostic_definitions_init(): i64 {
+    if (_agnostic_definitions == 0) { _agnostic_definitions = map_new_str(); }
+    if (_agnostic_definitions_mutex == 0) { _agnostic_definitions_mutex = mutex_new(); }
+    return 1;
+}
+
+# Drop every definition. For tests — the server initialises once at mount.
+fn agnostic_definitions_reset(): i64 {
+    _agnostic_definitions = map_new_str();
+    if (_agnostic_definitions_mutex == 0) { _agnostic_definitions_mutex = mutex_new(); }
+    return 0;
+}
+
+# How many definitions the store holds.
+fn agnostic_definitions_count(): i64 {
+    if (_agnostic_definitions == 0) { return 0; }
+    mutex_lock(_agnostic_definitions_mutex);
+    var n = map_size(_agnostic_definitions);
+    mutex_unlock(_agnostic_definitions_mutex);
+    return n;
+}
+
+# Store a definition under a key that must not already exist.
+#
+# Returns OK, EXISTS, or FULL. **Never an upsert** — see the module header.
+fn agnostic_definitions_create(key: Str, def): i64 {
+    agnostic_definitions_init();
+    if (key == 0 || def == 0) { return AGNOSTIC_DEF_MISSING; }
+
+    mutex_lock(_agnostic_definitions_mutex);
+    if (map_get(_agnostic_definitions, key) != 0) {
+        mutex_unlock(_agnostic_definitions_mutex);
+        return AGNOSTIC_DEF_EXISTS;
+    }
+    # ⚠ Checked under the SAME lock as the insert. Checking the count first and
+    # inserting after would let two workers both see room and both insert.
+    if (map_size(_agnostic_definitions) >= AGNOSTIC_DEFINITIONS_MAX) {
+        mutex_unlock(_agnostic_definitions_mutex);
+        return AGNOSTIC_DEF_FULL;
+    }
+    map_set(_agnostic_definitions, str_clone(key), def);
+    mutex_unlock(_agnostic_definitions_mutex);
+    return AGNOSTIC_DEF_OK;
+}
+
+# Replace the definition under an existing key.
+#
+# Returns OK or MISSING. **Never creates** — a `PUT` to a key that does not exist
+# is a 404, not a quiet create under a name the caller may have mistyped.
+fn agnostic_definitions_replace(key: Str, def): i64 {
+    agnostic_definitions_init();
+    if (key == 0 || def == 0) { return AGNOSTIC_DEF_MISSING; }
+
+    mutex_lock(_agnostic_definitions_mutex);
+    if (map_get(_agnostic_definitions, key) == 0) {
+        mutex_unlock(_agnostic_definitions_mutex);
+        return AGNOSTIC_DEF_MISSING;
+    }
+    map_set(_agnostic_definitions, str_clone(key), def);
+    mutex_unlock(_agnostic_definitions_mutex);
+    return AGNOSTIC_DEF_OK;
+}
+
+# The definition under this key, or 0.
+fn agnostic_definitions_get(key: Str): i64 {
+    if (_agnostic_definitions == 0 || key == 0) { return 0; }
+    mutex_lock(_agnostic_definitions_mutex);
+    var d = map_get(_agnostic_definitions, key);
+    mutex_unlock(_agnostic_definitions_mutex);
+    return d;
+}
+
+# Remove a definition. Returns OK or MISSING.
+#
+# ⚠ The record itself is **not** reclaimed — there is no `free()`. Removing drops
+# the map entry so the key stops answering and stops counting against the cap;
+# the bytes stay until the process exits. That is the same bargain every
+# global-allocated record in this tree makes, and it is why the cap exists.
+fn agnostic_definitions_remove(key: Str): i64 {
+    if (_agnostic_definitions == 0 || key == 0) { return AGNOSTIC_DEF_MISSING; }
+    mutex_lock(_agnostic_definitions_mutex);
+    if (map_get(_agnostic_definitions, key) == 0) {
+        mutex_unlock(_agnostic_definitions_mutex);
+        return AGNOSTIC_DEF_MISSING;
+    }
+    map_delete(_agnostic_definitions, key);
+    mutex_unlock(_agnostic_definitions_mutex);
+    return AGNOSTIC_DEF_OK;
+}
+
+# A snapshot of every key, as a vec of Str.
+#
+# ⚠ A **snapshot**, taken under the lock and released before the caller walks it.
+# Holding the lock across a caller's rendering would stall every other worker's
+# lookups, and a key removed between the snapshot and the fetch simply answers 0
+# — which the listing skips. That is the same trade `agnosai_orchestrator_crew_ids`
+# documents and makes for the same reason.
+fn agnostic_definitions_keys(): i64 {
+    var out = vec_new();
+    if (_agnostic_definitions == 0) { return out; }
+    mutex_lock(_agnostic_definitions_mutex);
+    var keys = map_keys(_agnostic_definitions);
+    var i = 0;
+    while (i < vec_len(keys)) {
+        vec_push(out, vec_get(keys, i));
+        i = i + 1;
+    }
+    mutex_unlock(_agnostic_definitions_mutex);
+    return out;
+}

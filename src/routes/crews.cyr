@@ -171,6 +171,11 @@ fn agnostic_route_crew_submit_a(a, body: Str): i64 {
     # output — see `agnostic_engine_init`.
     bayan_json_v_obj_set_a(a, accepted, AGNOSTIC_JK_MODE,
       bayan_json_v_str_new_a(a, agnostic_engine_mode()));
+    # Additive at M3, when the crew and definition surfaces became one agent
+    # model: `focus` and `allow_delegation` are accepted on a crew's agents and
+    # shape nothing, so the caller is told rather than left to discover it.
+    bayan_json_v_obj_set_a(a, accepted, AGNOSTIC_JK_UNFORWARDED,
+      agnostic_crew_req_unforwarded_a(a, req));
     return agnostic_response_json_a(a, AGNOSTIC_HTTP_ACCEPTED, accepted);
 }
 

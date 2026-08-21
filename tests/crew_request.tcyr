@@ -14,6 +14,8 @@ include "src/log.cyr"
 include "src/http/status.cyr"
 include "src/http/response.cyr"
 include "src/http/codec.cyr"
+include "src/engine/reject.cyr"
+include "src/engine/agentdef.cyr"
 include "src/engine/request.cyr"
 
 fn _t_has(s: Str, needle): i64 {
@@ -157,6 +159,10 @@ fn test_gpu_strict_is_refused_by_name() {
       "not the generic unknown-field message");
     assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "hard-fail"), 1,
       "explaining what is unsupported");
+    # ⚠ Located, because one decoder serves both surfaces: inside a crew's
+    # `agents` array the message carries the index; on the standalone definition
+    # surface the same refusal goes out unprefixed.
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "agents[0]"), 1, "and located");
     assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "gpu_required"), 1,
       "and pointing at the field that does work");
 }
@@ -175,7 +181,7 @@ fn test_gpu_required_is_forwarded() {
       &rj);
     assert_neq(r, 0, "the submission decodes");
 
-    var agent = vec_get(agnostic_crew_req_agents(r), 0);
+    var agent = agnostic_agent_def_engine(vec_get(agnostic_crew_req_agents(r), 0));
     assert_eq(agnosai_agent_gpu_required(agent), 1, "gpu_required reached the engine definition");
     assert_eq(agnosai_agent_gpu_memory_min_mb(agent), 8192, "and so did the memory floor");
 
@@ -199,7 +205,7 @@ fn test_optional_agent_fields_forwarded() {
       &rj);
     assert_neq(r, 0, "every listed agent field is accepted");
 
-    var agent = vec_get(agnostic_crew_req_agents(r), 0);
+    var agent = agnostic_agent_def_engine(vec_get(agnostic_crew_req_agents(r), 0));
     assert_eq(str_eq_cstr(agnosai_agent_name(agent), "Ann"), 1, "name forwarded");
     assert_eq(str_eq_cstr(agnosai_agent_domain(agent), "qa"), 1, "domain forwarded");
     assert_eq(str_eq_cstr(agnosai_agent_backstory(agent), "veteran"), 1, "backstory forwarded");

@@ -4,6 +4,52 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M3 (part 2), agent definitions: one model, three dispositions
+
+**97 assertions** in `tests/agentdef.tcyr`; 702 total across 14 suites, 0 failed.
+
+A crew's `agents` array and a stored agent definition are the **same model**,
+decoded by `agnostic_agent_def_decode_a` and by nothing else. `request.cyr` had a
+second copy; two decoders for one concept is how the two ends drift, which is
+`ORACLE-AUDIT.md` §3.3 restated at the level of a field.
+
+`ORACLE-AUDIT.md` §2.2 lists fourteen fields the oracle dropped in translation.
+Nothing here is dropped — every key a client can send has exactly one of three
+fates, and the client can tell which:
+
+- **FORWARDED** (12) — the engine has a slot that acts on it.
+- **RETAINED** (2) — `focus` and `allow_delegation`, kept and round-tripped
+  verbatim and **named in an `unforwarded` array** on every response carrying the
+  definition. Membership was decided by one test: does the canonical preset
+  library carry it? All 76 preset agents carry `focus`, 18 carry
+  `allow_delegation`, and neither reaches the engine.
+- **REFUSED** (12) — a 422 naming the missing capability, checked *before* the
+  generic unknown-field arm so a real capability request never reads as a typo.
+  `agent_key` is refused with a message pointing at `key`, because the oracle and
+  the engine both spell it the other way. `hardware` is the one field refused
+  despite the engine having a slot — the record is `ai-hwaccel`-shaped and
+  Agnostic has no decoder for it.
+
+Five CRUD routes, **201** for a definition against M2's 202 for a crew: a crew is
+accepted work that is not finished, a definition is complete when the call
+returns. **No upsert** in either direction — `POST` to an existing key is 409,
+`PUT` to an absent one is 404 — because an upsert turns a typo'd key into a
+second silently-created definition. **507**, not 503, when the store is full: 503
+means the engine cannot act, and one of those faults is retriable after a delete.
+
+The store is memory-resident, capped at 256, and **never evicts** — evicting a
+definition the user named would 404 something they created. Disclosed by
+`"storage": "memory"` on all five responses and a WARN at mount.
+
+### Fixed — an unset GPU memory floor became a concrete 0
+
+Found by live testing, not by the suite. The three GPU fields share one engine
+setter, so `gpu_required` alone still writes all three — and passing 0 for the
+unspecified floor overwrote the engine's `AGNOSAI_NO_LIMIT` sentinel, putting
+`"gpu_memory_min_mb": 0` on the wire for a field the caller never sent. An
+unspecified value acquiring a concrete one is the same class of defect as a
+dropped field, in the opposite direction. Pinned by a regression assertion.
+
 ### Added — M3 (part 1), the canonical preset library
 
 **71 assertions** in `tests/presets.tcyr`; 581 total across 13 suites, 0 failed.
