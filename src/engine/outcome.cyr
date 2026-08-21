@@ -1,0 +1,393 @@
+# agnostic/engine/outcome — what Agnostic knows about one crew execution.
+#
+# ## This module exists to make four audited defects unrepresentable
+#
+# `ORACLE-AUDIT.md` §3 records four high-severity defects in the Python oracle's
+# integration layer, and three of them are the *same* root cause: a result type
+# too thin to carry what the caller needs in order to branch. `BackendResult`
+# had `.error` and `.status`; every caller read `.error` and **no caller anywhere
+# in the codebase read `.status`**. So a well-formed `200` carrying
+# `{"status":"failed","results":[]}` arrived with `error=None`, fell through to
+# the aggregator, and was finalised as **completed**.
+#
+# The record here carries status AND error AND the engine-assigned crew id AND
+# the result set, and the normalising constructor below is the only way to build
+# one from an engine state. The defects map onto it like this:
+#
+# **§3.1 — a failed crew reported as completed.** `_normalise` demotes a
+# COMPLETED-with-no-results to FAILED *before* the record exists, so no caller
+# can observe the vacuous success in the first place.
+#
+# **§3.2 — cancel addressed an id the engine never saw.** `AGNOSTIC_OC_CREW_ID`
+# is only ever written from `agnosai_crew_state_crew_id` or the id
+# `agnosai_orchestrator_submit_crew` returns. Agnostic mints no crew id of its
+# own, so there is no local UUID to confuse with the engine's.
+#
+# **§3.4 — a terminal state overwritten by a sentinel.**
+# `agnostic_outcome_is_terminal` exists so the ledger can latch, and `_normalise`
+# never *promotes* a status — it only ever demotes toward failure.
+#
+# ## ⚠ The vacuous-`all()` bug is alive in the Cyrius engine too
+#
+# It would be comfortable to think §3.1 was a Python-ism — `all([])` is `True`,
+# and that is a language wart. It is not. `agnosai_crew_runner_run`
+# (`lib/agnosai.cyr:31410`) computes its status as:
+#
+#     var status = AGNOSAI_CREW_COMPLETED;
+#     ... else { for (var i = 0; i < vec_len(results); i = i + 1) {
+#         if (agnosai_task_result_status(...) != AGNOSAI_STATUS_COMPLETED) {
+#             status = AGNOSAI_CREW_FAILED; } } }
+#
+# Over an **empty** `results` the loop body never runs and the status stays
+# COMPLETED. That is the identical defect, written in Cyrius, one dependency
+# away — reached by a different route than the oracle's but landing in the same
+# place. `agnosai_validate_crew_request` requires at least one task, so a crew
+# that completes with zero results is an engine anomaly rather than a client
+# error; either way it is **not success**, and `_normalise` says so.
+#
+# The lesson the audit draws is the one this file is built on:
+# **an empty result set is not success.**
+
+# The lifecycle of a crew, as Agnostic reports it.
+#
+# ⚠ **These are deliberately NOT assumed equal to the `AGNOSAI_CREW_*` values**,
+# even though four of them currently coincide. `agnostic_crew_status_from_engine`
+# translates arm by arm against the engine's own named constants, so a
+# renumbering upstream is a compile-time identity change here rather than a
+# silent misreport. The cost of the translation is one branch; the cost of the
+# coupling would be paid the day agnosai inserts a status.
+#
+# `UNKNOWN` is Agnostic's own and has no engine counterpart — see
+# `agnostic_ledger_poll` for the eviction case that produces it.
+enum AgnosticCrewStatus {
+    AGNOSTIC_CREW_PENDING   = 0;
+    AGNOSTIC_CREW_RUNNING   = 1;
+    AGNOSTIC_CREW_COMPLETED = 2;
+    AGNOSTIC_CREW_FAILED    = 3;
+    AGNOSTIC_CREW_CANCELLED = 4;
+    AGNOSTIC_CREW_UNKNOWN   = 5;
+}
+
+# The outcome record — 32 bytes.
+enum AgnosticOutcomeOff {
+    AGNOSTIC_OC_CREW_ID = 0;
+    AGNOSTIC_OC_STATUS  = 8;
+    AGNOSTIC_OC_ERROR   = 16;
+    AGNOSTIC_OC_RESULTS = 24;
+    AGNOSTIC_OC_SIZE    = 32;
+}
+
+# The wire vocabulary this module owns, interned once at load time.
+#
+# ⚠ **Not reused from `lib/agnosai.cyr`, which interns identical literals as
+# `AGN_JK_CREW_ID` and friends.** Two reasons. `scripts/check-symbols.sh` rule 3
+# forbids a `src/` name that collides with anything `lib/` exports, so these
+# could not carry those spellings anyway — but the substantive reason is that
+# Agnostic's wire contract is Agnostic's. Reading the engine's interned keys
+# would make a rename inside a dependency a breaking change to our API, silently
+# and at load time.
+var AGNOSTIC_JK_CREW_ID    = str_from("crew_id");
+var AGNOSTIC_JK_RESULTS    = str_from("results");
+var AGNOSTIC_JK_TASK_COUNT = str_from("task_count");
+var AGNOSTIC_JK_TASK_ID    = str_from("task_id");
+var AGNOSTIC_JK_OUTPUT     = str_from("output");
+
+var AGNOSTIC_JV_PENDING   = str_from("pending");
+var AGNOSTIC_JV_RUNNING   = str_from("running");
+var AGNOSTIC_JV_COMPLETED = str_from("completed");
+var AGNOSTIC_JV_FAILED    = str_from("failed");
+var AGNOSTIC_JV_CANCELLED = str_from("cancelled");
+var AGNOSTIC_JV_UNKNOWN   = str_from("unknown");
+
+# The message a demoted vacuous success carries. Interned so the demotion path
+# allocates nothing — it runs when the engine is already misbehaving, which is
+# the worst moment to depend on an allocation succeeding.
+var AGNOSTIC_OC_EMPTY_MSG = str_from("engine reported completion with no task results");
+
+# The message a demoted partial success carries.
+var AGNOSTIC_OC_PARTIAL_MSG = str_from("engine reported completion with a task that did not complete");
+
+# The reason attached to a failure the engine declined to explain.
+#
+# ⚠ **The engine has no error channel on a crew state.** `CrewState` is
+# `{crew_id, status, results, profile}` — there is no field for why. Worse, a
+# timed-out crew is reported as `agnosai_crew_state_new(crew_id, FAILED)` with
+# its partial results *discarded*, so it arrives indistinguishable from any other
+# resultless failure; the real reason exists only in a sakshi WARN and the audit
+# chain, neither of which is reachable from here.
+#
+# So this names **both** possibilities and guesses neither. A bare
+# `{"status":"failed"}` with no `error` at all would be worse: the client learns
+# nothing and has no term to search the operator's logs for.
+var AGNOSTIC_OC_OPAQUE_MSG = str_from("engine reported failure without a reason: a task failed or the crew timed out");
+
+# The snake_case wire spelling of a status. Never allocates.
+fn agnostic_crew_status_to_wire(status): i64 {
+    if (status == AGNOSTIC_CREW_RUNNING)   { return AGNOSTIC_JV_RUNNING; }
+    if (status == AGNOSTIC_CREW_COMPLETED) { return AGNOSTIC_JV_COMPLETED; }
+    if (status == AGNOSTIC_CREW_FAILED)    { return AGNOSTIC_JV_FAILED; }
+    if (status == AGNOSTIC_CREW_CANCELLED) { return AGNOSTIC_JV_CANCELLED; }
+    if (status == AGNOSTIC_CREW_UNKNOWN)   { return AGNOSTIC_JV_UNKNOWN; }
+    return AGNOSTIC_JV_PENDING;
+}
+
+# Translate an engine crew status into Agnostic's.
+#
+# ⚠ **An engine status this does not recognise becomes UNKNOWN, not PENDING.**
+# Falling back to PENDING would tell a polling client "keep waiting" about a
+# state we cannot interpret, which is the failure mode of every default-to-the-
+# happy-value fallback in the audit. UNKNOWN is honest and is not terminal, so
+# the ledger will keep trying.
+fn agnostic_crew_status_from_engine(s): i64 {
+    if (s == AGNOSAI_CREW_PENDING)   { return AGNOSTIC_CREW_PENDING; }
+    if (s == AGNOSAI_CREW_RUNNING)   { return AGNOSTIC_CREW_RUNNING; }
+    if (s == AGNOSAI_CREW_COMPLETED) { return AGNOSTIC_CREW_COMPLETED; }
+    if (s == AGNOSAI_CREW_FAILED)    { return AGNOSTIC_CREW_FAILED; }
+    if (s == AGNOSAI_CREW_CANCELLED) { return AGNOSTIC_CREW_CANCELLED; }
+    return AGNOSTIC_CREW_UNKNOWN;
+}
+
+# Build an outcome in `a`. Returns 0 when the arena is exhausted.
+#
+# `results` may be 0 (no result set reported) or a vec of engine task results;
+# `error` may be 0. Callers should prefer `agnostic_outcome_from_state_a`, which
+# applies the normalisation this constructor deliberately does not.
+fn agnostic_outcome_new_a(a, crew_id, status, error, results): i64 {
+    var o = alloc_via(a, AGNOSTIC_OC_SIZE);
+    if (o == 0) { return 0; }
+    store64(o + AGNOSTIC_OC_CREW_ID, crew_id);
+    store64(o + AGNOSTIC_OC_STATUS, status);
+    store64(o + AGNOSTIC_OC_ERROR, error);
+    store64(o + AGNOSTIC_OC_RESULTS, results);
+    return o;
+}
+
+# Build an outcome from the global allocator. Not for request paths.
+fn agnostic_outcome_new(crew_id, status, error, results): i64 {
+    return agnostic_outcome_new_a(default_alloc(), crew_id, status, error, results);
+}
+
+# The engine-assigned crew id. 0 for a null outcome.
+#
+# ⚠ **This is the engine's id, never one Agnostic minted.** §3.2 is the oracle
+# POSTing a local UUID the engine had never seen, discarding the 404, and marking
+# its own record cancelled while the crew kept running. There is no local id in
+# this design to make that mistake with.
+fn agnostic_outcome_crew_id(o): i64 {
+    if (o == 0) { return 0; }
+    return load64(o + AGNOSTIC_OC_CREW_ID);
+}
+
+# The lifecycle status. UNKNOWN for a null outcome — never a happy value.
+fn agnostic_outcome_status(o): i64 {
+    if (o == 0) { return AGNOSTIC_CREW_UNKNOWN; }
+    return load64(o + AGNOSTIC_OC_STATUS);
+}
+
+# The failure reason as a Str, or 0 when there is none.
+fn agnostic_outcome_error(o): i64 {
+    if (o == 0) { return 0; }
+    return load64(o + AGNOSTIC_OC_ERROR);
+}
+
+# The engine task results as a vec, or 0 when none was reported.
+#
+# ⚠ 0 and an empty vec are **different**: 0 is "the engine reported no result
+# set at all", an empty vec is "the engine reported a set, and it was empty".
+# Both are refused as success, but only by `_normalise` — a caller reading this
+# accessor directly gets the raw distinction.
+fn agnostic_outcome_results(o): i64 {
+    if (o == 0) { return 0; }
+    return load64(o + AGNOSTIC_OC_RESULTS);
+}
+
+# How many task results the outcome carries. 0 for a null or absent set.
+fn agnostic_outcome_result_count(o): i64 {
+    var r = agnostic_outcome_results(o);
+    if (r == 0) { return 0; }
+    return vec_len(r);
+}
+
+# Whether the crew reached a state it can never leave.
+#
+# The ladder §3.4 needs: once an outcome is terminal the ledger latches it, so
+# nothing downstream can overwrite a `failed` with a `completed` the way the
+# oracle's aggregator did.
+fn agnostic_outcome_is_terminal(o): i64 {
+    var s = agnostic_outcome_status(o);
+    if (s == AGNOSTIC_CREW_COMPLETED) { return 1; }
+    if (s == AGNOSTIC_CREW_FAILED)    { return 1; }
+    if (s == AGNOSTIC_CREW_CANCELLED) { return 1; }
+    return 0;
+}
+
+# Whether the crew succeeded — the single question a caller should ask.
+#
+# ⚠ **Read this, not `error == 0`.** Reading the error field alone is exactly
+# what §3.1 did: the oracle's caller branched on `.error`, which a well-formed
+# `200 {"status":"failed"}` left as `None`, and never on `.status`. After
+# `_normalise` a COMPLETED outcome is guaranteed non-empty and all-tasks-
+# complete, so this one comparison is sufficient — and it is sufficient *because*
+# the normalisation ran, not because status is trustworthy on its own.
+fn agnostic_outcome_is_success(o): i64 {
+    if (agnostic_outcome_status(o) == AGNOSTIC_CREW_COMPLETED) { return 1; }
+    return 0;
+}
+
+# Whether every task in `results` reached COMPLETED. Vacuously 1 over an empty
+# set, which is why no caller may use this without the emptiness test beside it.
+fn _agnostic_outcome_all_tasks_ok(results): i64 {
+    if (results == 0) { return 0; }
+    var n = vec_len(results);
+    var i = 0;
+    while (i < n) {
+        if (agnosai_task_result_status(vec_get(results, i)) != AGNOSAI_STATUS_COMPLETED) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Demote a claimed success that the result set does not support.
+#
+# **Only ever demotes.** A non-COMPLETED status is returned untouched, so this
+# can never manufacture a success — which is the direction §3.4 failed in, where
+# a sentinel overwrote a terminal `failed` with `completed`.
+#
+# Two demotions, both toward FAILED:
+#   * COMPLETED with no result set, or an empty one — the vacuous-`all()` case
+#     that §3.1 shipped and that `agnosai_crew_runner_run` can still produce.
+#   * COMPLETED with a task result that did not itself complete. The engine
+#     computes this correctly today; mirroring the invariant here means a
+#     regression upstream does not become a wrong answer on our wire.
+fn _agnostic_outcome_normalise(o): i64 {
+    if (o == 0) { return 0; }
+
+    # A failure the engine did not explain, with nothing in the result set to
+    # explain it either. Attach the reason that names both causes rather than
+    # emitting a failure with no `error` field at all.
+    if (load64(o + AGNOSTIC_OC_STATUS) == AGNOSTIC_CREW_FAILED) {
+        if (load64(o + AGNOSTIC_OC_ERROR) == 0) {
+            var rs = load64(o + AGNOSTIC_OC_RESULTS);
+            if (rs == 0 || vec_len(rs) == 0) {
+                store64(o + AGNOSTIC_OC_ERROR, AGNOSTIC_OC_OPAQUE_MSG);
+            }
+        }
+        return o;
+    }
+
+    if (load64(o + AGNOSTIC_OC_STATUS) != AGNOSTIC_CREW_COMPLETED) { return o; }
+
+    var results = load64(o + AGNOSTIC_OC_RESULTS);
+    if (results == 0 || vec_len(results) == 0) {
+        store64(o + AGNOSTIC_OC_STATUS, AGNOSTIC_CREW_FAILED);
+        store64(o + AGNOSTIC_OC_ERROR, AGNOSTIC_OC_EMPTY_MSG);
+        return o;
+    }
+    if (_agnostic_outcome_all_tasks_ok(results) == 0) {
+        store64(o + AGNOSTIC_OC_STATUS, AGNOSTIC_CREW_FAILED);
+        store64(o + AGNOSTIC_OC_ERROR, AGNOSTIC_OC_PARTIAL_MSG);
+        return o;
+    }
+    return o;
+}
+
+# Build a normalised outcome from an engine crew state, in `a`.
+#
+# **The only supported way to turn an engine state into an outcome.** Everything
+# this module exists to prevent is prevented here, before the record is visible
+# to any caller. Returns 0 for a null state or an exhausted arena.
+fn agnostic_outcome_from_state_a(a, s): i64 {
+    if (s == 0) { return 0; }
+    var o = agnostic_outcome_new_a(a,
+      agnosai_crew_state_crew_id(s),
+      agnostic_crew_status_from_engine(agnosai_crew_state_status(s)),
+      0,
+      agnosai_crew_state_results(s));
+    return _agnostic_outcome_normalise(o);
+}
+
+# Build a normalised outcome from an engine crew state, global allocator.
+#
+# ⚠ Not for request paths — `lib/alloc.cyr` has no `free()`.
+fn agnostic_outcome_from_state(s): i64 {
+    return agnostic_outcome_from_state_a(default_alloc(), s);
+}
+
+# Render an outcome as the bayan JSON value Agnostic puts on the wire.
+#
+# Shape: `{crew_id, status, task_count, results[], error?}`.
+#
+# ⚠ **`error` is omitted when absent, and `task_count` never is.** A client
+# scripting against this can tell a real empty run from a missing field, which is
+# the distinction the oracle's response shape destroyed. `results` is likewise
+# always present, as an array — never omitted, so `len(results)` is always a
+# legal read.
+fn agnostic_outcome_to_value_a(a, o): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+
+    var id = agnostic_outcome_crew_id(o);
+    if (id == 0) { id = str_from(""); }
+    var idv = bayan_json_v_str_new_a(a, id);
+    if (idv == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_CREW_ID, idv);
+
+    var sv = bayan_json_v_str_new_a(a, agnostic_crew_status_to_wire(agnostic_outcome_status(o)));
+    if (sv == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS, sv);
+
+    var cv = bayan_json_v_int_new_a(a, agnostic_outcome_result_count(o));
+    if (cv == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_TASK_COUNT, cv);
+
+    var arr = bayan_json_v_arr_new_a(a);
+    if (arr == 0) { return 0; }
+    var results = agnostic_outcome_results(o);
+    if (results != 0) {
+        var n = vec_len(results);
+        var i = 0;
+        while (i < n) {
+            var tv = _agnostic_task_result_to_value_a(a, vec_get(results, i));
+            if (tv == 0) { return 0; }
+            bayan_json_v_arr_push_a(a, arr, tv);
+            i = i + 1;
+        }
+    }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_RESULTS, arr);
+
+    var err = agnostic_outcome_error(o);
+    if (err != 0) {
+        var ev = bayan_json_v_str_new_a(a, err);
+        if (ev == 0) { return 0; }
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_ERROR, ev);
+    }
+    return obj;
+}
+
+# Render one engine task result as `{task_id, status, output}`.
+#
+# ⚠ **Rendered here rather than through `agnosai_task_result_to_value_a`.** The
+# engine's renderer emits its own key set and would make an upstream rename a
+# silent change to Agnostic's wire contract — the same reasoning as the interned
+# vocabulary above. It also emits `metadata`, which is engine-internal and has no
+# place in a product-tier response.
+fn _agnostic_task_result_to_value_a(a, r): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0 || r == 0) { return obj; }
+
+    var idv = bayan_json_v_str_new_a(a, agnosai_task_result_task_id(r));
+    if (idv == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_TASK_ID, idv);
+
+    var sv = bayan_json_v_str_new_a(a,
+      agnosai_task_status_to_wire_a(a, agnosai_task_result_status(r)));
+    if (sv == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS, sv);
+
+    var ov = bayan_json_v_str_new_a(a, agnosai_task_result_output(r));
+    if (ov == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_OUTPUT, ov);
+    return obj;
+}

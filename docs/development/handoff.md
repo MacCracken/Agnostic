@@ -2,7 +2,7 @@
 
 > **Start here.** This is the orientation document for picking up the Python → Cyrius port.
 > It is deliberately short and links outward rather than restating.
-> Last refreshed: **2026-08-21**, at `919174d`.
+> Last refreshed: **2026-08-21**, after M2.
 
 Read in this order:
 
@@ -12,27 +12,29 @@ Read in this order:
 | [`state.md`](state.md) | Live numbers — versions, surface area, dep set, gates |
 | [`roadmap.md`](roadmap.md) | M0–M9 sequencing and per-milestone gates |
 | [`../../CYRIUS-PORT-BRIEF.md`](../../CYRIUS-PORT-BRIEF.md) | Research snapshot (2026-08-19): language notes, dep stack, **§7 decisions — binding** |
-| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 85 verified defects in the Python oracle. **§3 is a hard gate on M2** |
+| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 85 verified defects in the Python oracle. §3 gated M2; **§2.2 gates M3** |
 | [`../adr/`](../adr/) | Two ADRs: health/readiness split, daimon Tier 1 deferral |
 
 ---
 
 ## 1. Where the port is
 
-**M0 and M1 are complete. M2 — AgnosAI integration — is next and is unblocked.**
+**M0, M1 and M2 are complete. M3 — definitions, presets, agents — is next.**
 
-Agnostic serves real HTTP today: pooled `sandhi` server, `:name` routing, per-request arena,
-strict env config, JSON structured logging with thread-local trace ids, `/health` + `/ready`, and
-signal-driven graceful shutdown. 12 source files, 1,741 lines, 129 top-level definitions.
-**8 test suites, 229 assertions, 0 failed.**
+Agnostic runs crews today. On top of M1's HTTP foundation (pooled `sandhi` server, `:name` routing,
+per-request arena, strict env config, JSON logging with thread-local trace ids, `/health` +
+`/ready`, signal-driven graceful shutdown) it now submits crews to AgnosAI in-process and answers
+**202-then-poll**: `POST /api/v1/crews`, `GET /api/v1/crews/{id}`, `.../cancel`, `.../events`.
+17 source files, 4,148 lines, 269 top-level definitions.
+**12 test suites, 490 assertions, 0 failed.**
 
 Version is **0.1.0** and stays there. Per decision #4 the whole port ships as **one release,
 1.0.0** — no intermediate tags, so `main` stays green continuously rather than being stabilised
 once per milestone. Agnostic was never SemVer before (the Python line was CalVer, `2026.3.18`);
 1.0.0 is the first.
 
-`[deps.agnosai]` is pinned at **2.0.4** and already linked — `lib/agnosai.cyr` is in the compile
-unit right now. **M2 is handler work, not integration plumbing.**
+`[deps.agnosai]` is pinned at **2.0.4**, linked in-process, and now genuinely exercised — the crew
+surface calls `agnosai_orchestrator_submit_crew`, reads the registry, and drains the event bus.
 
 ---
 
@@ -71,31 +73,47 @@ sh scripts/check-clean.sh && sh scripts/check-symbols.sh && cyrius test
 
 ---
 
-## 3. What M2 must do — and the four things it must not
+## 3. What M2 established, and what M3 inherits
 
-M2 wires crew submit / status / cancel through `agnosai_orchestrator_submit_crew`, with `majra`
-owning the queue and **202-then-poll** semantics (decision **D2**), and live progress off the event
-bus.
+M2's gate was `ORACLE-AUDIT.md` §3 — four high-severity defects, three sharing one root cause: a
+result type too thin to branch on. All four are designed out, each by a mechanism rather than by
+care, and each pinned by a suite:
 
-⚠ **`ORACLE-AUDIT.md` §3 is a design gate, not background reading.** The oracle's integration layer
-has four high-severity defects, and three of them are the *same* root cause — a result type too thin
-to carry what the caller needs to branch on. Designing them out is a requirement of the milestone:
+| Defect | Mechanism | Pinned by |
+|---|---|---|
+| §3.1 failed reported as completed | `_agnostic_outcome_normalise` demotes COMPLETED-with-no-results to FAILED before the record exists | `tests/outcome.tcyr` |
+| §3.2 cancel addressing an unknown id | every id originates in `agnosai_crew_new`; a refusal is returned, not discarded | `tests/crews_route.tcyr` |
+| §3.3 two task models | `tasks` required, no fallback path, an unlisted key is a 422 naming it | `tests/crew_request.tcyr` |
+| §3.4 terminal overwritten | `agnostic_ledger_latch` refuses to write over a terminal status | `tests/ledger.tcyr` |
 
-| Oracle defect | What M2 must do instead |
-|---|---|
-| §3.1 — a failed crew is reported as **completed** (`.status` is never read anywhere) | A result type that carries status **and** error **and** the remote id, with the caller branching on status |
-| §3.2 — cancel POSTs a **local** UUID AgnosAI has never seen; 404 is discarded and the record is marked cancelled while the crew keeps running | Retain the id AgnosAI assigns; cancellation must **stop work**, not relabel a record |
-| §3.3 — the two backends run structurally different work (a `tasks` array is silently discarded, so the single-task fallback always fires) | **One** task model |
-| §3.4 — fleet/GPU failures return `{}, 0`, which `all()` treats as vacuously true, overwriting `failed` with success | Terminal states stay terminal |
+⚠ **The lesson generalises, and M3 inherits it: an empty result set is not success.** `all()` over an
+empty collection is vacuously true in Python — and `agnosai_crew_runner_run` makes the identical
+mistake in Cyrius, setting COMPLETED and only downgrading inside a loop over `results` that does not
+execute when the set is empty. Assume any new aggregate has the same hole until you have looked.
 
-The shared lesson: **an empty result set is not success.** `all()` over an empty collection is
-vacuously true in Python, and the equivalent mistake is just as available in Cyrius.
+**M3 is definitions, presets and agents**, and its gate is field forwarding: every field either
+forwarded or explicitly rejected, never silently dropped. That pattern is already built and under
+test — `src/engine/request.cyr` is the worked example, and `ORACLE-AUDIT.md` §2.2's `gpu_strict` has
+its counterpart (`gpu_required`) forwarded to `agnosai_agent_with_gpu` and asserted. Extend it
+rather than re-inventing it.
 
-Design obligation carried from §7.3: **keep the seam shim-able.** Route tables and request decoding
-stay separable from handler logic, so an alternate surface can be mounted later without touching
-either. Cheap now, expensive to retrofit.
+⚠ **Verify the oracle's 18 presets are viable before porting them.** A preset naming a tool the
+Cyrius registry cannot resolve fails **silently** — the crew assembles empty rather than erroring,
+which is §3.1's shape in different clothes. Agnostic's preset library is canonical (see §4).
 
----
+### Three things M2 leaves open, deliberately
+
+- **Placeholder mode is indistinguishable from real work by results alone.** With no
+  `AGNOSTIC_LLM_URL`, `agnosai_execute_task` takes its `client == 0` arm and echoes the task
+  description back as output with status COMPLETED. Closed by *disclosure* — `engine_mode` on every
+  submit and poll response, plus a WARN at mount — not by type, because no property of a result type
+  can separate them. **Any new surface reporting crew output must disclose it too.**
+- **The crew routes are unauthenticated.** `agnostic_route_needs_auth` answers 1 for all four, but
+  the dispatch ladder's auth rung is still a comment until M5. The loopback default bind is the only
+  thing in front of them.
+- **Results are memory-resident and capped** — 1,024 crews, 256 progress events each. Past that a
+  poll answers `unknown`, never a wrong answer. Durable results are M4's, and
+  `src/engine/ledger.cyr` is the seam they land on.
 
 ## 4. Settled — do not re-open
 
@@ -136,6 +154,23 @@ then, against a real requirement. Out of scope for v1.0.
   response degrades instead of faulting.
 - **sandhi accessors return NUL-terminated cstrings, not `Str`.** Passing one through unwrapped reads
   the pointer as a `Str` header and every downstream length is garbage.
+- **sakshi takes `(pointer, length)`, and a miscount fails silently.** One too many puts the NUL
+  terminator inside the message — an escaped NUL in JSON output; one too few truncates it. Neither
+  is a compile error, a lint warning, nor a test failure, because the suites assert on handler
+  behaviour rather than log text. Both shipped in one M2 commit.
+  `scripts/check-log-lengths.py` now gates it, from `check-clean.sh`.
+- **⚠ The compiler's line numbers for `src/` warnings are wrong.** Two pre-existing
+  "assigning non-pointer to typed pointer" warnings in `src/http/router.cyr` were reported at lines
+  44 and 56 before M2 and at 98 and 110 after — a shift of exactly the number of lines added
+  *elsewhere* in the file. The columns stayed stable, so the diagnostic knows the site and
+  mis-attributes the line. **Do not chase a `src/` warning by line number**; find it by column and
+  construct. Worth filing upstream — and never patch the cyrius tree from a consumer repo.
+- **Two AgnosAI behaviours bite only the async path.** A cyclic DAG submitted through `submit_crew`
+  leaves the crew reporting `pending` **forever** — the error return is discarded on the submit
+  thread and the registry keeps the PENDING entry `_agnosai_orch_register` seeded — and
+  `_agnosai_orch_evict_locked` drops **every** finished crew once the registry holds 1000, so a
+  completed crew can 404. Both are worked around in `src/engine/`, not upstream; read those module
+  headers before changing either.
 - **`CYRIUS_PKG_VERSION` resolves only in the entry file**, not in `include`d files — filed upstream
   (`2026-08-20-pkgver-not-visible-in-included-files.md`, open at 6.5.33). Workaround in place: read
   it in `main.cyr` and hand it to the module via a setter.

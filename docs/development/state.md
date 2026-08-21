@@ -2,7 +2,7 @@
 
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
-> Last refreshed: 2026-08-21.
+> Last refreshed: 2026-08-21, after M2.
 >
 > **Picking this port up?** Start at [`handoff.md`](handoff.md) — orientation,
 > the build procedure that avoids an unreproducible lock, and what M2 must do.
@@ -29,7 +29,8 @@ Python line was CalVer (`2026.3.18`).
 
 ## Source
 
-**M1 complete** — 12 files, 129 top-level definitions, all `agnostic_*`-prefixed.
+**M2 complete** — 17 files, 4,148 lines, 269 top-level definitions, all
+`agnostic_*`-prefixed.
 
 | module | role |
 |---|---|
@@ -38,9 +39,27 @@ Python line was CalVer (`2026.3.18`).
 | `src/trace.cyr` | thread-local W3C trace ids (sakshi's is a process global) |
 | `src/log.cyr` | sakshi emit hook, one JSON object per event |
 | `src/http/{status,response,codec,router}.cyr` | status table, response records, JSON allow-list codec, route matching |
+| `src/engine/outcome.cyr` | the result type carrying status + error + engine id + results |
+| `src/engine/ledger.cyr` | what Agnostic remembers about submitted crews; the terminal latch |
+| `src/engine/request.cyr` | one task model, allow-list decoded, DAG validated |
+| `src/engine/crew.cyr` | the orchestrator bridge — submit, poll, cancel |
 | `src/routes/health.cyr` | `/health` and `/ready` |
+| `src/routes/crews.cyr` | the crew surface |
 | `src/server/serve.cyr` | the only module that touches a socket |
 | `src/main.cyr` | entry; thin by convention |
+
+The crew surface, and what each code means:
+
+| route | codes |
+|---|---|
+| `POST /api/v1/crews` | **202** accepted · 400 semantic · 422 shape · 503 engine down |
+| `GET /api/v1/crews/{id}` | 200 · 404 never submitted · 422 malformed id |
+| `POST /api/v1/crews/{id}/cancel` | 200 · 404 · **409 already terminal** · 422 · 503 |
+| `GET /api/v1/crews/{id}/events` | 200 · 404 · 422 |
+
+⚠ `GET /api/v1/crews` is in the table with no handler, so it answers **405**
+rather than a 404 claiming the collection does not exist. A listing endpoint
+needs pagination and a tenancy scope; both arrive with M4/M5.
 
 The Python implementation is retained at `python-port/` as a behavioural oracle.
 It is never built or shipped, and it is **not** a specification —
@@ -48,7 +67,7 @@ It is never built or shipped, and it is **not** a specification —
 
 ## Tests
 
-**8 suites, 229 assertions, 0 failed** (`cyrius test`, run under the pin).
+**12 suites, 490 assertions, 0 failed** (`cyrius test`, run under the pin).
 
 ⚠ Counts here are assertion-suite lines only. `cyrius test`'s final
 `N passed, 0 failed` line is the **suite** tally, not a suite — earlier figures
@@ -57,6 +76,14 @@ in this repo (`222`) and in agnosai (`8,038`) double-counted it.
 - `tests/{agnostic,codec,config,health,log,router,trace}.tcyr` — M1 coverage (7 suites, 215 assertions)
 - `tests/deps_symbols.tcyr` — **14 assertions**, cross-dependency symbol integrity;
   see Hardening below
+- `tests/outcome.tcyr` — **63 assertions**, the result type. Carries the §3.1 barrier:
+  an engine COMPLETED with an empty result set must demote to FAILED
+- `tests/ledger.tcyr` — **53 assertions**, the §3.4 barrier: a terminal status
+  cannot be moved, in either direction, by any later observation
+- `tests/crew_request.tcyr` — **86 assertions**, the §3.3 barrier: `tasks` is
+  required, there is no fallback, and a cyclic graph is refused before submission
+- `tests/crews_route.tcyr` — **59 assertions**, the surface end to end, including
+  the §3.2 barrier: an id we never submitted is a 404 that relabels nothing
 - `tests/agnostic.bcyr` — benchmark stub · `tests/agnostic.fcyr` — fuzz stub
 
 ## Dependencies
@@ -90,9 +117,24 @@ Agnostic is built to stand on its own, not as a required layer.
 | baseline benches | `bench-history.csv` seeded — `noop` 2 ns @ `830216c` |
 | documented | `BENCHMARKS.md` generated |
 
-### The gap `check-symbols.sh` does not cover
+### Two gates added at M2
 
-⚠ **It scans `src/` only.** Cyrius has one flat symbol namespace with
+**`check-symbols.sh` rule 3 now scans enum members on both sides.** It compared
+only `^(fn|var)` against `lib/`. Cyrius enum qualifiers are **cosmetic**, so a
+`src/` enum member colliding with a `lib/` one silently replaced it for the whole
+program — the same mechanism as the `BACKEND_COUNT` defect below, in the one
+declaration kind the gate did not cover. Mutation-verified.
+
+**`scripts/check-log-lengths.py`**, wired into `check-clean.sh`. sakshi takes
+`(pointer, length)` pairs, so every message's byte count is hand-written and
+nothing checked it. Both failure modes are silent and both shipped in one M2
+commit: a count one too high put the **NUL terminator inside a JSON string**, and
+one too low **truncated** a message. Invisible to the compiler, to lint, and to
+suites that assert on handler behaviour rather than log text. Mutation-verified.
+
+### The gap `check-symbols.sh` still does not cover
+
+⚠ **Rules 1 and 2 scan `src/` only.** Cyrius has one flat symbol namespace with
 last-definition-wins; the compiler warns on a duplicate `fn` but is **silent**
 on a duplicate `var`. A collision between two *dependencies* inside `lib/` is
 therefore invisible to the compiler and the linter at the same time — and
@@ -117,5 +159,21 @@ Deferred deliberately — they are upstream, and they announce themselves.
 
 ## Next
 
-See [`roadmap.md`](roadmap.md). M2 is AgnosAI integration, which must design out
-the four defects recorded in `ORACLE-AUDIT.md` §3.
+See [`roadmap.md`](roadmap.md). **M3 — definitions, presets, agents.** The
+field-forwarding gate it turns on is already built and under test:
+`src/engine/request.cyr` establishes the pattern M3 extends, and
+`ORACLE-AUDIT.md` §2.2's `gpu_strict` has its counterpart forwarded and asserted.
+
+⚠ **Carried into M3 and beyond, from M2:**
+
+- **Placeholder mode is indistinguishable from real work by results alone.**
+  Without `AGNOSTIC_LLM_URL` the engine echoes task descriptions back with status
+  COMPLETED. Closed by disclosure (`engine_mode` on every response, a WARN at
+  mount), not by type — so any *new* surface that reports crew output must
+  disclose it too.
+- **The crew routes are unauthenticated.** `agnostic_route_needs_auth` answers 1
+  for all four, but the dispatch ladder's auth rung is still a comment until M5.
+  The default bind is loopback, which is the only thing standing in front of them.
+- **Results are memory-resident and capped.** The ledger retains 1,024 crews and
+  256 progress events each; beyond that a poll answers `unknown` rather than a
+  wrong answer. Durable results are M4's.

@@ -1,0 +1,405 @@
+# agnostic/engine/request — one task model, and every field forwarded or refused.
+#
+# ORACLE-AUDIT.md §3.3: the oracle's request model declared no `tasks` field, so
+# a client-supplied `tasks` array was silently discarded and a single-task
+# fallback ran instead — every time, with no error. §2.2 records fourteen more
+# fields dropped the same way, `gpu_strict` being the one that turned a hard-fail
+# GPU requirement into a silent CPU fallback.
+#
+# This suite is the barrier for both.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+include "src/engine/request.cyr"
+
+fn _t_has(s: Str, needle): i64 {
+    var n = str_len(s);
+    var d = str_data(s);
+    var m = 0;
+    while ((load8(needle + m) & 0xFF) != 0) { m = m + 1; }
+    if (m > n) { return 0; }
+    var i = 0;
+    while (i <= n - m) {
+        var j = 0;
+        while (j < m) {
+            if ((load8(d + i + j) & 0xFF) != (load8(needle + j) & 0xFF)) { break; }
+            j = j + 1;
+        }
+        if (j == m) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Decode `body`; returns the request, leaving the rejection in `out`.
+fn _t_decode(a, body, out): i64 {
+    store64(out, 0);
+    var v = agnostic_decode_a(a, str_from(body));
+    if (v == 0) { return 0; }
+    return agnostic_crew_req_from_value_a(a, v, out);
+}
+
+# A minimal valid submission with one agent and one task.
+fn _t_valid(): i64 {
+    return "{\"name\":\"sweep\",\"agents\":[{\"key\":\"a1\",\"role\":\"tester\",\"goal\":\"find bugs\"}],\"tasks\":[{\"description\":\"run the suite\"}]}";
+}
+
+fn test_valid_minimum() {
+    test_group("request/valid");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var r = _t_decode(a, _t_valid(), &rj);
+
+    assert_neq(r, 0, "a minimal well-formed submission decodes");
+    assert_eq(load64(&rj), 0, "with no rejection");
+    assert_eq(str_eq_cstr(agnostic_crew_req_name(r), "sweep"), 1, "name read");
+    assert_eq(vec_len(agnostic_crew_req_agents(r)), 1, "one agent");
+    assert_eq(vec_len(agnostic_crew_req_tasks(r)), 1, "one task");
+    assert_eq(agnostic_crew_req_process(r), AGNOSTIC_PROCESS_SEQUENTIAL, "process defaults to sequential");
+    assert_eq(agnostic_crew_req_concurrency(r), AGNOSTIC_REQ_UNSET, "concurrency unset");
+}
+
+fn test_tasks_are_required() {
+    test_group("request/tasks-required");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # ⭐ ORACLE-AUDIT.md §3.3, IN ONE ASSERTION.
+    #
+    # The oracle accepted a body with no `tasks` and quietly ran a fabricated
+    # single task holding the raw description with every agent attached. There is
+    # no fallback here to fall into: a submission without tasks is refused.
+    var r = _t_decode(a, "{\"name\":\"sweep\",\"agents\":[{\"key\":\"a1\",\"role\":\"t\",\"goal\":\"g\"}]}", &rj);
+    assert_eq(r, 0, "a body with no 'tasks' is refused, not rewritten");
+    assert_eq(agnostic_reject_status(load64(&rj)), HTTP_BAD_REQUEST, "as a 400");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "tasks"), 1, "naming the field");
+
+    # An empty array is refused too — "zero tasks" is not a crew.
+    var r2 = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[]}", &rj);
+    assert_eq(r2, 0, "an empty task array is refused");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "at least one task"), 1, "saying so");
+}
+
+fn test_the_oracles_fallback_shape_is_rejected() {
+    test_group("request/no-fallback");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # The exact body the oracle's fallback was built around: a crew-level
+    # `description` and no tasks. Rather than being turned into a one-task crew,
+    # it is refused, and the response names the field that does not belong.
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"description\":\"do everything\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(r, 0, "a crew-level 'description' is not silently absorbed");
+    assert_eq(agnostic_reject_status(load64(&rj)), AGNOSTIC_HTTP_UNPROCESSABLE, "422 for an unknown field");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "description"), 1, "reported by name");
+}
+
+fn test_unknown_fields_named() {
+    test_group("request/unknown");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"gpu_strict\":true}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(r, 0, "an unknown AGENT field is refused");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "gpu_strict"), 1, "named");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "agents[0]"), 1, "and located");
+
+    var r2 = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\",\"retries\":3}]}",
+      &rj);
+    assert_eq(r2, 0, "an unknown TASK field is refused");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "retries"), 1, "named");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "tasks[0]"), 1, "and located");
+}
+
+fn test_gpu_required_is_forwarded() {
+    test_group("request/gpu");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # ⭐ ORACLE-AUDIT.md §2.2 / §3.11, IN ONE ASSERTION.
+    #
+    # `gpu_strict` — here `gpu_required` — is a HARD-FAIL requirement. The oracle
+    # dropped it in translation, so a caller demanding a GPU silently got a CPU.
+    # It must arrive on the agent definition the engine will actually schedule.
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"gpu_required\":true,\"gpu_memory_min_mb\":8192}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_neq(r, 0, "the submission decodes");
+
+    var agent = vec_get(agnostic_crew_req_agents(r), 0);
+    assert_eq(agnosai_agent_gpu_required(agent), 1, "gpu_required reached the engine definition");
+    assert_eq(agnosai_agent_gpu_memory_min_mb(agent), 8192, "and so did the memory floor");
+
+    # ⚠ A JSON string is NOT a boolean. Coercing `"false"` would read as true —
+    # the string is non-empty — which is the silent misreading the codec exists
+    # to stop. It must be a 422, not a default.
+    var r2 = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"gpu_required\":\"false\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(r2, 0, "a string in a boolean field is refused, not coerced");
+    assert_eq(agnostic_reject_status(load64(&rj)), AGNOSTIC_HTTP_UNPROCESSABLE, "as a 422");
+}
+
+fn test_optional_agent_fields_forwarded() {
+    test_group("request/agent-fields");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"name\":\"Ann\",\"domain\":\"qa\",\"backstory\":\"veteran\",\"complexity\":\"high\",\"llm_model\":\"m1\",\"tools\":[\"grep\",\"curl\"]}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_neq(r, 0, "every listed agent field is accepted");
+
+    var agent = vec_get(agnostic_crew_req_agents(r), 0);
+    assert_eq(str_eq_cstr(agnosai_agent_name(agent), "Ann"), 1, "name forwarded");
+    assert_eq(str_eq_cstr(agnosai_agent_domain(agent), "qa"), 1, "domain forwarded");
+    assert_eq(str_eq_cstr(agnosai_agent_backstory(agent), "veteran"), 1, "backstory forwarded");
+    assert_eq(str_eq_cstr(agnosai_agent_complexity(agent), "high"), 1, "complexity forwarded");
+    assert_eq(str_eq_cstr(agnosai_agent_llm_model(agent), "m1"), 1, "llm_model forwarded");
+    assert_eq(vec_len(agnosai_agent_tools(agent)), 2, "tools forwarded");
+}
+
+fn test_process_modes() {
+    test_group("request/process");
+
+    assert_eq(agnostic_process_from_wire(str_from("sequential")), AGNOSTIC_PROCESS_SEQUENTIAL, "sequential");
+    assert_eq(agnostic_process_from_wire(str_from("parallel")), AGNOSTIC_PROCESS_PARALLEL, "parallel");
+    assert_eq(agnostic_process_from_wire(str_from("dag")), AGNOSTIC_PROCESS_DAG, "dag");
+
+    # ⚠ NOT a silent fallback to sequential. `_agnosai_route_process_for` defaults
+    # anything it does not recognise, so a typo'd "paralell" runs sequentially and
+    # nothing says so. An unrecognised mode is an error here.
+    assert_eq(agnostic_process_from_wire(str_from("paralell")), 0 - 1, "a typo is an error, not a default");
+    assert_eq(agnostic_process_from_wire(str_from("hierarchical")), 0 - 1,
+      "hierarchical is refused rather than silently run as sequential");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"process\":\"paralell\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(r, 0, "and the decoder refuses it");
+    assert_eq(agnostic_reject_status(load64(&rj)), HTTP_BAD_REQUEST, "as a 400");
+}
+
+fn test_concurrency_only_where_it_applies() {
+    test_group("request/concurrency");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    var ok = _t_decode(a,
+      "{\"name\":\"s\",\"process\":\"parallel\",\"max_concurrency\":8,\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_neq(ok, 0, "max_concurrency is accepted with parallel");
+    assert_eq(agnostic_crew_req_concurrency(ok), 8, "and read");
+
+    # ⚠ A field that would be accepted and then have no effect is exactly the
+    # failure this milestone is about. The engine takes concurrency from the
+    # process mode, so `max_concurrency` alongside `sequential` would do nothing.
+    var bad = _t_decode(a,
+      "{\"name\":\"s\",\"process\":\"sequential\",\"max_concurrency\":8,\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(bad, 0, "but refused where it would silently do nothing");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "parallel"), 1, "explaining where it applies");
+
+    var oor = _t_decode(a,
+      "{\"name\":\"s\",\"process\":\"parallel\",\"max_concurrency\":9999,\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(oor, 0, "and bounded");
+}
+
+fn test_priority_and_risk() {
+    test_group("request/priority-risk");
+
+    assert_eq(agnostic_priority_from_wire(str_from("background")), AGNOSAI_PRIORITY_BACKGROUND, "background");
+    assert_eq(agnostic_priority_from_wire(str_from("critical")), AGNOSAI_PRIORITY_CRITICAL, "critical");
+    assert_eq(agnostic_priority_from_wire(str_from("urgent")), 0 - 1, "an unknown priority is an error");
+    assert_eq(agnostic_risk_from_wire(str_from("medium")), AGNOSAI_RISK_MEDIUM, "medium risk");
+    assert_eq(agnostic_risk_from_wire(str_from("extreme")), 0 - 1, "an unknown risk is an error");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\",\"priority\":\"background\",\"risk\":\"high\"}]}",
+      &rj);
+    assert_neq(r, 0, "wire names decode");
+    var t = vec_get(agnostic_crew_req_tasks(r), 0);
+
+    # ⚠ AGNOSAI_PRIORITY_BACKGROUND is 0, and UNSET is -1. If the sentinel were 0
+    # these two would be the same value and "background" would be indistinguishable
+    # from "omitted".
+    assert_eq(agnostic_task_req_priority(t), AGNOSAI_PRIORITY_BACKGROUND, "background is 0, not 'unset'");
+    assert_neq(agnostic_task_req_priority(t), AGNOSTIC_REQ_UNSET, "and is distinguishable from unset");
+    assert_eq(agnostic_task_req_risk(t), AGNOSAI_RISK_HIGH, "risk decoded");
+}
+
+fn test_dependency_validation() {
+    test_group("request/deps");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    var oor = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\",\"dependencies\":[5]}]}",
+      &rj);
+    assert_eq(oor, 0, "an out-of-range dependency is refused");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "out of range"), 1, "saying so");
+
+    var self = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\",\"dependencies\":[0]}]}",
+      &rj);
+    assert_eq(self, 0, "a self-dependency is refused");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "itself"), 1, "saying so");
+}
+
+fn test_cycles_are_refused() {
+    test_group("request/cycle");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # ⭐ THE PERMANENTLY-PENDING CREW, STOPPED AT THE FRONT DOOR.
+    #
+    # `agnosai_crew_runner_run` returns 0 on exactly one arm — a cyclic DAG — and
+    # `_agnosai_orch_finish_err` then returns WITHOUT touching the crew map, which
+    # `_agnosai_orch_register` already seeded with PENDING.
+    # `_agnosai_orch_submit_thread` discards that return, so a cyclic graph
+    # submitted asynchronously reports `pending` forever.
+    #
+    # Rejecting the cycle here makes that arm unreachable through Agnostic.
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\",\"dependencies\":[1]},{\"description\":\"y\",\"dependencies\":[0]}]}",
+      &rj);
+    assert_eq(r, 0, "a two-task cycle is refused before submission");
+    assert_eq(agnostic_reject_status(load64(&rj)), HTTP_BAD_REQUEST, "as a 400");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "cycle"), 1, "naming the problem");
+
+    # A longer cycle, to show the detector is not just a pair check.
+    var r3 = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\",\"dependencies\":[2]},{\"description\":\"y\",\"dependencies\":[0]},{\"description\":\"z\",\"dependencies\":[1]}]}",
+      &rj);
+    assert_eq(r3, 0, "a three-task cycle is refused too");
+
+    # And an acyclic diamond is accepted — a detector that rejects everything is
+    # not a detector.
+    var ok = _t_decode(a,
+      "{\"name\":\"s\",\"process\":\"dag\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"root\"},{\"description\":\"l\",\"dependencies\":[0]},{\"description\":\"r\",\"dependencies\":[0]},{\"description\":\"join\",\"dependencies\":[1,2]}]}",
+      &rj);
+    assert_neq(ok, 0, "an acyclic diamond is accepted");
+    assert_eq(vec_len(agnostic_crew_req_tasks(ok)), 4, "with every task");
+}
+
+fn test_required_scalars() {
+    test_group("request/required");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    assert_eq(_t_decode(a, "{\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}", &rj), 0,
+      "'name' is required");
+    assert_eq(_t_decode(a, "{\"name\":\"s\",\"tasks\":[{\"description\":\"x\"}]}", &rj), 0,
+      "'agents' is required");
+    assert_eq(_t_decode(a, "{\"name\":\"s\",\"agents\":[],\"tasks\":[{\"description\":\"x\"}]}", &rj), 0,
+      "at least one agent is required");
+    assert_eq(_t_decode(a, "{\"name\":\"\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}", &rj), 0,
+      "an empty name is refused");
+    assert_eq(_t_decode(a, "{\"name\":\"s\",\"agents\":[{\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}", &rj), 0,
+      "an agent without 'key' is refused");
+    assert_eq(_t_decode(a, "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"\"}]}", &rj), 0,
+      "an empty task description is refused");
+
+    var arr = _t_decode(a, "[1,2,3]", &rj);
+    assert_eq(arr, 0, "a JSON array body is refused");
+    assert_eq(agnostic_reject_status(load64(&rj)), HTTP_BAD_REQUEST, "as a 400");
+}
+
+fn test_spec_build() {
+    test_group("request/spec");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var r = _t_decode(a,
+      "{\"name\":\"sweep\",\"process\":\"dag\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"first\"},{\"description\":\"second\",\"dependencies\":[0]}]}",
+      &rj);
+    assert_neq(r, 0, "decoded");
+
+    var spec = agnostic_crew_spec_build(r);
+    assert_neq(spec, 0, "spec built");
+    assert_eq(str_eq_cstr(agnosai_crew_name(spec), "sweep"), 1, "name carried");
+    assert_eq(vec_len(agnosai_crew_tasks(spec)), 2, "both tasks");
+    assert_eq(vec_len(agnosai_crew_agents(spec)), 1, "the agent");
+    assert_eq(agnosai_process_kind(agnosai_crew_process(spec)), AGNOSAI_PROCESS_DAG, "dag mode");
+
+    # ⚠ The crew id is minted by `agnosai_crew_new` — by the ENGINE. Agnostic
+    # never generates one, which is what makes ORACLE-AUDIT §3.2 unwritable.
+    assert_neq(agnosai_crew_id(spec), 0, "the engine assigned an id");
+
+    # Dependencies are index-based on the wire and id-based in the spec, so the
+    # second pass must have resolved index 0 to the first task's engine id.
+    var t0 = vec_get(agnosai_crew_tasks(spec), 0);
+    var t1 = vec_get(agnosai_crew_tasks(spec), 1);
+    var deps = agnosai_task_dependencies(t1);
+    assert_eq(vec_len(deps), 1, "the dependency survived");
+    assert_eq(str_eq(vec_get(deps, 0), agnosai_task_id(t0)), 1,
+      "resolved from an index to the engine's task id");
+
+    # A default-concurrency parallel spec picks up the documented default.
+    var pr = _t_decode(a,
+      "{\"name\":\"s\",\"process\":\"parallel\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    var pspec = agnostic_crew_spec_build(pr);
+    assert_eq(agnosai_process_max_concurrency(agnosai_crew_process(pspec)),
+      AGNOSTIC_REQ_DEFAULT_CONCURRENCY, "parallel without max_concurrency uses the default");
+}
+
+fn test_bounds_match_the_engine() {
+    test_group("request/bounds");
+
+    # ⚠ A bound ABOVE the engine's would turn a clean 400 into a rejection deeper
+    # in, where the message is worse. These must not drift upward.
+    assert_eq(AGNOSTIC_REQ_MAX_AGENTS <= AGNOSAI_CREW_MAX_AGENTS, 1, "agent cap is at or below the engine's");
+    assert_eq(AGNOSTIC_REQ_MAX_TASKS <= AGNOSAI_CREW_MAX_TASKS, 1, "task cap is at or below the engine's");
+    assert_eq(AGNOSTIC_REQ_MAX_STRING <= AGNOSAI_CREW_MAX_STRING_LEN, 1, "string cap is at or below the engine's");
+    assert_eq(AGNOSTIC_REQ_MAX_CONCURRENCY <= AGNOSAI_CREW_MAX_CONCURRENCY, 1,
+      "concurrency cap is at or below the engine's");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_valid_minimum();
+    test_tasks_are_required();
+    test_the_oracles_fallback_shape_is_rejected();
+    test_unknown_fields_named();
+    test_gpu_required_is_forwarded();
+    test_optional_agent_fields_forwarded();
+    test_process_modes();
+    test_concurrency_only_where_it_applies();
+    test_priority_and_risk();
+    test_dependency_validation();
+    test_cycles_are_refused();
+    test_required_scalars();
+    test_spec_build();
+    test_bounds_match_the_engine();
+    return assert_summary();
+}
+
+var _agnostic_request_test_exit = main();
+if (_agnostic_request_test_exit > 0) { _agnostic_request_test_exit = 1; }
+sys_exit_group(_agnostic_request_test_exit);

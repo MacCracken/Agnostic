@@ -1,0 +1,276 @@
+# agnostic/engine/outcome — the result type that makes ORACLE-AUDIT §3 unrepresentable.
+#
+# The oracle's `BackendResult` carried a status nothing read. This suite's job is
+# to make sure ours cannot be read that way: the demotions in `_normalise` run
+# before any caller sees the record, so there is no window in which a vacuous
+# success is observable.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+include "src/engine/outcome.cyr"
+
+# An engine crew state with `n` task results, all COMPLETED.
+fn _t_state(status, n): i64 {
+    var s = agnosai_crew_state_new(str_from("11111111-2222-3333-4444-555555555555"), status);
+    var i = 0;
+    while (i < n) {
+        agnosai_crew_state_with_result(s,
+          agnosai_task_result_new(str_from("task"), str_from("out"), AGNOSAI_STATUS_COMPLETED));
+        i = i + 1;
+    }
+    return s;
+}
+
+fn test_status_wire() {
+    test_group("outcome/wire");
+
+    assert_eq(str_eq_cstr(agnostic_crew_status_to_wire(AGNOSTIC_CREW_PENDING), "pending"), 1, "pending");
+    assert_eq(str_eq_cstr(agnostic_crew_status_to_wire(AGNOSTIC_CREW_RUNNING), "running"), 1, "running");
+    assert_eq(str_eq_cstr(agnostic_crew_status_to_wire(AGNOSTIC_CREW_COMPLETED), "completed"), 1, "completed");
+    assert_eq(str_eq_cstr(agnostic_crew_status_to_wire(AGNOSTIC_CREW_FAILED), "failed"), 1, "failed");
+    assert_eq(str_eq_cstr(agnostic_crew_status_to_wire(AGNOSTIC_CREW_CANCELLED), "cancelled"), 1, "cancelled");
+    assert_eq(str_eq_cstr(agnostic_crew_status_to_wire(AGNOSTIC_CREW_UNKNOWN), "unknown"), 1, "unknown");
+}
+
+fn test_status_translation() {
+    test_group("outcome/translate");
+
+    # Pinned arm by arm. These are deliberately NOT assumed equal to the engine's
+    # numbering — if agnosai inserts a status, this suite is what fails rather
+    # than a production response quietly reporting the wrong one.
+    assert_eq(agnostic_crew_status_from_engine(AGNOSAI_CREW_PENDING), AGNOSTIC_CREW_PENDING, "pending");
+    assert_eq(agnostic_crew_status_from_engine(AGNOSAI_CREW_RUNNING), AGNOSTIC_CREW_RUNNING, "running");
+    assert_eq(agnostic_crew_status_from_engine(AGNOSAI_CREW_COMPLETED), AGNOSTIC_CREW_COMPLETED, "completed");
+    assert_eq(agnostic_crew_status_from_engine(AGNOSAI_CREW_FAILED), AGNOSTIC_CREW_FAILED, "failed");
+    assert_eq(agnostic_crew_status_from_engine(AGNOSAI_CREW_CANCELLED), AGNOSTIC_CREW_CANCELLED, "cancelled");
+
+    # ⚠ An unrecognised engine status becomes UNKNOWN, never PENDING. Falling
+    # back to PENDING would tell a polling client "keep waiting" about a state
+    # we cannot interpret.
+    assert_eq(agnostic_crew_status_from_engine(99), AGNOSTIC_CREW_UNKNOWN, "unrecognised is UNKNOWN, not PENDING");
+}
+
+fn test_empty_result_set_is_not_success() {
+    test_group("outcome/vacuous");
+
+    var a = arena_allocator(65536);
+
+    # ⭐ ORACLE-AUDIT.md §3.1, IN ONE ASSERTION.
+    #
+    # A well-formed engine state saying COMPLETED with an empty result set. In
+    # the oracle this reached `_aggregate_and_finalize`, where `all()` over an
+    # empty dict is vacuously true, and the crew was finalised as completed.
+    #
+    # The same shape is reachable in the Cyrius engine: `agnosai_crew_runner_run`
+    # sets COMPLETED and only downgrades inside a loop over `results`, which does
+    # not execute when the set is empty.
+    #
+    # An empty result set is NOT success.
+    var o = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_COMPLETED, 0));
+    assert_neq(o, 0, "outcome was built");
+    assert_eq(agnostic_outcome_status(o), AGNOSTIC_CREW_FAILED,
+      "COMPLETED with no results is demoted to FAILED");
+    assert_eq(agnostic_outcome_is_success(o), 0, "and is not success");
+    assert_neq(agnostic_outcome_error(o), 0, "and carries a reason");
+
+    # The reason names the problem rather than being a generic failure.
+    assert_eq(str_eq(agnostic_outcome_error(o), AGNOSTIC_OC_EMPTY_MSG), 1, "the reason is the specific one");
+}
+
+fn test_partial_success_is_not_success() {
+    test_group("outcome/partial");
+
+    var a = arena_allocator(65536);
+
+    # COMPLETED, non-empty, but one task did not complete. The engine computes
+    # this correctly today; mirroring the invariant means a regression upstream
+    # does not become a wrong answer on our wire.
+    var s = agnosai_crew_state_new(str_from("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"), AGNOSAI_CREW_COMPLETED);
+    agnosai_crew_state_with_result(s,
+      agnosai_task_result_new(str_from("t1"), str_from("ok"), AGNOSAI_STATUS_COMPLETED));
+    agnosai_crew_state_with_result(s,
+      agnosai_task_result_new(str_from("t2"), str_from("boom"), AGNOSAI_STATUS_FAILED));
+
+    var o = agnostic_outcome_from_state_a(a, s);
+    assert_eq(agnostic_outcome_status(o), AGNOSTIC_CREW_FAILED, "a failed task demotes the crew");
+    assert_eq(agnostic_outcome_is_success(o), 0, "and it is not success");
+    assert_eq(str_eq(agnostic_outcome_error(o), AGNOSTIC_OC_PARTIAL_MSG), 1, "with the partial-run reason");
+    assert_eq(agnostic_outcome_result_count(o), 2, "the results are still reported");
+}
+
+fn test_real_success_survives() {
+    test_group("outcome/success");
+
+    var a = arena_allocator(65536);
+
+    # The normalisation must not be so eager that a genuine success is demoted —
+    # a guard that rejects everything is not a guard.
+    var o = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_COMPLETED, 3));
+    assert_eq(agnostic_outcome_status(o), AGNOSTIC_CREW_COMPLETED, "a real completion stays completed");
+    assert_eq(agnostic_outcome_is_success(o), 1, "and is success");
+    assert_eq(agnostic_outcome_error(o), 0, "with no reason attached");
+    assert_eq(agnostic_outcome_result_count(o), 3, "carrying every result");
+}
+
+fn test_normalise_only_demotes() {
+    test_group("outcome/one-way");
+
+    var a = arena_allocator(65536);
+
+    # ⚠ ORACLE-AUDIT.md §3.4 failed in the other direction: a sentinel overwrote
+    # a terminal `failed` with `completed`. `_normalise` must never promote.
+    var failed = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_FAILED, 0));
+    assert_eq(agnostic_outcome_status(failed), AGNOSTIC_CREW_FAILED,
+      "FAILED with no results stays FAILED — not promoted");
+
+    # ⚠ The engine's CrewState has NO error channel — `{crew_id, status, results,
+    # profile}` and nothing else — and a timed-out crew arrives as a bare FAILED
+    # with its partial results discarded. So a resultless failure gets a reason
+    # naming both causes rather than going out as `{"status":"failed"}` with
+    # nothing a client or an operator can act on.
+    assert_eq(str_eq(agnostic_outcome_error(failed), AGNOSTIC_OC_OPAQUE_MSG), 1,
+      "an unexplained failure is given a reason that names both causes");
+
+    var cancelled = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_CANCELLED, 0));
+    assert_eq(agnostic_outcome_status(cancelled), AGNOSTIC_CREW_CANCELLED, "CANCELLED stays CANCELLED");
+
+    var pending = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_PENDING, 0));
+    assert_eq(agnostic_outcome_status(pending), AGNOSTIC_CREW_PENDING, "PENDING stays PENDING");
+    assert_eq(agnostic_outcome_is_success(pending), 0, "a pending crew is not success");
+}
+
+fn test_terminal_predicate() {
+    test_group("outcome/terminal");
+
+    var a = arena_allocator(65536);
+
+    assert_eq(agnostic_outcome_is_terminal(
+        agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_COMPLETED, 0, 0)), 1, "completed is terminal");
+    assert_eq(agnostic_outcome_is_terminal(
+        agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_FAILED, 0, 0)), 1, "failed is terminal");
+    assert_eq(agnostic_outcome_is_terminal(
+        agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_CANCELLED, 0, 0)), 1, "cancelled is terminal");
+
+    assert_eq(agnostic_outcome_is_terminal(
+        agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_PENDING, 0, 0)), 0, "pending is not terminal");
+    assert_eq(agnostic_outcome_is_terminal(
+        agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_RUNNING, 0, 0)), 0, "running is not terminal");
+
+    # ⚠ UNKNOWN is deliberately NOT terminal. It means "we cannot account for
+    # this crew", and latching it would freeze a wrong answer in place.
+    assert_eq(agnostic_outcome_is_terminal(
+        agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_UNKNOWN, 0, 0)), 0, "unknown is not terminal");
+}
+
+fn test_null_outcome_is_not_happy() {
+    test_group("outcome/null");
+
+    # A null record must never read as success or as a benign pending. Every
+    # accessor answers the pessimistic value.
+    assert_eq(agnostic_outcome_status(0), AGNOSTIC_CREW_UNKNOWN, "null status is UNKNOWN");
+    assert_eq(agnostic_outcome_is_success(0), 0, "null is not success");
+    assert_eq(agnostic_outcome_is_terminal(0), 0, "null is not terminal");
+    assert_eq(agnostic_outcome_crew_id(0), 0, "null has no crew id");
+    assert_eq(agnostic_outcome_result_count(0), 0, "null has no results");
+
+    var a = arena_allocator(4096);
+    assert_eq(agnostic_outcome_from_state_a(a, 0), 0, "a null engine state yields no outcome");
+}
+
+fn test_results_absent_vs_empty() {
+    test_group("outcome/absent-vs-empty");
+
+    var a = arena_allocator(65536);
+
+    # 0 and an empty vec are different facts: "no result set was reported" versus
+    # "a set was reported and it was empty". Both are refused as success, but the
+    # accessor keeps the distinction rather than collapsing it.
+    var absent = agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_RUNNING, 0, 0);
+    assert_eq(agnostic_outcome_results(absent), 0, "absent set reads as 0");
+    assert_eq(agnostic_outcome_result_count(absent), 0, "and counts 0");
+
+    var empty = agnostic_outcome_new_a(a, 0, AGNOSTIC_CREW_RUNNING, 0, vec_new_a(a));
+    assert_neq(agnostic_outcome_results(empty), 0, "an empty set is not the same as no set");
+    assert_eq(agnostic_outcome_result_count(empty), 0, "but still counts 0");
+}
+
+fn test_wire_shape() {
+    test_group("outcome/render");
+
+    var a = arena_allocator(65536);
+    var o = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_COMPLETED, 2));
+    var v = agnostic_outcome_to_value_a(a, o);
+    assert_neq(v, 0, "rendered");
+
+    assert_neq(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_CREW_ID), 0, "crew_id present");
+    assert_eq(str_eq_cstr(agnostic_req_str(v, AGNOSTIC_JK_STATUS), "completed"), 1, "status is the wire spelling");
+
+    # ⚠ `task_count` and `results` are ALWAYS present. A client scripting against
+    # this can tell a real empty run from a missing field — the distinction the
+    # oracle's response shape destroyed.
+    var count = bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_TASK_COUNT);
+    assert_neq(count, 0, "task_count is always present");
+    assert_eq(bayan_json_v_int(count), 2, "and is the real count");
+
+    var results = bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_RESULTS);
+    assert_neq(results, 0, "results is always present");
+    assert_eq(bayan_json_v_is_arr(results), 1, "as an array");
+    assert_eq(bayan_json_v_arr_len(results), 2, "with every result");
+
+    # `error` is OMITTED, not null, when there is none.
+    assert_eq(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_ERROR), 0, "error omitted on success");
+
+    # And present when there is one.
+    var failed = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_COMPLETED, 0));
+    var fv = agnostic_outcome_to_value_a(a, failed);
+    assert_neq(bayan_json_v_obj_get_by_str(fv, AGNOSTIC_JK_ERROR), 0, "error present on failure");
+    assert_eq(str_eq_cstr(agnostic_req_str(fv, AGNOSTIC_JK_STATUS), "failed"), 1, "and the status says failed");
+
+    # An empty run still renders a legal shape rather than omitting the array.
+    var er = bayan_json_v_obj_get_by_str(fv, AGNOSTIC_JK_RESULTS);
+    assert_eq(bayan_json_v_is_arr(er), 1, "results is still an array when empty");
+    assert_eq(bayan_json_v_arr_len(er), 0, "of length 0");
+}
+
+fn test_task_result_shape() {
+    test_group("outcome/task-render");
+
+    var a = arena_allocator(65536);
+    var o = agnostic_outcome_from_state_a(a, _t_state(AGNOSAI_CREW_COMPLETED, 1));
+    var v = agnostic_outcome_to_value_a(a, o);
+    var first = bayan_json_v_arr_get(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_RESULTS), 0);
+
+    assert_eq(str_eq_cstr(agnostic_req_str(first, AGNOSTIC_JK_TASK_ID), "task"), 1, "task_id");
+    assert_eq(str_eq_cstr(agnostic_req_str(first, AGNOSTIC_JK_OUTPUT), "out"), 1, "output");
+    assert_eq(str_eq_cstr(agnostic_req_str(first, AGNOSTIC_JK_STATUS), "completed"), 1, "task status");
+
+    # ⚠ `metadata` is engine-internal and has no place in a product-tier
+    # response. Rendering through the engine's own serialiser would have leaked
+    # it, which is why this module has its own.
+    assert_eq(bayan_json_v_obj_get_by_str(first, str_from("metadata")), 0, "engine metadata is not exposed");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_status_wire();
+    test_status_translation();
+    test_empty_result_set_is_not_success();
+    test_partial_success_is_not_success();
+    test_real_success_survives();
+    test_normalise_only_demotes();
+    test_terminal_predicate();
+    test_null_outcome_is_not_happy();
+    test_results_absent_vs_empty();
+    test_wire_shape();
+    test_task_result_shape();
+    return assert_summary();
+}
+
+var _agnostic_outcome_test_exit = main();
+if (_agnostic_outcome_test_exit > 0) { _agnostic_outcome_test_exit = 1; }
+sys_exit_group(_agnostic_outcome_test_exit);

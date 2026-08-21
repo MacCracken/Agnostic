@@ -1,0 +1,258 @@
+# agnostic/engine/ledger — the terminal latch, and what survives eviction.
+#
+# ORACLE-AUDIT.md §3.4: three failure paths wrote a terminal `failed` and then
+# returned a sentinel the caller read as success, so the aggregator overwrote it
+# with `completed`. The latch is the structural answer — there is no code path
+# that moves a terminal status — and this suite is what holds that true.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+include "src/engine/outcome.cyr"
+include "src/engine/ledger.cyr"
+
+# A distinct, well-formed-looking crew id per index.
+fn _t_id(n): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "crew-");
+    str_builder_add_int(sb, n);
+    return str_builder_build(sb);
+}
+
+fn test_cap_exceeds_the_engine() {
+    test_group("ledger/cap");
+
+    # ⚠ THE INVARIANT THE WHOLE MODULE RESTS ON.
+    #
+    # The ledger exists to still hold an outcome after the engine has dropped it
+    # (`_agnosai_orch_evict_locked` at AGNOSAI_MAX_RETAINED_CREWS). A ledger that
+    # evicted FIRST would lose exactly what it is for. If someone lowers our cap
+    # below the engine's, this assertion is what says so.
+    assert_eq(AGNOSTIC_LEDGER_MAX > AGNOSAI_MAX_RETAINED_CREWS, 1,
+      "the ledger retains more crews than the engine does");
+}
+
+fn test_record_and_lookup() {
+    test_group("ledger/record");
+
+    agnostic_ledger_reset();
+    assert_eq(agnostic_ledger_count(), 0, "starts empty");
+
+    var id = _t_id(1);
+    var e = agnostic_ledger_record(id, str_from("sweep"), 0);
+    assert_neq(e, 0, "record returns an entry");
+    assert_eq(agnostic_ledger_count(), 1, "and the ledger holds it");
+
+    assert_eq(str_eq(agnostic_ledger_crew_id(e), id), 1, "the entry carries the crew id");
+    assert_eq(str_eq_cstr(agnostic_ledger_name(e), "sweep"), 1, "and the crew name");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_PENDING, "a fresh entry is pending");
+    assert_eq(agnostic_ledger_error(e), 0, "with no reason");
+    assert_eq(agnostic_ledger_dropped(e), 0, "and no dropped events");
+
+    var found = agnostic_ledger_entry(id);
+    assert_eq(found, e, "lookup by id returns the same entry");
+}
+
+fn test_unknown_id_is_distinct_from_finished() {
+    test_group("ledger/unknown");
+
+    agnostic_ledger_reset();
+
+    # ⚠ 0 means "Agnostic never submitted this" — a 404. It must NOT be the same
+    # answer as "the crew finished and the engine forgot it", which has an entry
+    # with a latched outcome. Collapsing the two is how a successful run becomes
+    # indistinguishable from a typo.
+    assert_eq(agnostic_ledger_entry(_t_id(404)), 0, "an id we never submitted has no entry");
+
+    var e = agnostic_ledger_record(_t_id(7), str_from("done"), 0);
+    agnostic_ledger_latch(e, AGNOSTIC_CREW_COMPLETED, 0, 0);
+    assert_neq(agnostic_ledger_entry(_t_id(7)), 0, "a finished crew still has one");
+    assert_eq(agnostic_ledger_status(agnostic_ledger_entry(_t_id(7))), AGNOSTIC_CREW_COMPLETED,
+      "and still reports its outcome");
+}
+
+fn test_latch_accepts_while_non_terminal() {
+    test_group("ledger/latch-open");
+
+    agnostic_ledger_reset();
+    var e = agnostic_ledger_record(_t_id(2), str_from("c"), 0);
+
+    assert_eq(agnostic_ledger_latch(e, AGNOSTIC_CREW_RUNNING, 0, 0), 1, "pending -> running accepted");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_RUNNING, "and stored");
+
+    assert_eq(agnostic_ledger_latch(e, AGNOSTIC_CREW_PENDING, 0, 0), 1, "running -> pending is still accepted");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_PENDING, "non-terminal states move freely");
+}
+
+fn test_terminal_states_stay_terminal() {
+    test_group("ledger/latch-closed");
+
+    agnostic_ledger_reset();
+
+    # ⭐ ORACLE-AUDIT.md §3.4, IN ONE ASSERTION.
+    #
+    # A terminal `failed`, then a later observation claiming `completed` — the
+    # exact overwrite the oracle's aggregator performed. The latch must refuse it.
+    var e = agnostic_ledger_record(_t_id(3), str_from("c"), 0);
+    var reason = str_from("the task exploded");
+    assert_eq(agnostic_ledger_latch(e, AGNOSTIC_CREW_FAILED, reason, 0), 1, "the failure latches");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_FAILED, "and is stored");
+
+    assert_eq(agnostic_ledger_latch(e, AGNOSTIC_CREW_COMPLETED, 0, 0), 0,
+      "a later 'completed' is REFUSED, not applied");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_FAILED, "the terminal status is unchanged");
+    assert_eq(str_eq(agnostic_ledger_error(e), reason), 1, "and so is its reason");
+
+    # The same holds for the other two terminal states, and in both directions.
+    var c = agnostic_ledger_record(_t_id(4), str_from("c"), 0);
+    agnostic_ledger_latch(c, AGNOSTIC_CREW_COMPLETED, 0, 0);
+    assert_eq(agnostic_ledger_latch(c, AGNOSTIC_CREW_FAILED, str_from("no"), 0), 0,
+      "a completed crew cannot be moved to failed either");
+    assert_eq(agnostic_ledger_status(c), AGNOSTIC_CREW_COMPLETED, "still completed");
+
+    var x = agnostic_ledger_record(_t_id(5), str_from("c"), 0);
+    agnostic_ledger_latch(x, AGNOSTIC_CREW_CANCELLED, 0, 0);
+    assert_eq(agnostic_ledger_latch(x, AGNOSTIC_CREW_RUNNING, 0, 0), 0, "nor back to running");
+    assert_eq(agnostic_ledger_status(x), AGNOSTIC_CREW_CANCELLED, "still cancelled");
+}
+
+fn test_unknown_does_not_latch_permanently() {
+    test_group("ledger/unknown-open");
+
+    agnostic_ledger_reset();
+    var e = agnostic_ledger_record(_t_id(6), str_from("c"), 0);
+
+    # UNKNOWN is not terminal, so a crew we temporarily could not account for can
+    # still receive its real outcome later. Latching it as terminal would freeze
+    # a wrong answer in place.
+    agnostic_ledger_latch(e, AGNOSTIC_CREW_UNKNOWN, str_from("cannot account for this crew"), 0);
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_UNKNOWN, "unknown is recorded");
+    assert_eq(agnostic_status_is_terminal(AGNOSTIC_CREW_UNKNOWN), 0, "and is not terminal");
+    assert_eq(agnostic_ledger_latch(e, AGNOSTIC_CREW_COMPLETED, 0, 0), 1,
+      "so a real outcome can still arrive");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_COMPLETED, "and wins");
+}
+
+fn test_latch_preserves_what_it_is_not_given() {
+    test_group("ledger/latch-partial");
+
+    agnostic_ledger_reset();
+    var e = agnostic_ledger_record(_t_id(8), str_from("c"), 0);
+
+    var results = vec_new();
+    vec_push(results, agnosai_task_result_new(str_from("t"), str_from("o"), AGNOSAI_STATUS_COMPLETED));
+    agnostic_ledger_latch(e, AGNOSTIC_CREW_RUNNING, str_from("partial"), results);
+    assert_neq(agnostic_ledger_results(e), 0, "results stored");
+
+    # A later latch that passes 0 for error/results must not ERASE them — 0 means
+    # "nothing new to say", not "clear what you had".
+    agnostic_ledger_latch(e, AGNOSTIC_CREW_COMPLETED, 0, 0);
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_COMPLETED, "status advanced");
+    assert_neq(agnostic_ledger_results(e), 0, "results survived a 0");
+    assert_neq(agnostic_ledger_error(e), 0, "and so did the reason");
+}
+
+fn test_outcome_reads_the_latch() {
+    test_group("ledger/outcome");
+
+    agnostic_ledger_reset();
+    var a = arena_allocator(65536);
+    var e = agnostic_ledger_record(_t_id(9), str_from("c"), 0);
+    agnostic_ledger_latch(e, AGNOSTIC_CREW_FAILED, str_from("nope"), 0);
+
+    var o = agnostic_ledger_outcome_a(a, e);
+    assert_neq(o, 0, "built an outcome");
+    assert_eq(agnostic_outcome_status(o), AGNOSTIC_CREW_FAILED, "carrying the latched status");
+    assert_eq(str_eq_cstr(agnostic_outcome_error(o), "nope"), 1, "and the latched reason");
+    assert_eq(agnostic_outcome_is_success(o), 0, "and it is not success");
+
+    assert_eq(agnostic_ledger_outcome_a(a, 0), 0, "a null entry yields no outcome");
+}
+
+fn test_eviction_drops_only_terminal() {
+    test_group("ledger/evict");
+
+    agnostic_ledger_reset();
+
+    # Fill to the cap with FINISHED crews, then record one more. Eviction fires
+    # and takes the terminal entries.
+    var i = 0;
+    while (i < AGNOSTIC_LEDGER_MAX) {
+        var e = agnostic_ledger_record(_t_id(i), str_from("c"), 0);
+        agnostic_ledger_latch(e, AGNOSTIC_CREW_COMPLETED, 0, 0);
+        i = i + 1;
+    }
+    assert_eq(agnostic_ledger_count(), AGNOSTIC_LEDGER_MAX, "filled to the cap");
+
+    agnostic_ledger_record(_t_id(999999), str_from("c"), 0);
+    assert_eq(agnostic_ledger_count(), 1, "the finished crews were evicted, the new one remains");
+}
+
+fn test_eviction_never_drops_live_work() {
+    test_group("ledger/evict-live");
+
+    agnostic_ledger_reset();
+
+    # ⚠ A ledger full of RUNNING crews grows past the cap rather than forgetting
+    # live work. The cap bounds memory, not work — the same judgement the engine
+    # makes in `_agnosai_orch_evict_locked`.
+    var i = 0;
+    while (i < AGNOSTIC_LEDGER_MAX) {
+        agnostic_ledger_record(_t_id(i), str_from("c"), 0);
+        i = i + 1;
+    }
+    agnostic_ledger_record(_t_id(999999), str_from("c"), 0);
+    assert_eq(agnostic_ledger_count(), AGNOSTIC_LEDGER_MAX + 1,
+      "nothing was evicted, because nothing had finished");
+}
+
+fn test_drain_without_a_subscription() {
+    test_group("ledger/drain-none");
+
+    agnostic_ledger_reset();
+    var e = agnostic_ledger_record(_t_id(11), str_from("c"), 0);
+
+    # Submitted with no event bus. Draining must be a cheap no-op rather than a
+    # fault — `agnostic_engine_init` leaves `sub` at 0 when the bus is absent.
+    assert_eq(agnostic_ledger_drain(e), 0, "draining a subscription-less entry takes nothing");
+    assert_eq(agnostic_ledger_drain(0), 0, "and a null entry is safe");
+    assert_eq(agnostic_ledger_dropped(e), 0, "with nothing counted as dropped");
+    assert_eq(vec_len(agnostic_ledger_events(e)), 0, "and no events recorded");
+}
+
+fn test_null_entry_accessors() {
+    test_group("ledger/null");
+
+    assert_eq(agnostic_ledger_status(0), AGNOSTIC_CREW_UNKNOWN, "null status is UNKNOWN, not pending");
+    assert_eq(agnostic_ledger_crew_id(0), 0, "null has no id");
+    assert_eq(agnostic_ledger_error(0), 0, "null has no reason");
+    assert_eq(agnostic_ledger_results(0), 0, "null has no results");
+    assert_eq(agnostic_ledger_events(0), 0, "null has no events");
+    assert_eq(agnostic_ledger_dropped(0), 0, "null dropped none");
+    assert_eq(agnostic_ledger_latch(0, AGNOSTIC_CREW_FAILED, 0, 0), 0, "latching null is refused, not a fault");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_cap_exceeds_the_engine();
+    test_record_and_lookup();
+    test_unknown_id_is_distinct_from_finished();
+    test_latch_accepts_while_non_terminal();
+    test_terminal_states_stay_terminal();
+    test_unknown_does_not_latch_permanently();
+    test_latch_preserves_what_it_is_not_given();
+    test_outcome_reads_the_latch();
+    test_eviction_drops_only_terminal();
+    test_eviction_never_drops_live_work();
+    test_drain_without_a_subscription();
+    test_null_entry_accessors();
+    return assert_summary();
+}
+
+var _agnostic_ledger_test_exit = main();
+if (_agnostic_ledger_test_exit > 0) { _agnostic_ledger_test_exit = 1; }
+sys_exit_group(_agnostic_ledger_test_exit);

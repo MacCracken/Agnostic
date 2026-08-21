@@ -6,7 +6,14 @@ include "src/log.cyr"
 include "src/http/status.cyr"
 include "src/http/response.cyr"
 include "src/http/codec.cyr"
+# The engine tier, because the dispatch ladder reaches the crew handlers. Same
+# leaves-before-hubs order as src/main.cyr.
+include "src/engine/outcome.cyr"
+include "src/engine/ledger.cyr"
+include "src/engine/request.cyr"
+include "src/engine/crew.cyr"
 include "src/routes/health.cyr"
+include "src/routes/crews.cyr"
 include "src/http/router.cyr"
 
 fn _t_has(s: Str, needle): i64 {

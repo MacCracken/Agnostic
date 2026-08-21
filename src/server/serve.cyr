@@ -235,6 +235,41 @@ fn agnostic_serve_options(cfg): i64 {
 fn agnostic_serve_mount(cfg): i64 {
     _agnostic_serve_cfg = cfg;
     _agnostic_serve_stop = 0;
+
+    # ⚠ **Before `run_pooled`, without exception.** The orchestrator, the event
+    # bus and the ledger are read lock-free by every worker; `run_pooled` spawns
+    # those workers, so building them afterwards is a data race. Same rule, same
+    # reason as the readiness registry below.
+    if (agnostic_engine_init(cfg) == 0) {
+        sakshi_error("could not initialise the engine", 31);
+        return 0;
+    }
+
+    # A process whose engine is not up cannot do the one thing it exists for, so
+    # `/ready` answers 503 and an orchestrator holds traffic off it. `/health`
+    # stays 200 — the process is alive, and restarting it would not help. That
+    # split is ADR 0001.
+    agnostic_ready_register(str_from("engine"), &agnostic_engine_is_ready);
+
+    # ⚠ **The two size ceilings interact, and the interaction leaks.** A request
+    # body is parsed into the per-request arena, and the arena's exhaustion
+    # policy is `ARENA_FULL_SPILL` — an overflow is satisfied from the global
+    # bump, which has no `free()`. So every body larger than the arena leaks its
+    # overflow permanently, in proportion to traffic.
+    #
+    # The defaults make this reachable: 64 KiB arena against a 1 MiB body limit.
+    # The crew routes make it easy to hit — the engine's own caps admit 1000
+    # tasks of 10000 characters, several megabytes of entirely legal request.
+    #
+    # Not a startup failure: the safe configuration depends on the deployment,
+    # and refusing to start would be worse than serving with a warning an
+    # operator can act on. Raise AGNOSTIC_REQUEST_ARENA_BYTES or lower
+    # AGNOSTIC_MAX_BODY_BYTES; note the arena cost is per worker.
+    if (agnostic_config_max_body(cfg) > agnostic_config_arena_bytes(cfg)) {
+        agnostic_log_kv_int(SK_WARN,
+          "max body exceeds the request arena; oversized bodies spill to the global allocator and are not reclaimed",
+          104, "arena_bytes", 11, agnostic_config_arena_bytes(cfg));
+    }
     return agnostic_serve_options(cfg);
 }
 

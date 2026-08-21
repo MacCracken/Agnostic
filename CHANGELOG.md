@@ -4,6 +4,111 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M2, the crew surface: submit, poll, cancel, progress
+
+**261 new assertions across 4 suites** (490 total across 12), 0 failed. All three gates green.
+Verified live over a socket, not only under test.
+
+AgnosAI is linked **in-process**, so there is no transport here — no client, no URL, no retry
+policy. That removes a whole class of the oracle's defects by construction and leaves the ones that
+were never about transport.
+
+- **`src/engine/outcome.cyr`** — the result type the milestone turns on. Carries status **and**
+  error **and** the engine-assigned crew id **and** the result set. The oracle's `BackendResult`
+  had a `.status` that **no caller anywhere in the codebase read**.
+- **`src/engine/ledger.cyr`** — what Agnostic remembers about the crews it submitted, and where a
+  terminal status is latched.
+- **`src/engine/request.cyr`** — one task model, allow-list decoded, dependency graph validated.
+- **`src/engine/crew.cyr`** — the orchestrator bridge: submit, poll, cancel.
+- **`src/routes/crews.cyr`** — `POST /api/v1/crews` (**202**), `GET /api/v1/crews/{id}`,
+  `POST /api/v1/crews/{id}/cancel`, `GET /api/v1/crews/{id}/events`.
+
+**202-then-poll**, not the engine's inline shape. `agnosai_route_create_crew_a` calls the blocking
+`agnosai_orchestrator_run_crew` to keep parity with its Rust oracle, so a `POST` holds a worker for
+the whole run. Agnostic submits and returns the id.
+
+### Fixed — the four `ORACLE-AUDIT.md` §3 defects, designed out rather than avoided
+
+- **§3.1 — a failed crew reported as completed.** `_agnostic_outcome_normalise` demotes a
+  COMPLETED-with-no-results to FAILED *before* the record exists, so the vacuous success is never
+  observable. ⚠ **This is not a Python-ism.** `agnosai_crew_runner_run` sets `COMPLETED` and only
+  downgrades inside a loop over `results` — over an empty set the loop body never runs and the
+  status stands. `all([])` in Cyrius, one dependency away.
+- **§3.2 — cancel addressing an id the engine never saw.** Every id originates in
+  `agnosai_crew_new`. Agnostic mints none, so there is no local UUID to substitute. A refusal from
+  the engine is **returned, not discarded**, and the ledger is not relabelled.
+- **§3.3 — two structurally different task models.** `tasks` is required and non-empty, there is no
+  fallback path, and an unlisted key is a 422 naming it. The oracle's fallback fired on every
+  request because its model declared no `tasks` field at all.
+- **§3.4 — a terminal state overwritten by a later, wronger one.** `agnostic_ledger_latch` refuses
+  to write over a terminal status — in one guard, at the only place a status is stored.
+
+### Fixed — two engine behaviours that only bite the async path
+
+Neither is in the 85 audited oracle defects; both were found building M2.
+
+- **A cyclic DAG submitted asynchronously reports `pending` forever.**
+  `agnosai_crew_runner_run` returns 0 on exactly one arm, and `_agnosai_orch_finish_err` then
+  returns **without touching the crew map** — which `_agnosai_orch_register` has already seeded with
+  PENDING. The blocking caller sees the 0; `_agnosai_orch_submit_thread` discards it. Closed at the
+  front door: `agnostic_crew_req_has_cycle` rejects the graph before submission, so the arm is
+  unreachable through Agnostic.
+- **A finished crew can be evicted and then 404.** `_agnosai_orch_evict_locked` drops **every**
+  finished crew once the registry holds 1000, so a successful run becomes indistinguishable from a
+  typo'd id. The ledger answers from its own latched outcome; `AGNOSTIC_LEDGER_MAX` is deliberately
+  above the engine's cap, and a suite asserts that ordering.
+
+### Added — placeholder mode is disclosed, because nothing else can distinguish it
+
+With no `AGNOSTIC_LLM_URL`, `agnosai_execute_task` takes its `client == 0` arm and
+`_agnosai_crew_placeholder_result` echoes the task description back as output with status
+`COMPLETED`. A crew of echoes therefore normalises to `completed`, every task complete — and **no
+property of the result type can tell it from real model output**.
+
+Closed by disclosure rather than by type: `engine_mode` is on every submit and poll response, and
+mount logs a WARN.
+
+### Removed — `AGNOSTIC_CREW_MAX_CONCURRENT_TASKS`, a knob that did nothing
+
+Verified against the bundle: `agnosai_resource_budget_max_concurrent_tasks` has no reader outside
+its own accessor and the budget serialiser, and `agnosai_orchestrator_budget` has **zero** call
+sites. The field is stored, serialised, and enforced by nothing. Shipping it would have sold an
+operator a concurrency ceiling that does not exist. `AGNOSTIC_CREW_TIMEOUT_SECS` is kept because
+`max_duration_secs` genuinely *is* read, by `agnosai_orchestrator_timeout_secs`.
+
+The ceiling that does work is per-request `max_concurrency` on process `parallel` — which is
+accepted only alongside `parallel`, because a field that is accepted and then has no effect is the
+same defect in miniature.
+
+### Added — `scripts/check-log-lengths.py`, after two silent miscounts shipped
+
+sakshi takes `(pointer, length)` pairs, so every log message's byte count is hand-written and
+nothing checked it. Both failure modes are silent, and both were in one commit: one call declared
+76 for a 75-byte message and shipped the **NUL terminator inside a JSON string**; another declared
+45 for 46 and **truncated** the message by a character. Not a compile error, not a lint warning, and
+invisible to suites that assert on handler behaviour rather than log text.
+
+Wired into `check-clean.sh`. Mutation-verified: changing any declared length by one fails it.
+
+### Changed — `check-symbols.sh` rule 3 now scans enum members on both sides
+
+It compared only `^(fn|var)` against `lib/`. Cyrius enum qualifiers are **cosmetic** — `Backend.WASM`
+and `KavachBackend.WASM` both resolve to the bare member `WASM` — so a `src/` enum member colliding
+with a `lib/` one silently replaced it for the whole program, with no diagnostic from compiler or
+linter. That is the same mechanism as the `BACKEND_COUNT` memory-safety defect below, in the one
+declaration kind the gate did not cover. M2 adds ~50 enum members; all verified collision-free.
+
+Mutation-verified: injecting a member named `AGN_CREW_ID` fails the gate, naming both sites.
+
+### Added — a mount-time warning where the two size ceilings interact
+
+A request body is parsed into the per-request arena, whose exhaustion policy is `ARENA_FULL_SPILL` —
+overflow is satisfied from the global bump, which has **no `free()`**. The defaults make this
+reachable (64 KiB arena, 1 MiB body limit), and the engine's own caps admit several megabytes of
+entirely legal crew request. Not a startup failure, since the safe configuration depends on the
+deployment; an operator gets a warning naming the arena size.
+
+
 ### Changed — agnosai 2.0.3 → 2.0.4, closing a memory-safety defect in this binary
 
 Agnostic is the binary where the defect actually lived, because Agnostic is what links kavach and

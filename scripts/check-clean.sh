@@ -94,6 +94,23 @@ for f in $(grep -rl '^# >>>' src examples 2>/dev/null | sort); do
 done
 echo "doctest: $n files"
 
+# --- log lengths: the declared byte count matches the literal -------------
+# Added at M2, after two miscounts shipped in one commit: one appended the NUL
+# terminator to a JSON log message, the other truncated a message by a
+# character. sakshi takes (pointer, length) pairs, so the count is hand-written
+# at every call site and NOTHING else checks it — not the compiler, not lint,
+# and not the suites, which assert on handler behaviour rather than log text.
+#
+# Mutation-verified: changing any declared length by one makes this print the
+# site and exit 1.
+if ! out=$(python3 scripts/check-log-lengths.py 2>&1); then
+    note "log lengths: a declared length does not match its literal"
+    printf '%s\n' "$out" | sed 's/^/      /'
+    fail=1
+else
+    printf '%s\n' "$out"
+fi
+
 # --- vet + deny: the dependency gates ------------------------------------
 if ! cyrius vet src/main.cyr >/dev/null 2>&1; then
     note "vet: src/main.cyr"

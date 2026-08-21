@@ -64,23 +64,55 @@ both response constructors. Security audit re-run —
 [`docs/audit/2026-08-20-audit-m1.md`](../audit/2026-08-20-audit-m1.md), 0 CRITICAL / 0 HIGH /
 1 MEDIUM (rate limiting, deliberately deferred to M5 where it belongs with the credential path).
 
-### M2 — AgnosAI integration (v0.3.0)
+### M2 — AgnosAI integration (v0.3.0) — ✅ 2026-08-21
 
 - `[deps.agnosai]` → `dist/agnosai.cyr`, linked in-process
 - Crew submit / status / cancel via `agnosai_orchestrator_submit_crew` (**D2**)
-- `majra` owns the queue; 202-then-poll semantics
-- Live progress off the event bus
+- 202-then-poll semantics; live progress off the event bus
 
-**Gates:** ⚠ the four failure modes in `ORACLE-AUDIT.md` §3 must be designed out, not inherited —
-a result type that carries status *and* error *and* the remote id; terminal states that stay
-terminal; one task model rather than two; cancellation that stops work rather than relabelling a
-record.
+**261 new assertions across 4 suites** (490 total across 12), 0 failed. All three gates green.
+Verified live over a socket: 202 with the engine's id, poll to `completed` with results, progress
+events drained (`crew_started` → `task_started` → `task_completed` → `crew_completed`), uppercase id
+normalised, 404/405/409/422/503 each on its own path, SIGTERM drains and exits 0.
 
-**Unblocked, and the dependency is already wired.** D1's prerequisite shipped — AgnosAI 2.0.2 added
-the `[lib]` stanza and `dist/agnosai.cyr`. `[deps.agnosai]` is now pinned at **2.0.4** and linked:
-`lib/agnosai.cyr` is in the compile unit today, so M2 is handler work, not integration plumbing.
-⚠ 2.0.4 closed a memory-safety defect that only manifested *here* — see the addendum to
-[`docs/audit/2026-08-20-audit-m1.md`](../audit/2026-08-20-audit-m1.md).
+**Gates met.** Each of the four §3 failure modes is designed out rather than avoided:
+
+| Defect | The mechanism that makes it unrepresentable |
+|---|---|
+| §3.1 failed reported as completed | `_agnostic_outcome_normalise` demotes COMPLETED-with-no-results to FAILED *before* the record exists |
+| §3.2 cancel addressing an unknown id | every id originates in `agnosai_crew_new`; Agnostic mints none, and a refusal is returned rather than discarded |
+| §3.3 two task models | `tasks` required and non-empty, no fallback path, unlisted key is a 422 naming it |
+| §3.4 terminal overwritten | `agnostic_ledger_latch` refuses to write over a terminal status |
+
+**✅ Decided 2026-08-21 — no `[deps.majra]`. The engine already owns the queue.**
+
+An earlier draft of this milestone said "`majra` owns the queue".
+`agnosai_orchestrator_submit_crew` already does: it registers the crew, publishes its cancel flag,
+and runs it on a detached thread. A second in-memory queue in front of that would be **a second
+source of truth for status** — the exact shape of §3.4, added deliberately.
+
+`lib/majra.cyr` also exports ~40 unprefixed names and a set of unprefixed enum members
+(`ERR_NONE`…`ERR_IPC`). Those are collision-free against today's compile unit, but the M1 lesson was
+a `var BACKEND_COUNT` collision nothing warned about, and taking on that surface for a queue we do
+not need is a bad trade. Durable queueing belongs with **M4**, against a real durability
+requirement; `src/engine/ledger.cyr` is the seam it will land on.
+
+⚠ **Two engine behaviours found here that bite only the async path.** Neither is among the 85
+audited oracle defects — both were found building this milestone, and both are worked around in
+Agnostic rather than upstream:
+
+- **A cyclic DAG submitted asynchronously reports `pending` forever.** `agnosai_crew_runner_run`
+  returns 0 on exactly one arm, and `_agnosai_orch_finish_err` then returns *without touching the
+  crew map*, which `_agnosai_orch_register` has already seeded with PENDING. The blocking caller
+  sees the 0; `_agnosai_orch_submit_thread` discards it. Closed by rejecting cycles before submit.
+- **A finished crew can be evicted and then 404.** `_agnosai_orch_evict_locked` drops every finished
+  crew at 1000 registered, making a successful run indistinguishable from a typo'd id. The ledger
+  answers from its own latched outcome.
+
+⚠ **`AGNOSTIC_CREW_MAX_CONCURRENT_TASKS` was removed before it shipped.** The budget slot exists but
+`agnosai_orchestrator_budget` has zero call sites and nothing reads
+`max_concurrent_tasks` — it is stored, serialised, and enforced by nothing. `max_duration_secs` is
+genuinely read, so `AGNOSTIC_CREW_TIMEOUT_SECS` stays.
 
 ### M3 — Definitions, presets, agents (v0.4.0)
 

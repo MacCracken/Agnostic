@@ -1,0 +1,382 @@
+# agnostic/routes/crews — the crew surface end to end.
+#
+# Covers the route table, the status contract, and the two behaviours
+# ORACLE-AUDIT.md §3.2 and §3.5 got wrong: a cancel that addresses an id the
+# engine never saw, and a cancel that relabels a record instead of stopping work.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+include "src/engine/outcome.cyr"
+include "src/engine/ledger.cyr"
+include "src/engine/request.cyr"
+include "src/engine/crew.cyr"
+include "src/routes/health.cyr"
+include "src/routes/crews.cyr"
+include "src/http/router.cyr"
+
+var _T_BODY = "{\"name\":\"sweep\",\"agents\":[{\"key\":\"a1\",\"role\":\"tester\",\"goal\":\"find bugs\"}],\"tasks\":[{\"description\":\"run the suite\"}]}";
+
+fn _t_status(a, method, path, body): i64 {
+    return agnostic_response_status(
+      agnostic_route_dispatch_a(a, method, str_from(path), str_from(body), 1048576));
+}
+
+fn _t_json(a, method, path, body): i64 {
+    return agnostic_response_body(
+      agnostic_route_dispatch_a(a, method, str_from(path), str_from(body), 1048576));
+}
+
+fn test_route_table() {
+    test_group("crews/table");
+
+    var a = arena_allocator(65536);
+
+    var m = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews"));
+    assert_eq(agnostic_route_match_id(m), AGNOSTIC_ROUTE_CREW_SUBMIT, "POST /api/v1/crews");
+
+    var g = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET,
+      str_from("/api/v1/crews/6ba7b810-9dad-11d1-80b4-00c04fd430c8"));
+    assert_eq(agnostic_route_match_id(g), AGNOSTIC_ROUTE_CREW_GET, "GET /api/v1/crews/{id}");
+    assert_eq(str_eq_cstr(agnostic_route_match_param(g), "6ba7b810-9dad-11d1-80b4-00c04fd430c8"), 1,
+      "the id is captured");
+
+    var c = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews/abc/cancel"));
+    assert_eq(agnostic_route_match_id(c), AGNOSTIC_ROUTE_CREW_CANCEL, "POST /api/v1/crews/{id}/cancel");
+    assert_eq(str_eq_cstr(agnostic_route_match_param(c), "abc"), 1, "captured across a trailing segment");
+
+    var e = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/crews/abc/events"));
+    assert_eq(agnostic_route_match_id(e), AGNOSTIC_ROUTE_CREW_EVENTS, "GET /api/v1/crews/{id}/events");
+
+    # A query string must not stop the match — otherwise a cache-buster 404s.
+    var q = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/crews/abc?t=1"));
+    assert_eq(agnostic_route_match_id(q), AGNOSTIC_ROUTE_CREW_GET, "a query string is stripped");
+
+    # Every crew route is privileged; only the probes are public.
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_CREW_SUBMIT), 1, "submit needs auth");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_CREW_GET), 1, "poll needs auth");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_CREW_CANCEL), 1, "cancel needs auth");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_CREW_EVENTS), 1, "events needs auth");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_HEALTH), 0, "health stays public");
+}
+
+fn test_method_mismatch_is_405() {
+    test_group("crews/405");
+
+    var a = arena_allocator(65536);
+
+    # ⚠ `GET /api/v1/crews` has no arm, but the PATH is in the table — so it earns
+    # a 405 naming the mismatch rather than a 404 claiming the collection does
+    # not exist. The two say very different things to a client.
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_GET, "/api/v1/crews", ""), HTTP_METHOD_NOT_ALLOWED,
+      "GET on the collection is 405, not 404");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_DELETE, "/api/v1/crews/abc", ""), HTTP_METHOD_NOT_ALLOWED,
+      "DELETE on a crew is 405");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_GET, "/api/v1/crews/abc/cancel", ""), HTTP_METHOD_NOT_ALLOWED,
+      "GET on cancel is 405");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_GET, "/api/v1/nope", ""), HTTP_NOT_FOUND,
+      "an unknown path is still 404");
+}
+
+fn test_malformed_id_is_422() {
+    test_group("crews/bad-id");
+
+    var a = arena_allocator(65536);
+    agnostic_engine_reset();
+
+    # A malformed id is a 422, not a 404 — the client's id is wrong, which is a
+    # different fact from the crew not existing.
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_GET, "/api/v1/crews/not-a-uuid", ""),
+      AGNOSTIC_HTTP_UNPROCESSABLE, "poll with a malformed id is 422");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST, "/api/v1/crews/not-a-uuid/cancel", ""),
+      AGNOSTIC_HTTP_UNPROCESSABLE, "cancel with a malformed id is 422");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_GET, "/api/v1/crews/not-a-uuid/events", ""),
+      AGNOSTIC_HTTP_UNPROCESSABLE, "events with a malformed id is 422");
+
+    # Well-formed but unknown is 404.
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_GET, "/api/v1/crews/6ba7b810-9dad-11d1-80b4-00c04fd430c8", ""),
+      HTTP_NOT_FOUND, "a well-formed id we never submitted is 404");
+}
+
+fn test_uppercase_id_is_normalised() {
+    test_group("crews/id-case");
+
+    var a = arena_allocator(65536);
+    agnostic_engine_reset();
+
+    # ⚠ Both registries are keyed by the canonical LOWERCASE form. Validating an
+    # id without normalising it is a silent 404 on a perfectly valid uppercase
+    # id — the engine has its own scar from exactly this.
+    var lower = str_from("6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+    var upper = str_from("6BA7B810-9DAD-11D1-80B4-00C04FD430C8");
+
+    assert_eq(str_eq(_agnostic_crew_key_a(a, lower), lower), 1, "a lowercase id passes through unallocated");
+    assert_eq(str_eq(_agnostic_crew_key_a(a, upper), lower), 1, "an uppercase id folds to the canonical form");
+    assert_eq(_agnostic_crew_key_a(a, str_from("nope")), 0, "a malformed id is refused");
+
+    agnostic_ledger_reset();
+    agnostic_ledger_record(lower, str_from("c"), 0);
+    assert_neq(agnostic_ledger_entry(_agnostic_crew_key_a(a, upper)), 0,
+      "so an uppercase id finds the crew it names");
+}
+
+fn test_engine_down_is_503() {
+    test_group("crews/no-engine");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+
+    # ⚠ 503, not 500. The request was fine; the server cannot serve it right now.
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST, "/api/v1/crews", _T_BODY), HTTP_SERVICE_UNAVAILABLE,
+      "submitting with no engine is 503");
+    assert_eq(agnostic_engine_is_ready(), 0, "and readiness says so");
+}
+
+fn test_submit_rejections() {
+    test_group("crews/reject");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+    agnostic_engine_init(agnostic_config_from_env());
+
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST, "/api/v1/crews", "not json"), HTTP_BAD_REQUEST,
+      "a non-JSON body is 400");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST, "/api/v1/crews", "{}"), HTTP_BAD_REQUEST,
+      "an empty object is 400");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST, "/api/v1/crews",
+        "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\"}],\"tasks\":[{\"description\":\"x\"}],\"extra\":1}"),
+      AGNOSTIC_HTTP_UNPROCESSABLE, "an unknown field is 422");
+
+    # Body-size rejection happens BEFORE routing, so an oversized body to a real
+    # path is a 413 rather than being parsed to discover where it goes.
+    assert_eq(agnostic_response_status(
+        agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews"),
+          str_from(_T_BODY), 4)), HTTP_PAYLOAD_TOO_LARGE, "an oversized body is 413");
+}
+
+fn test_submit_accepts_with_202() {
+    test_group("crews/submit");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+    agnostic_ledger_reset();
+    agnostic_engine_init(agnostic_config_from_env());
+
+    # ⚠ 202, not 200 and not 201. The crew has been accepted and is not finished,
+    # which is exactly what 202 means. The engine's own route returns 200 because
+    # it runs the crew inline — the shape this tier exists not to inherit.
+    var resp = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews"),
+      str_from(_T_BODY), 1048576);
+    assert_eq(agnostic_response_status(resp), AGNOSTIC_HTTP_ACCEPTED, "a valid submission is 202");
+
+    var body = agnostic_response_body(resp);
+    var id = agnostic_req_str(body, AGNOSTIC_JK_CREW_ID);
+    assert_neq(id, 0, "the response carries a crew id");
+    assert_eq(agnosai_uuid_is_valid(id), 1, "and it is the engine's UUID");
+    assert_eq(str_eq_cstr(agnostic_req_str(body, AGNOSTIC_JK_NAME), "sweep"), 1, "and the crew name");
+
+    # ⚠ ORACLE-AUDIT.md §3.2's precondition, asserted: the id we hand back is the
+    # one the ENGINE assigned, so it addresses the crew the engine is running.
+    # The oracle discarded that id and later cancelled a local UUID instead.
+    assert_neq(agnostic_ledger_entry(id), 0, "the ledger holds the engine's id");
+
+    # The placeholder disclosure. With no AGNOSTIC_LLM_URL the engine echoes task
+    # descriptions back as output with status COMPLETED, and nothing in the
+    # results can tell that from real work — so the mode is on the response.
+    assert_eq(str_eq_cstr(agnostic_req_str(body, AGNOSTIC_JK_MODE), "placeholder"), 1,
+      "a placeholder-mode engine says so on accept");
+}
+
+fn test_poll_reports_a_real_outcome() {
+    test_group("crews/poll");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+    agnostic_ledger_reset();
+    agnostic_engine_init(agnostic_config_from_env());
+
+    var resp = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews"),
+      str_from(_T_BODY), 1048576);
+    var id = agnostic_req_str(agnostic_response_body(resp), AGNOSTIC_JK_CREW_ID);
+
+    var path = str_builder_new();
+    str_builder_add_cstr(path, "/api/v1/crews/");
+    str_builder_add(path, id);
+    var url = str_builder_build(path);
+
+    # The crew runs on a detached thread. Placeholder tasks finish in
+    # microseconds, but the poll must not depend on that — bounded wait, and the
+    # assertions below hold whether it finished or not.
+    var tries = 0;
+    var status = AGNOSTIC_CREW_PENDING;
+    while (tries < 100) {
+        var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, url, str_from(""), 1048576);
+        assert_eq(agnostic_response_status(r), HTTP_OK, "polling a submitted crew is 200");
+        status = agnostic_crew_status_from_engine(
+          agnosai_crew_status_from_wire(agnostic_req_str(agnostic_response_body(r), AGNOSTIC_JK_STATUS)));
+        if (agnostic_status_is_terminal(status) == 1) { break; }
+        sleep_ms(10);
+        tries = tries + 1;
+    }
+
+    assert_eq(agnostic_status_is_terminal(status), 1, "the crew reached a terminal state");
+
+    # ⭐ And it is COMPLETED, not the vacuous success §3.1 produced. A crew that
+    # really ran its one task reports one result; the normalisation would have
+    # demoted it to FAILED had the result set been empty.
+    assert_eq(status, AGNOSTIC_CREW_COMPLETED, "a real one-task crew completes");
+
+    var final = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, url, str_from(""), 1048576);
+    var fb = agnostic_response_body(final);
+    var count = bayan_json_v_obj_get_by_str(fb, AGNOSTIC_JK_TASK_COUNT);
+    assert_eq(bayan_json_v_int(count), 1, "carrying its one task result");
+    assert_eq(bayan_json_v_obj_get_by_str(fb, AGNOSTIC_JK_ERROR), 0, "and no error");
+    assert_eq(str_eq_cstr(agnostic_req_str(fb, AGNOSTIC_JK_MODE), "placeholder"), 1,
+      "with the engine mode disclosed on every poll");
+}
+
+fn test_cancel_never_relabels_what_it_did_not_cancel() {
+    test_group("crews/cancel");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+    agnostic_ledger_reset();
+    agnostic_engine_init(agnostic_config_from_env());
+
+    # ⭐ ORACLE-AUDIT.md §3.2, IN ONE ASSERTION.
+    #
+    # The oracle POSTed a local UUID AgnosAI had never seen, got a 404, DISCARDED
+    # it, and marked its own record cancelled while the crew kept running. An id
+    # we never submitted must be a 404 — and must relabel nothing.
+    assert_eq(agnostic_crew_cancel(str_from("6ba7b810-9dad-11d1-80b4-00c04fd430c8")),
+      AGNOSTIC_CANCEL_NOT_SUBMITTED, "cancelling an unknown id reports not-submitted");
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST,
+        "/api/v1/crews/6ba7b810-9dad-11d1-80b4-00c04fd430c8/cancel", ""), HTTP_NOT_FOUND,
+      "and the route answers 404");
+
+    # ⭐ ORACLE-AUDIT.md §3.4 / §3.5: a finished crew is NOT relabelled. The
+    # oracle's background task later rewrote `cancelled` back to `completed`;
+    # here the terminal state is refused a cancel outright.
+    var e = agnostic_ledger_record(str_from("11111111-1111-1111-1111-111111111111"),
+      str_from("done"), 0);
+    agnostic_ledger_latch(e, AGNOSTIC_CREW_COMPLETED, 0, 0);
+
+    assert_eq(agnostic_crew_cancel(str_from("11111111-1111-1111-1111-111111111111")),
+      AGNOSTIC_CANCEL_ALREADY_TERMINAL, "cancelling a finished crew is refused");
+    assert_eq(agnostic_ledger_status(e), AGNOSTIC_CREW_COMPLETED,
+      "and its recorded outcome is UNCHANGED — not relabelled cancelled");
+
+    assert_eq(_t_status(a, AGNOSTIC_METHOD_POST,
+        "/api/v1/crews/11111111-1111-1111-1111-111111111111/cancel", ""), AGNOSTIC_HTTP_CONFLICT,
+      "the route answers 409, not a 200 claiming it cancelled something");
+}
+
+fn test_cancel_a_live_crew_stops_it() {
+    test_group("crews/cancel-live");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+    agnostic_ledger_reset();
+    agnostic_engine_init(agnostic_config_from_env());
+
+    # A crew the engine genuinely knows. Whether it has already finished by the
+    # time we cancel is a race, so both answers are legitimate — what must NOT
+    # happen is a success reported for a cancel that did nothing.
+    var resp = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews"),
+      str_from(_T_BODY), 1048576);
+    var id = agnostic_req_str(agnostic_response_body(resp), AGNOSTIC_JK_CREW_ID);
+
+    var rc = agnostic_crew_cancel(id);
+    var ok = 0;
+    if (rc == AGNOSTIC_CANCEL_OK) { ok = 1; }
+    if (rc == AGNOSTIC_CANCEL_ALREADY_TERMINAL) { ok = 1; }
+    assert_eq(ok, 1, "cancelling a known crew either cancels it or reports it already finished");
+
+    # Whichever arm ran, the ledger is terminal and stays terminal.
+    var e = agnostic_ledger_entry(id);
+    assert_eq(agnostic_status_is_terminal(agnostic_ledger_status(e)), 1, "the crew is terminal");
+    var was = agnostic_ledger_status(e);
+    agnostic_crew_cancel(id);
+    assert_eq(agnostic_ledger_status(e), was, "a second cancel changes nothing");
+}
+
+fn test_events_route() {
+    test_group("crews/events");
+
+    var a = arena_allocator(262144);
+    agnostic_engine_reset();
+    agnostic_ledger_reset();
+    agnostic_engine_init(agnostic_config_from_env());
+
+    var resp = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/crews"),
+      str_from(_T_BODY), 1048576);
+    var id = agnostic_req_str(agnostic_response_body(resp), AGNOSTIC_JK_CREW_ID);
+
+    var path = str_builder_new();
+    str_builder_add_cstr(path, "/api/v1/crews/");
+    str_builder_add(path, id);
+    str_builder_add_cstr(path, "/events");
+
+    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_builder_build(path),
+      str_from(""), 1048576);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "the events route answers 200");
+
+    var body = agnostic_response_body(r);
+    var events = bayan_json_v_obj_get_by_str(body, AGNOSTIC_JK_EVENTS);
+    assert_neq(events, 0, "events is always present");
+    assert_eq(bayan_json_v_is_arr(events), 1, "as an array");
+
+    # ⚠ `dropped_events` is always present. The bus is lossy under back-pressure
+    # and the retained window is capped, so a client is told the sequence may
+    # have gaps rather than shown a suspiciously tidy one.
+    var dropped = bayan_json_v_obj_get_by_str(body, AGNOSTIC_JK_DROPPED);
+    assert_neq(dropped, 0, "dropped_events is always reported");
+    assert_eq(bayan_json_v_int(dropped) >= 0, 1, "as a count");
+}
+
+fn test_readiness_registers_the_engine() {
+    test_group("crews/ready");
+
+    var a = arena_allocator(65536);
+    agnostic_engine_reset();
+    agnostic_ready_reset();
+    agnostic_ready_register(str_from("engine"), &agnostic_engine_is_ready);
+
+    # ⚠ /ready is 503 while the engine is down; /health stays 200. A process
+    # whose engine is not up cannot do the one thing it exists for — but
+    # restarting it would not help, which is the whole ADR 0001 split.
+    assert_eq(agnostic_response_status(agnostic_route_ready_a(a)), HTTP_SERVICE_UNAVAILABLE,
+      "/ready is 503 with the engine down");
+    assert_eq(agnostic_response_status(agnostic_route_health_a(a)), HTTP_OK,
+      "/health stays 200 regardless");
+
+    agnostic_engine_init(agnostic_config_from_env());
+    assert_eq(agnostic_response_status(agnostic_route_ready_a(a)), HTTP_OK,
+      "/ready is 200 once the engine is up");
+    agnostic_ready_reset();
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_route_table();
+    test_method_mismatch_is_405();
+    test_malformed_id_is_422();
+    test_uppercase_id_is_normalised();
+    test_engine_down_is_503();
+    test_submit_rejections();
+    test_submit_accepts_with_202();
+    test_poll_reports_a_real_outcome();
+    test_cancel_never_relabels_what_it_did_not_cancel();
+    test_cancel_a_live_crew_stops_it();
+    test_events_route();
+    test_readiness_registers_the_engine();
+    return assert_summary();
+}
+
+var _agnostic_crews_route_test_exit = main();
+if (_agnostic_crews_route_test_exit > 0) { _agnostic_crews_route_test_exit = 1; }
+sys_exit_group(_agnostic_crews_route_test_exit);

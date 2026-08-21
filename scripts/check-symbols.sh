@@ -131,12 +131,39 @@ fi
 collisions=$(python3 - <<'PYEOF'
 import re, glob, collections
 
+# fn, var, enum TYPE names, and enum MEMBERS — on both sides.
+#
+# ⚠ Enum members are the half this scan used to miss, and they are the half that
+# cannot announce itself. Cyrius enum qualifiers are COSMETIC: `Backend.WASM` and
+# `KavachBackend.WASM` both resolve to the bare member `WASM`, so a src/ member
+# sharing a name with a lib/ one silently replaces it for the whole program with
+# no diagnostic — the compiler warns for `fn` and is silent for `var` and for
+# enum members alike.
+#
+# This is not hypothetical for this repo. `var BACKEND_COUNT` was 10 in kavach
+# and 18 in ai-hwaccel, resolved to 18, and disabled a bounds check over a
+# 10-slot table — a memory-safety defect that only manifested in this binary,
+# because Agnostic is what links the two together. That one was `var`; the enum
+# case is identical in mechanism and equally invisible.
 def tops(paths):
     out = collections.defaultdict(list)
     for p in paths:
         try: text = open(p, errors="ignore").read()
         except OSError: continue
+        in_enum = None
         for lineno, line in enumerate(text.split("\n"), 1):
+            me = re.match(r'^enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{', line)
+            if me:
+                in_enum = me.group(1)
+                out[me.group(1)].append((p, lineno))
+                continue
+            if in_enum is not None:
+                if line.strip() == "}":
+                    in_enum = None
+                    continue
+                mm = re.match(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=', line)
+                if mm: out[mm.group(1)].append((p, lineno))
+                continue
             m = re.match(r'^(fn|var)\s+([A-Za-z_][A-Za-z0-9_]*)', line)
             if m: out[m.group(2)].append((p, lineno))
     return out

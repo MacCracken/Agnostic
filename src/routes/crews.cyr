@@ -1,0 +1,288 @@
+# agnostic/routes/crews — the crew surface: submit, poll, cancel, progress.
+#
+# Thin by design. Everything a handler here does is: decode the request with the
+# allow-list, call one engine-bridge function, and render the answer. The
+# branching that matters — what counts as success, what may overwrite what — is
+# in `src/engine/`, under test without a socket.
+#
+# ## The status contract
+#
+# | Route | Codes |
+# |---|---|
+# | `POST /api/v1/crews` | **202** accepted · 400 semantic · 422 shape · 503 engine down · 500 |
+# | `GET /api/v1/crews/{id}` | 200 · 404 never submitted · 422 malformed id |
+# | `POST /api/v1/crews/{id}/cancel` | 200 cancelled · 404 never submitted |
+# |  | 409 already terminal · 422 malformed id · 503 engine does not know it |
+# | `GET /api/v1/crews/{id}/events` | 200 · 404 · 422 |
+#
+# **202, not 200 and not 201.** The crew has been accepted and is not finished,
+# which is exactly what 202 means. 201 would claim a resource is complete; 200 is
+# what the engine's own route returns because it runs the crew inline, and that
+# is the shape this tier exists not to inherit.
+#
+# **409 for cancelling a finished crew, not 200.** `ORACLE-AUDIT.md` §3.2 marked
+# its record cancelled regardless of what the engine said. A 200 here would mean
+# "cancelled" about a crew that completed twenty minutes ago — technically a
+# no-op, practically a lie to anyone reading it back.
+#
+# **503, not 404, when the engine does not know a crew the ledger does.** The
+# distinction is the point: 404 means *you* named something that does not exist;
+# 503 means *we* cannot act on something that does.
+#
+# ## ⚠ The id is validated before it is used, and normalised while it is
+#
+# `_agnosai_uuid_key_a` parses **and lower-cases**, because the registry is keyed
+# by the canonical lowercase form. Validating without normalising was a silent
+# 404 on an uppercase id in the engine's own history — the id was well-formed,
+# the lookup simply missed. Agnostic's ledger is keyed by the same canonical
+# string, so the same normalisation applies to both lookups.
+
+# The wire keys this module owns, interned once at load time.
+var AGNOSTIC_JK_EVENTS  = str_from("events");
+var AGNOSTIC_JK_DROPPED = str_from("dropped_events");
+var AGNOSTIC_JK_TYPE    = str_from("type");
+var AGNOSTIC_JK_DATA    = str_from("data");
+var AGNOSTIC_JK_NAME    = str_from("name");
+var AGNOSTIC_JK_MODE    = str_from("engine_mode");
+
+# Normalise a path-supplied crew id to the canonical form both registries key on.
+# Returns 0 when it is not a well-formed UUID.
+#
+# ## Why this is written here rather than called from the engine
+#
+# The engine has `_agnosai_uuid_key_a`, which does exactly this. Two reasons not
+# to reach for it. It is **private** — an underscore name in a bundled distlib,
+# with no stability promise — and the public alternative,
+# `agnosai_uuid_canonical`, allocates from the **global** allocator on every
+# call. On a poll route that is a leak per request for the life of the process,
+# because `lib/alloc.cyr` has no `free()`.
+#
+# So: validate through the public `agnosai_uuid_is_valid`, and lower-case into
+# the request arena **only when there is an uppercase byte to fold**. A
+# well-formed lowercase id — what a client that echoes back what we gave it
+# always sends — allocates nothing at all.
+#
+# ⚠ **Validating without normalising is a silent 404.** Both registries are keyed
+# by the canonical lowercase string, so `6BA7B810-...` is a perfectly valid id
+# that simply misses. The engine has its own scar from this; the comment on
+# `_agnosai_uuid_key_a` records it.
+fn _agnostic_crew_key_a(a, id: Str): i64 {
+    if (id == 0) { return 0; }
+    if (agnosai_uuid_is_valid(id) == 0) { return 0; }
+
+    var d = str_data(id);
+    var n = str_len(id);
+    var upper = 0;
+    var i = 0;
+    while (i < n) {
+        var c = load8(d + i) & 255;
+        if (c >= 65 && c <= 70) { upper = 1; break; }
+        i = i + 1;
+    }
+    if (upper == 0) { return id; }
+
+    var out = 0;
+    if (a != 0) { out = alloc_via(a, n); } else { out = alloc(n); }
+    if (out == 0) { return 0; }
+    var j = 0;
+    while (j < n) {
+        var b = load8(d + j) & 255;
+        if (b >= 65 && b <= 70) { b = b + 32; }
+        store8(out + j, b);
+        j = j + 1;
+    }
+    if (a != 0) { return str_new_a(a, out, n); }
+    return str_new(out, n);
+}
+
+# The 422 a malformed crew id earns.
+fn _agnostic_crew_bad_id_a(a): i64 {
+    return agnostic_response_error_a(a, AGNOSTIC_HTTP_UNPROCESSABLE,
+      str_from_a(a, "crew id is not a valid UUID"));
+}
+
+# The 404 an id Agnostic never submitted earns.
+#
+# ⚠ Reached **only** when the ledger has no entry. A crew that finished and was
+# evicted from the engine registry has an entry with a latched outcome and
+# answers 200 — the two must not collapse into one 404, or a client cannot tell
+# "your results expired" from "you typo'd the id".
+fn _agnostic_crew_not_found_a(a): i64 {
+    return agnostic_response_error_a(a, HTTP_NOT_FOUND, str_from_a(a, "crew not found"));
+}
+
+# `POST /api/v1/crews` — submit a crew and return 202 with its id.
+fn agnostic_route_crew_submit_a(a, body: Str): i64 {
+    var v = agnostic_decode_a(a, body);
+    if (v == 0) {
+        return agnostic_response_error_a(a, HTTP_BAD_REQUEST,
+          str_from_a(a, "malformed JSON body"));
+    }
+
+    var reject: i64[1];
+    store64(&reject, 0);
+    var req = agnostic_crew_req_from_value_a(a, v, &reject);
+    if (req == 0) {
+        var rj = load64(&reject);
+        return agnostic_response_error_a(a, agnostic_reject_status(rj),
+          agnostic_reject_message(rj));
+    }
+
+    var entry: i64[1];
+    store64(&entry, 0);
+    var rc = agnostic_crew_submit(req, &entry);
+
+    if (rc == AGNOSTIC_SUBMIT_NO_ENGINE) {
+        return agnostic_response_error_a(a, HTTP_SERVICE_UNAVAILABLE,
+          str_from_a(a, "engine is not available"));
+    }
+    if (rc == AGNOSTIC_SUBMIT_SPEC_FAILED) {
+        return agnostic_response_error_a(a, HTTP_INTERNAL,
+          str_from_a(a, "could not build the crew specification"));
+    }
+
+    var e = load64(&entry);
+    if (rc == AGNOSTIC_SUBMIT_START_FAILED) {
+        # ⚠ 503 with the crew id, not a bare 500. The crew was accepted, is
+        # registered, and has a latched FAILED outcome the client can poll — so
+        # the id is the useful half of this answer and withholding it would leave
+        # a record nobody can look up.
+        var obj = bayan_json_v_obj_new_a(a);
+        if (obj == 0) { return 0; }
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_CREW_ID,
+          bayan_json_v_str_new_a(a, agnostic_ledger_crew_id(e)));
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS,
+          bayan_json_v_str_new_a(a, AGNOSTIC_JV_FAILED));
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_ERROR,
+          bayan_json_v_str_new_a(a, AGNOSTIC_CREW_START_MSG));
+        return agnostic_response_json_a(a, HTTP_SERVICE_UNAVAILABLE, obj);
+    }
+
+    var accepted = bayan_json_v_obj_new_a(a);
+    if (accepted == 0) { return 0; }
+    var idv = bayan_json_v_str_new_a(a, agnostic_ledger_crew_id(e));
+    if (idv == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, accepted, AGNOSTIC_JK_CREW_ID, idv);
+    bayan_json_v_obj_set_a(a, accepted, AGNOSTIC_JK_STATUS,
+      bayan_json_v_str_new_a(a, agnostic_crew_status_to_wire(agnostic_ledger_status(e))));
+    bayan_json_v_obj_set_a(a, accepted, AGNOSTIC_JK_NAME,
+      bayan_json_v_str_new_a(a, agnostic_ledger_name(e)));
+    # ⚠ Disclosed on accept, not only on poll. A client that submits and never
+    # polls should still learn its crew is about to be run with placeholder
+    # output — see `agnostic_engine_init`.
+    bayan_json_v_obj_set_a(a, accepted, AGNOSTIC_JK_MODE,
+      bayan_json_v_str_new_a(a, agnostic_engine_mode()));
+    return agnostic_response_json_a(a, AGNOSTIC_HTTP_ACCEPTED, accepted);
+}
+
+# `GET /api/v1/crews/{id}` — the crew's current outcome.
+#
+# The poll half of 202-then-poll. Answers 200 for every crew Agnostic submitted,
+# whatever state it is in — including one the engine has since forgotten, which
+# reports `unknown` rather than vanishing.
+fn agnostic_route_crew_get_a(a, id: Str): i64 {
+    var key = _agnostic_crew_key_a(a, id);
+    if (key == 0) { return _agnostic_crew_bad_id_a(a); }
+
+    var outcome = agnostic_crew_poll_a(a, key);
+    if (outcome == 0) { return _agnostic_crew_not_found_a(a); }
+
+    var body = agnostic_outcome_to_value_a(a, outcome);
+    if (body == 0) { return 0; }
+    # ⚠ On every poll, because this is the response carrying the results a
+    # reader would otherwise take at face value. A placeholder run reports
+    # `completed` with every task complete and the task description echoed as
+    # output; nothing else in this body distinguishes it from real work.
+    bayan_json_v_obj_set_a(a, body, AGNOSTIC_JK_MODE,
+      bayan_json_v_str_new_a(a, agnostic_engine_mode()));
+    return agnostic_response_json_a(a, HTTP_OK, body);
+}
+
+# `POST /api/v1/crews/{id}/cancel` — stop a running crew.
+#
+# ⚠ **Every arm below reports what actually happened.** §3.2's defect was not
+# that cancellation could fail — it was that the failure was discarded and the
+# record relabelled anyway. There is no arm here that reports success without
+# `agnostic_crew_cancel` having returned OK.
+fn agnostic_route_crew_cancel_a(a, id: Str): i64 {
+    var key = _agnostic_crew_key_a(a, id);
+    if (key == 0) { return _agnostic_crew_bad_id_a(a); }
+
+    var rc = agnostic_crew_cancel(key);
+
+    if (rc == AGNOSTIC_CANCEL_NOT_SUBMITTED) { return _agnostic_crew_not_found_a(a); }
+    if (rc == AGNOSTIC_CANCEL_ALREADY_TERMINAL) {
+        return agnostic_response_error_a(a, AGNOSTIC_HTTP_CONFLICT,
+          str_from_a(a, "crew has already finished and cannot be cancelled"));
+    }
+    if (rc == AGNOSTIC_CANCEL_ENGINE_UNKNOWN) {
+        return agnostic_response_error_a(a, HTTP_SERVICE_UNAVAILABLE,
+          str_from_a(a, "the engine no longer holds this crew; it was not cancelled"));
+    }
+
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_CREW_ID, bayan_json_v_str_new_a(a, key));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS,
+      bayan_json_v_str_new_a(a, AGNOSTIC_JV_CANCELLED));
+    return agnostic_response_json_a(a, HTTP_OK, obj);
+}
+
+# `GET /api/v1/crews/{id}/events` — the progress a crew has published so far.
+#
+# ## Why this is a snapshot and not a stream
+#
+# The natural shape for live progress is SSE, and it is the wrong shape for this
+# milestone. sandhi's pooled server dedicates a worker to a connection, so a
+# stream held open for a crew's lifetime pins one of `AGNOSTIC_WORKERS`; a
+# handful of subscribers would exhaust the pool, which is a denial-of-service
+# lever rather than a feature. M7 owns the streaming surface and can do it on the
+# transport that suits it.
+#
+# What this does instead: `agnostic_ledger_drain` swept the bus into the crew's
+# bounded window during the poll, so a client that polls gets everything
+# published since its last call. **One subscription per crew, taken at submit** —
+# not one per request, which would grow the sender's subscriber list without
+# bound and leak a channel per call, since `lib/alloc.cyr` has no `free()`.
+#
+# `dropped_events` is always present and is the honest half of the answer: the
+# bus is lossy under back-pressure and the retained window is capped, so a
+# non-zero count means the sequence has gaps. Reporting it beats showing a
+# suspiciously tidy stream.
+fn agnostic_route_crew_events_a(a, id: Str): i64 {
+    var key = _agnostic_crew_key_a(a, id);
+    if (key == 0) { return _agnostic_crew_bad_id_a(a); }
+
+    var entry = agnostic_ledger_entry(key);
+    if (entry == 0) { return _agnostic_crew_not_found_a(a); }
+    agnostic_ledger_drain(entry);
+
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_CREW_ID, bayan_json_v_str_new_a(a, key));
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_STATUS,
+      bayan_json_v_str_new_a(a, agnostic_crew_status_to_wire(agnostic_ledger_status(entry))));
+
+    var arr = bayan_json_v_arr_new_a(a);
+    if (arr == 0) { return 0; }
+    var events = agnostic_ledger_events(entry);
+    if (events != 0) {
+        var n = vec_len(events);
+        var i = 0;
+        while (i < n) {
+            var ev = vec_get(events, i);
+            var eo = bayan_json_v_obj_new_a(a);
+            if (eo == 0) { return 0; }
+            bayan_json_v_obj_set_a(a, eo, AGNOSTIC_JK_TYPE,
+              bayan_json_v_str_new_a(a, agnosai_crew_event_event_type(ev)));
+            var data = agnosai_crew_event_data(ev);
+            if (data != 0) { bayan_json_v_obj_set_a(a, eo, AGNOSTIC_JK_DATA, data); }
+            bayan_json_v_arr_push_a(a, arr, eo);
+            i = i + 1;
+        }
+    }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_EVENTS, arr);
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DROPPED,
+      bayan_json_v_int_new_a(a, agnostic_ledger_dropped(entry)));
+    return agnostic_response_json_a(a, HTTP_OK, obj);
+}

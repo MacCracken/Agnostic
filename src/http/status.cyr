@@ -20,6 +20,8 @@
 # through the bump allocator that `alloc_init()` sets up.
 
 var AGNOSTIC_HTTP_CREATED           = 201;
+var AGNOSTIC_HTTP_ACCEPTED          = 202;
+var AGNOSTIC_HTTP_CONFLICT          = 409;
 var AGNOSTIC_HTTP_UNPROCESSABLE     = 422;
 var AGNOSTIC_HTTP_TOO_MANY_REQUESTS = 429;
 
@@ -41,12 +43,14 @@ var AGNOSTIC_JV_NOT_READY = str_from("not_ready");
 fn agnostic_http_reason(status): i64 {
     if (status == HTTP_OK) { return "OK"; }
     if (status == AGNOSTIC_HTTP_CREATED) { return "Created"; }
+    if (status == AGNOSTIC_HTTP_ACCEPTED) { return "Accepted"; }
     if (status == HTTP_NO_CONTENT) { return "No Content"; }
     if (status == HTTP_BAD_REQUEST) { return "Bad Request"; }
     if (status == HTTP_UNAUTHORIZED) { return "Unauthorized"; }
     if (status == HTTP_FORBIDDEN) { return "Forbidden"; }
     if (status == HTTP_NOT_FOUND) { return "Not Found"; }
     if (status == HTTP_METHOD_NOT_ALLOWED) { return "Method Not Allowed"; }
+    if (status == AGNOSTIC_HTTP_CONFLICT) { return "Conflict"; }
     if (status == HTTP_PAYLOAD_TOO_LARGE) { return "Payload Too Large"; }
     if (status == AGNOSTIC_HTTP_UNPROCESSABLE) { return "Unprocessable Entity"; }
     if (status == AGNOSTIC_HTTP_TOO_MANY_REQUESTS) { return "Too Many Requests"; }

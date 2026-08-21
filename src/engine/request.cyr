@@ -1,0 +1,877 @@
+# agnostic/engine/request — what a crew submission is, and the only way to say it.
+#
+# ## ⚠ ONE task model — `ORACLE-AUDIT.md` §3.3
+#
+# The oracle had two. `_translate_crew_config` emitted a real task list only when
+# `crew_config["tasks"]` existed, and it never could: `CrewRunRequest` declared no
+# `tasks` field, Pydantic defaulted to `extra='ignore'`, and a client-supplied
+# `tasks` array was **silently discarded**. So the single-task fallback fired
+# every time — AgnosAI received one task holding the raw description with every
+# agent attached, while the other backend built a per-agent task envelope. One
+# request, two structurally different runs, no error anywhere.
+#
+# There is exactly one task model here, and three properties keep it that way:
+#
+#   * `tasks` is **required and non-empty**. A body without it is rejected, not
+#     quietly rewritten into something else.
+#   * There is **no fallback path**. No description-becomes-a-task, no
+#     synthesise-from-agents. The code that would have to exist for a second
+#     model does not exist.
+#   * An **unlisted key is a 422 naming it** — `agnostic_no_unknown_fields` from
+#     `src/http/codec.cyr`, which was built in M1 for precisely this milestone.
+#     A client that sends `task` for `tasks` is told so, rather than having its
+#     work silently replaced.
+#
+# ## The dependency graph is validated here, and that is load-bearing
+#
+# `agnostic_crew_req_has_cycle` is not politeness. `agnosai_crew_runner_run`
+# returns 0 on exactly one arm — a cyclic DAG — and on that arm
+# `_agnosai_orch_finish_err` deletes the cancel flag and returns **without
+# touching the crew map**, which `_agnosai_orch_register` has already seeded with
+# PENDING. The blocking caller sees the 0 and can report a 500;
+# `_agnosai_orch_submit_thread` discards it. Submitting a cyclic graph through
+# the async path therefore produces a crew that reports `pending` forever.
+#
+# Rejecting the cycle at the front door makes that arm unreachable through
+# Agnostic. `src/engine/ledger.cyr` is the second line for the same failure.
+#
+# ## Every field is forwarded or explicitly rejected — never dropped
+#
+# `ORACLE-AUDIT.md` §2.2 lists fourteen fields the oracle dropped in translation.
+# The sharp one is `gpu_strict`: a caller asking for a hard-fail GPU requirement
+# got a silent CPU fallback. Its counterpart here is `gpu_required`, and it is in
+# the allow-list, decoded, and passed to `agnosai_agent_with_gpu`. M3 inherits
+# this rule for definitions; M2 establishes it.
+
+# A rejected request — 16 bytes.
+#
+# Carries the HTTP status **and** the message, so the handler does not have to
+# infer one from the other. A decoder that returned only a message would push
+# the 400-vs-422 decision to a caller that no longer knows which rule failed.
+enum AgnosticRejectOff {
+    AGNOSTIC_RJ_STATUS  = 0;
+    AGNOSTIC_RJ_MESSAGE = 8;
+    AGNOSTIC_RJ_SIZE    = 16;
+}
+
+# A decoded crew submission — 40 bytes.
+enum AgnosticCrewReqOff {
+    AGNOSTIC_CQ_NAME        = 0;
+    AGNOSTIC_CQ_PROCESS     = 8;
+    AGNOSTIC_CQ_CONCURRENCY = 16;
+    AGNOSTIC_CQ_AGENTS      = 24;
+    AGNOSTIC_CQ_TASKS       = 32;
+    AGNOSTIC_CQ_SIZE        = 40;
+}
+
+# A decoded task — 40 bytes. `dependencies` is a vec of **indices into the
+# request's task list**, resolved to engine task ids only when the spec is built.
+enum AgnosticTaskReqOff {
+    AGNOSTIC_TQ_DESCRIPTION     = 0;
+    AGNOSTIC_TQ_EXPECTED_OUTPUT = 8;
+    AGNOSTIC_TQ_PRIORITY        = 16;
+    AGNOSTIC_TQ_RISK            = 24;
+    AGNOSTIC_TQ_DEPENDENCIES    = 32;
+    AGNOSTIC_TQ_SIZE            = 40;
+}
+
+# The process modes Agnostic accepts on the wire.
+var AGNOSTIC_PROCESS_SEQUENTIAL = 0;
+var AGNOSTIC_PROCESS_PARALLEL   = 1;
+var AGNOSTIC_PROCESS_DAG        = 2;
+
+# Bounds. Deliberately at or below the engine's own
+# (`AGNOSAI_CREW_MAX_AGENTS` 100, `AGNOSAI_CREW_MAX_TASKS` 1000,
+# `AGNOSAI_CREW_MAX_STRING_LEN` 10000) so a request Agnostic accepts is one the
+# engine will also accept. A bound *above* the engine's would turn a clean 400
+# into a rejection deeper in, where the message is worse.
+var AGNOSTIC_REQ_MAX_AGENTS     = 100;
+var AGNOSTIC_REQ_MAX_TASKS      = 1000;
+var AGNOSTIC_REQ_MAX_STRING     = 10000;
+var AGNOSTIC_REQ_MAX_TOOLS      = 64;
+var AGNOSTIC_REQ_MAX_DEPS       = 64;
+var AGNOSTIC_REQ_MAX_CONCURRENCY = 64;
+var AGNOSTIC_REQ_DEFAULT_CONCURRENCY = 4;
+
+# The unset sentinel for an optional integer field.
+#
+# ⚠ **-1, not 0.** 0 is a legal priority (`AGNOSAI_PRIORITY_BACKGROUND`) and a
+# legal `gpu_memory_min_mb`. A 0 sentinel would make "background priority" and
+# "priority omitted" the same value, which is the same class of mistake as
+# `config.cyr`'s port parser refusing to use 0 for "unset".
+var AGNOSTIC_REQ_UNSET = 0 - 1;
+
+# Build a rejection in `a`. Returns 0 when the arena is exhausted.
+fn agnostic_reject_a(a, status, message: Str): i64 {
+    var r = alloc_via(a, AGNOSTIC_RJ_SIZE);
+    if (r == 0) { return 0; }
+    store64(r + AGNOSTIC_RJ_STATUS, status);
+    store64(r + AGNOSTIC_RJ_MESSAGE, message);
+    return r;
+}
+
+# The HTTP status a rejection carries. 400 for a null rejection.
+fn agnostic_reject_status(r): i64 {
+    if (r == 0) { return HTTP_BAD_REQUEST; }
+    return load64(r + AGNOSTIC_RJ_STATUS);
+}
+
+# The message a rejection carries, or a generic one when null.
+fn agnostic_reject_message(r): i64 {
+    if (r == 0) { return str_from("invalid request"); }
+    return load64(r + AGNOSTIC_RJ_MESSAGE);
+}
+
+# Store a rejection through `out` and return 0, so a decoder arm is one line.
+fn _agnostic_reject(a, out, status, message: Str): i64 {
+    if (out != 0) { store64(out, agnostic_reject_a(a, status, message)); }
+    return 0;
+}
+
+# A rejection naming the offending field, as `<prefix><field><suffix>`.
+#
+# Naming the field is the difference between an error a caller can act on and
+# one that sends them to read source. `ORACLE-AUDIT.md` §2.2's complaint is not
+# only that fields were dropped — it is that nothing said so.
+fn _agnostic_reject_field(a, out, status, prefix, field: Str, suffix): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add(sb, field);
+    str_builder_add_cstr(sb, suffix);
+    return _agnostic_reject(a, out, status, str_builder_build(sb));
+}
+
+# A rejection naming an indexed element, as `<prefix><index><suffix>`.
+fn _agnostic_reject_at(a, out, status, prefix, index, suffix): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, prefix);
+    str_builder_add_int(sb, index);
+    str_builder_add_cstr(sb, suffix);
+    return _agnostic_reject(a, out, status, str_builder_build(sb));
+}
+
+# The wire spelling of a process mode.
+fn agnostic_process_to_wire(p): i64 {
+    if (p == AGNOSTIC_PROCESS_PARALLEL) { return str_from("parallel"); }
+    if (p == AGNOSTIC_PROCESS_DAG)      { return str_from("dag"); }
+    return str_from("sequential");
+}
+
+# A process mode from its wire spelling, or -1 for an unrecognised one.
+#
+# ⚠ **-1, not a default.** `_agnosai_route_process_for` falls back to sequential
+# for anything it does not recognise, so a typo'd `"paralell"` runs sequentially
+# and nothing says so. That is a silent default of exactly the kind this port
+# refuses; an unrecognised mode is a 400 naming it.
+#
+# `hierarchical` is deliberately absent. The engine accepts the mode, warns
+# "hierarchical mode not yet implemented", and runs sequentially  #skip-lint: quotes the engine's own warning
+# — so accepting the word here would advertise a mode Agnostic does not have and
+# silently give the caller a different one. Tracked against roadmap M2; it
+# becomes acceptable the day the engine implements it.
+fn agnostic_process_from_wire(s: Str): i64 {
+    if (str_eq_cstr(s, "sequential") == 1) { return AGNOSTIC_PROCESS_SEQUENTIAL; }
+    if (str_eq_cstr(s, "parallel") == 1)   { return AGNOSTIC_PROCESS_PARALLEL; }
+    if (str_eq_cstr(s, "dag") == 1)        { return AGNOSTIC_PROCESS_DAG; }
+    return 0 - 1;
+}
+
+# A task priority from its wire spelling, or -1 for an unrecognised one.
+fn agnostic_priority_from_wire(s: Str): i64 {
+    if (str_eq_cstr(s, "background") == 1) { return AGNOSAI_PRIORITY_BACKGROUND; }
+    if (str_eq_cstr(s, "low") == 1)        { return AGNOSAI_PRIORITY_LOW; }
+    if (str_eq_cstr(s, "normal") == 1)     { return AGNOSAI_PRIORITY_NORMAL; }
+    if (str_eq_cstr(s, "high") == 1)       { return AGNOSAI_PRIORITY_HIGH; }
+    if (str_eq_cstr(s, "critical") == 1)   { return AGNOSAI_PRIORITY_CRITICAL; }
+    return 0 - 1;
+}
+
+# A task risk level from its wire spelling, or -1 for an unrecognised one.
+fn agnostic_risk_from_wire(s: Str): i64 {
+    if (str_eq_cstr(s, "low") == 1)    { return AGNOSAI_RISK_LOW; }
+    if (str_eq_cstr(s, "medium") == 1) { return AGNOSAI_RISK_MEDIUM; }
+    if (str_eq_cstr(s, "high") == 1)   { return AGNOSAI_RISK_HIGH; }
+    return 0 - 1;
+}
+
+# The crew-level allow-list. Every key a submission may carry, and no others.
+fn agnostic_crew_req_fields_a(a): i64 {
+    var f = agnostic_fields_a(a);
+    agnostic_field_a(a, f, "name");
+    agnostic_field_a(a, f, "process");
+    agnostic_field_a(a, f, "max_concurrency");
+    agnostic_field_a(a, f, "agents");
+    agnostic_field_a(a, f, "tasks");
+    return f;
+}
+
+# The agent allow-list.
+#
+# `gpu_required` is the counterpart of the oracle's dropped `gpu_strict`
+# (`ORACLE-AUDIT.md` §2.2) — a hard-fail GPU requirement. It is listed, decoded
+# and forwarded; that is the whole point of the list existing.
+fn agnostic_agent_req_fields_a(a): i64 {
+    var f = agnostic_fields_a(a);
+    agnostic_field_a(a, f, "key");
+    agnostic_field_a(a, f, "name");
+    agnostic_field_a(a, f, "role");
+    agnostic_field_a(a, f, "goal");
+    agnostic_field_a(a, f, "backstory");
+    agnostic_field_a(a, f, "domain");
+    agnostic_field_a(a, f, "tools");
+    agnostic_field_a(a, f, "complexity");
+    agnostic_field_a(a, f, "llm_model");
+    agnostic_field_a(a, f, "gpu_required");
+    agnostic_field_a(a, f, "gpu_preferred");
+    agnostic_field_a(a, f, "gpu_memory_min_mb");
+    return f;
+}
+
+# The task allow-list.
+fn agnostic_task_req_fields_a(a): i64 {
+    var f = agnostic_fields_a(a);
+    agnostic_field_a(a, f, "description");
+    agnostic_field_a(a, f, "expected_output");
+    agnostic_field_a(a, f, "priority");
+    agnostic_field_a(a, f, "risk");
+    agnostic_field_a(a, f, "dependencies");
+    return f;
+}
+
+# Accessors for a decoded submission.
+
+# The crew name.
+fn agnostic_crew_req_name(r): i64 {
+    if (r == 0) { return 0; }
+    return load64(r + AGNOSTIC_CQ_NAME);
+}
+
+# The requested process mode.
+fn agnostic_crew_req_process(r): i64 {
+    if (r == 0) { return AGNOSTIC_PROCESS_SEQUENTIAL; }
+    return load64(r + AGNOSTIC_CQ_PROCESS);
+}
+
+# The requested parallel concurrency, or AGNOSTIC_REQ_UNSET.
+fn agnostic_crew_req_concurrency(r): i64 {
+    if (r == 0) { return AGNOSTIC_REQ_UNSET; }
+    return load64(r + AGNOSTIC_CQ_CONCURRENCY);
+}
+
+# The vec of engine agent definitions the submission carries.
+fn agnostic_crew_req_agents(r): i64 {
+    if (r == 0) { return 0; }
+    return load64(r + AGNOSTIC_CQ_AGENTS);
+}
+
+# The vec of decoded task requests.
+fn agnostic_crew_req_tasks(r): i64 {
+    if (r == 0) { return 0; }
+    return load64(r + AGNOSTIC_CQ_TASKS);
+}
+
+# A task's description.
+fn agnostic_task_req_description(t): i64 {
+    if (t == 0) { return 0; }
+    return load64(t + AGNOSTIC_TQ_DESCRIPTION);
+}
+
+# A task's expected output, or 0.
+fn agnostic_task_req_expected_output(t): i64 {
+    if (t == 0) { return 0; }
+    return load64(t + AGNOSTIC_TQ_EXPECTED_OUTPUT);
+}
+
+# A task's priority, or AGNOSTIC_REQ_UNSET.
+fn agnostic_task_req_priority(t): i64 {
+    if (t == 0) { return AGNOSTIC_REQ_UNSET; }
+    return load64(t + AGNOSTIC_TQ_PRIORITY);
+}
+
+# A task's risk level, or AGNOSTIC_REQ_UNSET.
+fn agnostic_task_req_risk(t): i64 {
+    if (t == 0) { return AGNOSTIC_REQ_UNSET; }
+    return load64(t + AGNOSTIC_TQ_RISK);
+}
+
+# A task's dependency indices as a vec of integers.
+fn agnostic_task_req_dependencies(t): i64 {
+    if (t == 0) { return 0; }
+    return load64(t + AGNOSTIC_TQ_DEPENDENCIES);
+}
+
+# Whether a string field is within the length bound: 1 ok, -1 too long.
+#
+# Type is not checked here — `agnostic_req_str` / `agnostic_opt_str` have already
+# separated "absent" from "wrong type" by the time this runs, and folding a third
+# outcome in would blur a distinction those two exist to preserve.
+fn _agnostic_str_field_ok(s: Str): i64 {
+    if (str_len(s) > AGNOSTIC_REQ_MAX_STRING) { return 0 - 1; }
+    return 1;
+}
+
+# Decode one agent object into an engine agent definition.
+#
+# ⚠ **Global allocator, not the arena.** The definition is handed to
+# `agnosai_crew_new`'s spec, which `agnosai_orchestrator_submit_crew` registers —
+# the crew outlives the request that created it, which is the entire premise of
+# polling for it later. An arena-allocated agent would be freed under the running
+# crew at the end of the request. `a` is still passed, and is used only for the
+# rejection record, which does belong to the request.
+fn agnostic_agent_req_decode_a(a, v, index, out): i64 {
+    if (bayan_json_v_is_obj(v) != 1) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "] is not an object");
+    }
+    var allowed = agnostic_agent_req_fields_a(a);
+    var unknown = agnostic_unknown_field(v, allowed);
+    if (unknown != 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "agents[");
+        str_builder_add_int(sb, index);
+        str_builder_add_cstr(sb, "] has unknown field '");
+        str_builder_add(sb, unknown);
+        str_builder_add_cstr(sb, "'");
+        return _agnostic_reject(a, out, AGNOSTIC_HTTP_UNPROCESSABLE, str_builder_build(sb));
+    }
+
+    var key = agnostic_req_str(v, str_from("key"));
+    if (key == 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "agents[", index, "]: 'key' is required and must be a string");
+    }
+    var role = agnostic_req_str(v, str_from("role"));
+    if (role == 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "agents[", index, "]: 'role' is required and must be a string");
+    }
+    var goal = agnostic_req_str(v, str_from("goal"));
+    if (goal == 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "agents[", index, "]: 'goal' is required and must be a string");
+    }
+    if (_agnostic_str_field_ok(key) < 0 || _agnostic_str_field_ok(role) < 0
+      || _agnostic_str_field_ok(goal) < 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "agents[", index, "]: a field exceeds the maximum length");
+    }
+
+    var def = agnosai_agent_new(str_clone(key), str_clone(role), str_clone(goal));
+    if (def == 0) {
+        return _agnostic_reject_at(a, out, HTTP_INTERNAL,
+          "agents[", index, "]: could not allocate agent definition");
+    }
+
+    # Optional strings. `agnostic_opt_str` answers 0 for a present-but-wrong-type
+    # field and `dflt` for an absent one, so the two are distinguishable — which
+    # is why a type error below is a 422 rather than a silent default.
+    var name = agnostic_opt_str(v, str_from("name"), 0 - 1);
+    if (name == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'name' must be a string");
+    }
+    if (name != 0 - 1) { agnosai_agent_with_name(def, str_clone(name)); }
+
+    var domain = agnostic_opt_str(v, str_from("domain"), 0 - 1);
+    if (domain == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'domain' must be a string");
+    }
+    if (domain != 0 - 1) { agnosai_agent_with_domain(def, str_clone(domain)); }
+
+    var backstory = agnostic_opt_str(v, str_from("backstory"), 0 - 1);
+    if (backstory == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'backstory' must be a string");
+    }
+    if (backstory != 0 - 1) { agnosai_agent_with_backstory(def, str_clone(backstory)); }
+
+    var complexity = agnostic_opt_str(v, str_from("complexity"), 0 - 1);
+    if (complexity == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'complexity' must be a string");
+    }
+    if (complexity != 0 - 1) { agnosai_agent_with_complexity(def, str_clone(complexity)); }
+
+    var model = agnostic_opt_str(v, str_from("llm_model"), 0 - 1);
+    if (model == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'llm_model' must be a string");
+    }
+    if (model != 0 - 1) { agnosai_agent_with_llm_model(def, str_clone(model)); }
+
+    # Tools: an array of strings, or absent.
+    var tools_v = bayan_json_v_obj_get_by_str(v, str_from("tools"));
+    if (tools_v != 0) {
+        if (bayan_json_v_is_null(tools_v) != 1) {
+            if (bayan_json_v_is_arr(tools_v) != 1) {
+                return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+                  "agents[", index, "]: 'tools' must be an array of strings");
+            }
+            var tn = bayan_json_v_arr_len(tools_v);
+            if (tn > AGNOSTIC_REQ_MAX_TOOLS) {
+                return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+                  "agents[", index, "]: too many tools");
+            }
+            var tools = vec_new();
+            var ti = 0;
+            while (ti < tn) {
+                var tv = bayan_json_v_arr_get(tools_v, ti);
+                if (bayan_json_v_is_str(tv) != 1) {
+                    return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+                      "agents[", index, "]: 'tools' must be an array of strings");
+                }
+                vec_push(tools, str_clone(bayan_json_v_str(tv)));
+                ti = ti + 1;
+            }
+            agnosai_agent_with_tools(def, tools);
+        }
+    }
+
+    # GPU placement. All three travel together through one engine setter, so they
+    # are read together and defaulted together.
+    #
+    # ⚠ `gpu_required` is the field `ORACLE-AUDIT.md` §2.2 records the oracle
+    # dropping under the name `gpu_strict` — a hard-fail requirement that became
+    # a silent CPU fallback. It is forwarded, and a wrong type is a 422 rather
+    # than a false.
+    var gpu_req = _agnostic_opt_bool(v, "gpu_required");
+    if (gpu_req == AGNOSTIC_REQ_UNSET - 1) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'gpu_required' must be a boolean");
+    }
+    var gpu_pref = _agnostic_opt_bool(v, "gpu_preferred");
+    if (gpu_pref == AGNOSTIC_REQ_UNSET - 1) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'gpu_preferred' must be a boolean");
+    }
+    var gpu_mem = _agnostic_opt_int(v, "gpu_memory_min_mb");
+    if (gpu_mem == AGNOSTIC_REQ_UNSET - 1) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index, "]: 'gpu_memory_min_mb' must be an integer");
+    }
+    if (gpu_mem != AGNOSTIC_REQ_UNSET && gpu_mem < 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "agents[", index, "]: 'gpu_memory_min_mb' must not be negative");
+    }
+    if (gpu_req != AGNOSTIC_REQ_UNSET || gpu_pref != AGNOSTIC_REQ_UNSET
+      || gpu_mem != AGNOSTIC_REQ_UNSET) {
+        var rq = 0;
+        if (gpu_req == 1) { rq = 1; }
+        var pf = 0;
+        if (gpu_pref == 1) { pf = 1; }
+        var mm = 0;
+        if (gpu_mem != AGNOSTIC_REQ_UNSET) { mm = gpu_mem; }
+        agnosai_agent_with_gpu(def, rq, pf, mm);
+    }
+    return def;
+}
+
+# An optional boolean: 1, 0, AGNOSTIC_REQ_UNSET when absent, or
+# `AGNOSTIC_REQ_UNSET - 1` when present with the wrong type.
+#
+# ⚠ A JSON string `"false"` is **not** a boolean and reports the type error. The
+# note on `agnostic_req_bool` in `src/http/codec.cyr` has the reasoning: coercing
+# it would make `{"gpu_required": "false"}` read as true, since the string is
+# non-empty — the exact silent misreading this port refuses.
+fn _agnostic_opt_bool(v, key): i64 {
+    var f = bayan_json_v_obj_get_by_str(v, str_from(key));
+    if (f == 0) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_null(f) == 1) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_bool(f) != 1) { return AGNOSTIC_REQ_UNSET - 1; }
+    return bayan_json_v_bool(f);
+}
+
+# An optional integer, with the same three-way signalling as `_agnostic_opt_bool`.
+fn _agnostic_opt_int(v, key): i64 {
+    var f = bayan_json_v_obj_get_by_str(v, str_from(key));
+    if (f == 0) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_null(f) == 1) { return AGNOSTIC_REQ_UNSET; }
+    if (bayan_json_v_is_int(f) != 1) { return AGNOSTIC_REQ_UNSET - 1; }
+    return bayan_json_v_int(f);
+}
+
+# Decode one task object.
+#
+# Global allocator for the same reason `agnostic_agent_req_decode_a` uses it:
+# the description and expected output are handed to engine tasks that outlive
+# the request.
+fn agnostic_task_req_decode_a(a, v, index, count, out): i64 {
+    if (bayan_json_v_is_obj(v) != 1) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "tasks[", index, "] is not an object");
+    }
+    var allowed = agnostic_task_req_fields_a(a);
+    var unknown = agnostic_unknown_field(v, allowed);
+    if (unknown != 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "tasks[");
+        str_builder_add_int(sb, index);
+        str_builder_add_cstr(sb, "] has unknown field '");
+        str_builder_add(sb, unknown);
+        str_builder_add_cstr(sb, "'");
+        return _agnostic_reject(a, out, AGNOSTIC_HTTP_UNPROCESSABLE, str_builder_build(sb));
+    }
+
+    var desc = agnostic_req_str(v, str_from("description"));
+    if (desc == 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "tasks[", index, "]: 'description' is required and must be a string");
+    }
+    if (str_len(desc) == 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "tasks[", index, "]: 'description' must not be empty");
+    }
+    if (_agnostic_str_field_ok(desc) < 0) {
+        return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+          "tasks[", index, "]: 'description' exceeds the maximum length");
+    }
+
+    var t = alloc(AGNOSTIC_TQ_SIZE);
+    if (t == 0) {
+        return _agnostic_reject_at(a, out, HTTP_INTERNAL,
+          "tasks[", index, "]: could not allocate task");
+    }
+    store64(t + AGNOSTIC_TQ_DESCRIPTION, str_clone(desc));
+    store64(t + AGNOSTIC_TQ_EXPECTED_OUTPUT, 0);
+    store64(t + AGNOSTIC_TQ_PRIORITY, AGNOSTIC_REQ_UNSET);
+    store64(t + AGNOSTIC_TQ_RISK, AGNOSTIC_REQ_UNSET);
+    store64(t + AGNOSTIC_TQ_DEPENDENCIES, vec_new());
+
+    var eo = agnostic_opt_str(v, str_from("expected_output"), 0 - 1);
+    if (eo == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "tasks[", index, "]: 'expected_output' must be a string");
+    }
+    if (eo != 0 - 1) {
+        if (_agnostic_str_field_ok(eo) < 0) {
+            return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+              "tasks[", index, "]: 'expected_output' exceeds the maximum length");
+        }
+        store64(t + AGNOSTIC_TQ_EXPECTED_OUTPUT, str_clone(eo));
+    }
+
+    # Priority and risk arrive as wire names, never as raw integers. Accepting
+    # the integer too would give two spellings for one value and make the
+    # enum's numbering part of the public contract.
+    var pri = agnostic_opt_str(v, str_from("priority"), 0 - 1);
+    if (pri == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "tasks[", index, "]: 'priority' must be a string");
+    }
+    if (pri != 0 - 1) {
+        var p = agnostic_priority_from_wire(pri);
+        if (p < 0) {
+            return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+              "tasks[", index, "]: 'priority' must be one of background, low, normal, high, critical");
+        }
+        store64(t + AGNOSTIC_TQ_PRIORITY, p);
+    }
+
+    var rk = agnostic_opt_str(v, str_from("risk"), 0 - 1);
+    if (rk == 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "tasks[", index, "]: 'risk' must be a string");
+    }
+    if (rk != 0 - 1) {
+        var rv = agnostic_risk_from_wire(rk);
+        if (rv < 0) {
+            return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+              "tasks[", index, "]: 'risk' must be one of low, medium, high");
+        }
+        store64(t + AGNOSTIC_TQ_RISK, rv);
+    }
+
+    var deps_v = bayan_json_v_obj_get_by_str(v, str_from("dependencies"));
+    if (deps_v != 0) {
+        if (bayan_json_v_is_null(deps_v) != 1) {
+            if (bayan_json_v_is_arr(deps_v) != 1) {
+                return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+                  "tasks[", index, "]: 'dependencies' must be an array of task indices");
+            }
+            var dn = bayan_json_v_arr_len(deps_v);
+            if (dn > AGNOSTIC_REQ_MAX_DEPS) {
+                return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+                  "tasks[", index, "]: too many dependencies");
+            }
+            var deps = load64(t + AGNOSTIC_TQ_DEPENDENCIES);
+            var di = 0;
+            while (di < dn) {
+                var dv = bayan_json_v_arr_get(deps_v, di);
+                if (bayan_json_v_is_int(dv) != 1) {
+                    return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+                      "tasks[", index, "]: 'dependencies' must be an array of task indices");
+                }
+                var d = bayan_json_v_int(dv);
+                if (d < 0 || d >= count) {
+                    return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+                      "tasks[", index, "]: dependency index out of range");
+                }
+                if (d == index) {
+                    return _agnostic_reject_at(a, out, HTTP_BAD_REQUEST,
+                      "tasks[", index, "]: a task cannot depend on itself");
+                }
+                vec_push(deps, d);
+                di = di + 1;
+            }
+        }
+    }
+    return t;
+}
+
+# Whether the task list's dependency graph contains a cycle.
+#
+# Kahn's algorithm over the index-based edges, iterative — a recursive DFS would
+# put a client-controlled 1000-deep chain on the C stack.
+#
+# **Why this must run before submission**: see the module header. A cyclic graph
+# submitted asynchronously leaves a crew reporting `pending` forever, because the
+# engine's error return is discarded on the submit thread and the registry keeps
+# the PENDING entry `_agnosai_orch_register` seeded.
+fn agnostic_crew_req_has_cycle(tasks): i64 {
+    if (tasks == 0) { return 0; }
+    var n = vec_len(tasks);
+    if (n == 0) { return 0; }
+
+    # indegree[i] = how many tasks task i waits on.
+    var indegree = vec_new();
+    var i = 0;
+    while (i < n) {
+        vec_push(indegree, vec_len(agnostic_task_req_dependencies(vec_get(tasks, i))));
+        i = i + 1;
+    }
+
+    var queue = vec_new();
+    var q = 0;
+    while (q < n) {
+        if (vec_get(indegree, q) == 0) { vec_push(queue, q); }
+        q = q + 1;
+    }
+
+    var seen = 0;
+    var head = 0;
+    while (head < vec_len(queue)) {
+        var node = vec_get(queue, head);
+        head = head + 1;
+        seen = seen + 1;
+        # Every task that lists `node` among its dependencies loses one edge.
+        var j = 0;
+        while (j < n) {
+            var deps = agnostic_task_req_dependencies(vec_get(tasks, j));
+            var k = 0;
+            while (k < vec_len(deps)) {
+                if (vec_get(deps, k) == node) {
+                    var left = vec_get(indegree, j) - 1;
+                    vec_set(indegree, j, left);
+                    if (left == 0) { vec_push(queue, j); }
+                }
+                k = k + 1;
+            }
+            j = j + 1;
+        }
+    }
+    if (seen < n) { return 1; }
+    return 0;
+}
+
+# Decode a crew submission from a parsed JSON body.
+#
+# Returns the request record, or 0 with a rejection stored through `out`.
+#
+# The order is the one `src/http/codec.cyr` documents and it matters: reject a
+# non-object, then check the shape with the allow-list **before reading any
+# field**, then required fields, then optional. Validating the shape first means
+# a request is refused whole rather than half-applied.
+fn agnostic_crew_req_from_value_a(a, v, out): i64 {
+    if (bayan_json_v_is_obj(v) != 1) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "request body must be a JSON object"));
+    }
+
+    var allowed = agnostic_crew_req_fields_a(a);
+    var unknown = agnostic_unknown_field(v, allowed);
+    if (unknown != 0) {
+        return _agnostic_reject_field(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "unknown field '", unknown, "'");
+    }
+
+    var name = agnostic_req_str(v, str_from("name"));
+    if (name == 0) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "'name' is required and must be a string"));
+    }
+    if (str_len(name) == 0 || _agnostic_str_field_ok(name) < 0) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "'name' must be between 1 and 10000 characters"));
+    }
+
+    var process = AGNOSTIC_PROCESS_SEQUENTIAL;
+    var pw = agnostic_opt_str(v, str_from("process"), 0 - 1);
+    if (pw == 0) {
+        return _agnostic_reject(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'process' must be a string"));
+    }
+    if (pw != 0 - 1) {
+        process = agnostic_process_from_wire(pw);
+        if (process < 0) {
+            return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+              str_from_a(a, "'process' must be one of sequential, parallel, dag"));
+        }
+    }
+
+    var concurrency = _agnostic_opt_int(v, "max_concurrency");
+    if (concurrency == AGNOSTIC_REQ_UNSET - 1) {
+        return _agnostic_reject(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "'max_concurrency' must be an integer"));
+    }
+    if (concurrency != AGNOSTIC_REQ_UNSET) {
+        if (concurrency < 1 || concurrency > AGNOSTIC_REQ_MAX_CONCURRENCY) {
+            return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+              str_from_a(a, "'max_concurrency' must be between 1 and 64"));
+        }
+        # ⚠ Accepted only where it means something. The engine reads concurrency
+        # from the process mode, so a `max_concurrency` sent alongside
+        # `sequential` would be accepted and then have no effect — a field
+        # silently doing nothing, which is the failure this milestone is about.
+        if (process != AGNOSTIC_PROCESS_PARALLEL) {
+            return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+              str_from_a(a, "'max_concurrency' applies only to process 'parallel'"));
+        }
+    }
+
+    var agents_v = bayan_json_v_obj_get_by_str(v, str_from("agents"));
+    if (agents_v == 0 || bayan_json_v_is_arr(agents_v) != 1) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "'agents' is required and must be an array"));
+    }
+    var an = bayan_json_v_arr_len(agents_v);
+    if (an == 0) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "at least one agent is required"));
+    }
+    if (an > AGNOSTIC_REQ_MAX_AGENTS) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "at most 100 agents are allowed"));
+    }
+
+    # ⚠ `tasks` is REQUIRED. `ORACLE-AUDIT.md` §3.3 is what a missing-but-ignored
+    # `tasks` field cost: the array was dropped and a single-task fallback ran
+    # instead, silently, on every request. There is no fallback to fall into here.
+    var tasks_v = bayan_json_v_obj_get_by_str(v, str_from("tasks"));
+    if (tasks_v == 0 || bayan_json_v_is_arr(tasks_v) != 1) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "'tasks' is required and must be an array"));
+    }
+    var tn = bayan_json_v_arr_len(tasks_v);
+    if (tn == 0) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "at least one task is required"));
+    }
+    if (tn > AGNOSTIC_REQ_MAX_TASKS) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "at most 1000 tasks are allowed"));
+    }
+
+    var agents = vec_new();
+    var ai = 0;
+    while (ai < an) {
+        var def = agnostic_agent_req_decode_a(a, bayan_json_v_arr_get(agents_v, ai), ai, out);
+        if (def == 0) { return 0; }
+        vec_push(agents, def);
+        ai = ai + 1;
+    }
+
+    var tasks = vec_new();
+    var ti = 0;
+    while (ti < tn) {
+        var t = agnostic_task_req_decode_a(a, bayan_json_v_arr_get(tasks_v, ti), ti, tn, out);
+        if (t == 0) { return 0; }
+        vec_push(tasks, t);
+        ti = ti + 1;
+    }
+
+    if (agnostic_crew_req_has_cycle(tasks) == 1) {
+        return _agnostic_reject(a, out, HTTP_BAD_REQUEST,
+          str_from_a(a, "task dependencies contain a cycle"));
+    }
+
+    var r = alloc(AGNOSTIC_CQ_SIZE);
+    if (r == 0) {
+        return _agnostic_reject(a, out, HTTP_INTERNAL,
+          str_from_a(a, "could not allocate crew request"));
+    }
+    store64(r + AGNOSTIC_CQ_NAME, str_clone(name));
+    store64(r + AGNOSTIC_CQ_PROCESS, process);
+    store64(r + AGNOSTIC_CQ_CONCURRENCY, concurrency);
+    store64(r + AGNOSTIC_CQ_AGENTS, agents);
+    store64(r + AGNOSTIC_CQ_TASKS, tasks);
+    return r;
+}
+
+# Build the engine crew spec a decoded submission describes.
+#
+# **Two passes over the task list, and the second one is not optional.**
+# Dependencies are index-based on the wire and id-based in the spec, and a task's
+# engine id does not exist until `agnosai_task_new` has built it — so every task
+# must exist before any edge can be resolved.
+#
+# Global allocator throughout: `agnosai_orchestrator_submit_crew` registers this
+# spec and a detached thread runs it, both of which outlive the request.
+fn agnostic_crew_spec_build(r): i64 {
+    if (r == 0) { return 0; }
+    var spec = agnosai_crew_new(agnostic_crew_req_name(r));
+    if (spec == 0) { return 0; }
+    agnosai_crew_with_agents(spec, agnostic_crew_req_agents(r));
+
+    var mode = agnostic_crew_req_process(r);
+    if (mode == AGNOSTIC_PROCESS_DAG) {
+        agnosai_crew_with_process(spec, agnosai_process_dag());
+    } elif (mode == AGNOSTIC_PROCESS_PARALLEL) {
+        var n = agnostic_crew_req_concurrency(r);
+        if (n == AGNOSTIC_REQ_UNSET) { n = AGNOSTIC_REQ_DEFAULT_CONCURRENCY; }
+        agnosai_crew_with_process(spec, agnosai_process_parallel(n));
+    } else {
+        agnosai_crew_with_process(spec, agnosai_process_sequential());
+    }
+
+    var reqs = agnostic_crew_req_tasks(r);
+    var n2 = vec_len(reqs);
+    var tasks = vec_new();
+    var i = 0;
+    while (i < n2) {
+        var tr = vec_get(reqs, i);
+        var t = agnosai_task_new(agnostic_task_req_description(tr));
+        if (t == 0) { return 0; }
+        var eo = agnostic_task_req_expected_output(tr);
+        if (eo != 0) { agnosai_task_with_expected_output(t, eo); }
+        # An absent priority leaves `agnosai_task_new`'s own default rather than
+        # overwriting it with NORMAL — the two are not the same if the engine's
+        # default ever moves.
+        var p = agnostic_task_req_priority(tr);
+        if (p != AGNOSTIC_REQ_UNSET) { agnosai_task_with_priority(t, p); }
+        var rk = agnostic_task_req_risk(tr);
+        if (rk != AGNOSTIC_REQ_UNSET) { agnosai_task_with_risk(t, rk); }
+        vec_push(tasks, t);
+        i = i + 1;
+    }
+
+    var j = 0;
+    while (j < n2) {
+        var deps = agnostic_task_req_dependencies(vec_get(reqs, j));
+        var k = 0;
+        while (k < vec_len(deps)) {
+            var idx = vec_get(deps, k);
+            # Bounds already enforced at decode; re-checked because this function
+            # is reachable from a caller that built the record another way.
+            if (idx >= 0 && idx < n2) {
+                agnosai_task_with_dependency(vec_get(tasks, j),
+                  agnosai_task_id(vec_get(tasks, idx)));
+            }
+            k = k + 1;
+        }
+        j = j + 1;
+    }
+
+    agnosai_crew_with_tasks(spec, tasks);
+    return spec;
+}

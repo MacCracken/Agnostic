@@ -1,0 +1,335 @@
+# agnostic/engine/crew — the AgnosAI bridge: submit, poll, cancel.
+#
+# AgnosAI is linked **in-process** (`lib/agnosai.cyr` is in the compile unit), so
+# there is no transport here — no client, no URL, no retry policy. That removes a
+# whole class of the oracle's defects by construction and leaves the ones that
+# were never about transport at all.
+#
+# ## 202-then-poll
+#
+# `POST /api/v1/crews` returns **202 Accepted** with the crew id and hands back
+# control; the client polls `GET /api/v1/crews/{id}`. The engine's own route runs
+# the crew inline (`agnosai_route_create_crew_a` calls the blocking
+# `agnosai_orchestrator_run_crew`) to keep parity with its Rust oracle, which
+# means a `POST` holds a worker for the entire run. Agnostic is the product tier
+# and does not inherit that: `agnosai_orchestrator_submit_crew` registers the
+# crew, spawns a detached thread, and returns the id immediately.
+#
+# ## ⚠ The submit ordering is load-bearing in two places
+#
+# `agnostic_crew_submit` does: **build spec → subscribe → submit → record.**
+# Neither of the first two may move:
+#
+#   * **Subscribe before submit.** `agnosai_event_bus_subscribe` creates the
+#     channel if it is absent, and `_agnosai_orch_register` — inside submit —
+#     fetches the sender for the same crew id, finding ours. Reversed, a crew
+#     that finishes quickly would have its channel deleted by
+#     `agnosai_event_bus_remove` before we subscribed, and our subscription would
+#     create a fresh orphan channel that no crew ever publishes to. Silent: the
+#     progress list would simply always be empty.
+#   * **Record after submit.** `_agnosai_orch_register` puts the crew in the
+#     engine registry synchronously, before the thread is spawned. Recording the
+#     ledger entry first would open a window where a poll finds our entry and no
+#     engine state, and reports `unknown` for a crew that is about to run
+#     perfectly well.
+#
+# ## ⚠ Agnostic mints no crew id — `ORACLE-AUDIT.md` §3.2
+#
+# The oracle's `execute_crew` accepted `session_id`, `crew_id` and `task_id` and
+# used none of them; the id AgnosAI assigned came back in the response and was
+# discarded, because `BackendResult` had no field to hold it. Cancel then POSTed
+# the *local* UUID, got a 404, discarded that too, and marked its own record
+# cancelled while the crew kept running.
+#
+# Every id here originates in `agnosai_crew_new` — the engine's — and is carried
+# in `AGNOSTIC_OC_CREW_ID` and the ledger key. There is no second id to confuse
+# it with, so the substitution that defect turns on cannot be written.
+
+# What `agnostic_crew_submit` reports.
+enum AgnosticSubmitResult {
+    AGNOSTIC_SUBMIT_OK            = 0;
+    AGNOSTIC_SUBMIT_NO_ENGINE     = 1;
+    AGNOSTIC_SUBMIT_SPEC_FAILED   = 2;
+    AGNOSTIC_SUBMIT_START_FAILED  = 3;
+}
+
+# What `agnostic_crew_cancel` reports.
+#
+# Four outcomes rather than a boolean, because the three failures need three
+# different answers on the wire — and because collapsing them is precisely what
+# §3.2 did.
+enum AgnosticCancelResult {
+    AGNOSTIC_CANCEL_OK               = 0;
+    AGNOSTIC_CANCEL_NOT_SUBMITTED    = 1;
+    AGNOSTIC_CANCEL_ALREADY_TERMINAL = 2;
+    AGNOSTIC_CANCEL_ENGINE_UNKNOWN   = 3;
+}
+
+# The orchestrator, built at mount and read lock-free by every worker thereafter.
+var _agnostic_orchestrator = 0;
+
+# The event bus the orchestrator publishes crew progress to.
+var _agnostic_event_bus = 0;
+
+# The config the engine was built from, kept so `agnostic_engine_mode` can report
+# how it was wired.
+#
+# ⚠ Its own copy rather than a read of `_agnostic_serve_cfg`. That global lives
+# in `src/server/serve.cyr`, which is included *after* this module — and the
+# engine tier has no business reaching into the transport's state in either
+# direction.
+var _agnostic_engine_cfg = 0;
+
+# The reason a submitted crew never started, interned so the failure path
+# allocates nothing.
+var AGNOSTIC_CREW_START_MSG = str_from("engine could not start the crew");
+
+# The reason a poll can no longer account for a crew.
+var AGNOSTIC_CREW_LOST_MSG = str_from("the engine no longer holds this crew and no outcome was recorded");
+
+# The two engine modes, as they appear on the wire.
+var AGNOSTIC_MODE_LIVE        = str_from("live");
+var AGNOSTIC_MODE_PLACEHOLDER = str_from("placeholder");
+
+# Stand up the engine. Mount time only, before any worker exists.
+#
+# ⚠ **Registration order is a correctness requirement.** The orchestrator and bus
+# are read lock-free by every worker and `sandhi_server_run_pooled` spawns those
+# workers, so anything built after the run call is a data race. Same rule as the
+# readiness registry in `src/routes/health.cyr`.
+#
+# Returns 1 on success, 0 when the orchestrator could not be built.
+fn agnostic_engine_init(cfg): i64 {
+    if (_agnostic_orchestrator != 0) { return 1; }
+
+    # `agnosai_resource_budget_default` sets no token, cost or duration ceiling
+    # and 10 concurrent tasks. The duration is the one Agnostic overrides: left
+    # unset, `agnosai_orchestrator_timeout_secs` substitutes the oracle's
+    # one-hour fallback, which is a long time for a worker to be committed to a
+    # crew nobody is waiting for any more.
+    var budget = agnosai_resource_budget_new(AGNOSAI_NO_LIMIT, AGNOSAI_NO_LIMIT,
+      agnostic_config_crew_timeout_secs(cfg), AGNOSTIC_ENGINE_BUDGET_CONC);
+    if (budget == 0) { return 0; }
+
+    var o = agnosai_orchestrator_new(budget);
+    if (o == 0) { return 0; }
+
+    _agnostic_event_bus = agnosai_event_bus_new();
+    if (_agnostic_event_bus != 0) { agnosai_orchestrator_with_events(o, _agnostic_event_bus); }
+
+    # Without a gateway the engine takes its placeholder path — crews run, tasks
+    # produce placeholder output. That is a legitimate configuration for a
+    # deployment that only exercises orchestration, so it is not a startup
+    # failure; `/ready` reports which of the two this process is.
+    var url = agnostic_config_llm_url(cfg);
+    if (url != 0) {
+        agnosai_orchestrator_with_llm_url(o, url, agnostic_config_llm_api_key(cfg));
+    } else {
+        # ⚠ **A placeholder run is indistinguishable from a real one by its
+        # results alone.** With no gateway, `agnosai_execute_task` takes its
+        # `client == 0` arm and `_agnosai_crew_placeholder_result` echoes the
+        # task description back as the output with status
+        # `AGNOSAI_STATUS_COMPLETED`. A five-task crew of echoes therefore
+        # normalises to `completed`, five results, every task complete — and no
+        # property of the outcome type can tell it from real model output.
+        #
+        # Nothing in a *type* can close that, so it is closed by disclosure: this
+        # WARN for the operator, and `engine_mode` on every submit and poll
+        # response for the client.
+        sakshi_warn("no AGNOSTIC_LLM_URL configured: crews will run with placeholder task output", 75);
+    }
+
+    agnostic_ledger_init();
+    _agnostic_engine_cfg = cfg;
+    _agnostic_orchestrator = o;
+    return 1;
+}
+
+# Drop the engine. For tests — the server initialises once at mount.
+fn agnostic_engine_reset(): i64 {
+    _agnostic_orchestrator = 0;
+    _agnostic_event_bus = 0;
+    _agnostic_engine_cfg = 0;
+    agnostic_ledger_reset();
+    return 0;
+}
+
+# The orchestrator, or 0 when mount never built one.
+fn agnostic_engine_orchestrator(): i64 {
+    return _agnostic_orchestrator;
+}
+
+# The event bus, or 0.
+fn agnostic_engine_bus(): i64 {
+    return _agnostic_event_bus;
+}
+
+# The readiness check registered for the engine: 1 when it can accept crews.
+#
+# ⚠ **Liveness is not readiness.** This answers only "is the orchestrator
+# built" — it does not run a crew, does not reach the LLM gateway, and does not
+# touch the network. A readiness probe that performed real work would turn every
+# health check into load, and ADR 0001 is the record of why the two endpoints are
+# separate in the first place.
+fn agnostic_engine_is_ready(): i64 {
+    if (_agnostic_orchestrator == 0) { return 0; }
+    return 1;
+}
+
+# Whether the engine will do real inference or echo placeholders.
+#
+# `live` when an LLM gateway is configured, `placeholder` otherwise. Reported on
+# every submit and poll response — see `agnostic_engine_init` for why a caller
+# genuinely cannot tell the two apart from the results.
+fn agnostic_engine_mode(): i64 {
+    if (_agnostic_orchestrator == 0) { return AGNOSTIC_MODE_PLACEHOLDER; }
+    if (agnostic_config_llm_url(_agnostic_engine_cfg) == 0) { return AGNOSTIC_MODE_PLACEHOLDER; }
+    return AGNOSTIC_MODE_LIVE;
+}
+
+# How many crews the engine registry currently holds.
+fn agnostic_engine_crew_count(): i64 {
+    if (_agnostic_orchestrator == 0) { return 0; }
+    return agnosai_orchestrator_crew_count(_agnostic_orchestrator);
+}
+
+# Submit a decoded crew request for asynchronous execution.
+#
+# Returns an `AGNOSTIC_SUBMIT_*` code and stores the ledger entry through
+# `out_entry` whenever one was created — including on `START_FAILED`, so the
+# caller can report the crew id of a run that was accepted and then could not be
+# started.
+#
+# See the module header for why the four steps are in this order.
+fn agnostic_crew_submit(r, out_entry): i64 {
+    if (out_entry != 0) { store64(out_entry, 0); }
+    if (_agnostic_orchestrator == 0) { return AGNOSTIC_SUBMIT_NO_ENGINE; }
+
+    var spec = agnostic_crew_spec_build(r);
+    if (spec == 0) { return AGNOSTIC_SUBMIT_SPEC_FAILED; }
+
+    # Minted by `agnosai_crew_new`, i.e. by the engine. Agnostic generates no
+    # crew ids — see the module header.
+    var crew_id = agnosai_crew_id(spec);
+    if (crew_id == 0) { return AGNOSTIC_SUBMIT_SPEC_FAILED; }
+
+    var sub = 0;
+    if (_agnostic_event_bus != 0) {
+        sub = agnosai_event_bus_subscribe(_agnostic_event_bus, crew_id);
+    }
+
+    var assigned = agnosai_orchestrator_submit_crew(_agnostic_orchestrator, spec);
+
+    var entry = agnostic_ledger_record(crew_id, agnostic_crew_req_name(r), sub);
+    if (out_entry != 0) { store64(out_entry, entry); }
+
+    # 0 means the detached thread could not be created. The engine has already
+    # registered the crew as PENDING and nothing will ever move it, so the
+    # ledger latches the failure here — otherwise a poller would be told
+    # `pending` forever about a crew that will never run.
+    if (assigned == 0) {
+        agnostic_ledger_latch(entry, AGNOSTIC_CREW_FAILED, AGNOSTIC_CREW_START_MSG, 0);
+        # Release the channel we took above. Nothing will ever publish to it or
+        # close it — `_agnosai_orch_finish` only runs on the thread that failed
+        # to start — so without this the bus retains a sender and a subscriber
+        # per failed submission, and `agnostic_ledger_drain` sweeps a channel
+        # that can never close.
+        if (_agnostic_event_bus != 0) { agnosai_event_bus_remove(_agnostic_event_bus, crew_id); }
+        agnostic_log_kv_str(SK_ERROR, "crew submission failed to start", 31,
+          "crew_id", 7, crew_id);
+        return AGNOSTIC_SUBMIT_START_FAILED;
+    }
+
+    agnostic_log_kv_str(SK_INFO, "crew submitted", 14, "crew_id", 7, crew_id);
+    return AGNOSTIC_SUBMIT_OK;
+}
+
+# The current outcome of a submitted crew, in `a`.
+#
+# Returns 0 when **Agnostic never submitted this id** — which is the only 404.
+# Everything else answers with an outcome, including a crew the engine has
+# forgotten.
+#
+# The ladder, and why each rung is where it is:
+#
+#   1. **Ledger first.** An id we never submitted is not ours to describe.
+#   2. **Drain the event bus** before reading state, so progress observed during
+#      this poll belongs to the state reported by it rather than the next one.
+#   3. **Read the engine, normalise, latch.** `agnostic_outcome_from_state_a`
+#      applies the §3.1 demotion — a COMPLETED with no results becomes FAILED —
+#      before the value is latched, so the vacuous success never enters the
+#      ledger, let alone the response.
+#   4. **The engine has forgotten it.** `_agnosai_orch_evict_locked` drops every
+#      finished crew once the registry holds 1000. If the ledger already latched
+#      a terminal outcome, that is the answer and the eviction is invisible. If it
+#      did not, we genuinely do not know — and say so, rather than picking the
+#      comfortable guess.
+#   5. **Answer from the ledger, not from the engine.** This is what makes
+#      terminal states terminal: a latched `failed` is reported even if the engine
+#      is now saying something else.
+fn agnostic_crew_poll_a(a, crew_id: Str): i64 {
+    var entry = agnostic_ledger_entry(crew_id);
+    if (entry == 0) { return 0; }
+
+    agnostic_ledger_drain(entry);
+
+    if (_agnostic_orchestrator != 0) {
+        var state = agnosai_orchestrator_crew(_agnostic_orchestrator, crew_id);
+        if (state != 0) {
+            var observed = agnostic_outcome_from_state_a(a, state);
+            agnostic_ledger_latch(entry,
+              agnostic_outcome_status(observed),
+              agnostic_outcome_error(observed),
+              agnostic_outcome_results(observed));
+        } else {
+            if (agnostic_status_is_terminal(agnostic_ledger_status(entry)) == 0) {
+                agnostic_ledger_latch(entry, AGNOSTIC_CREW_UNKNOWN,
+                  AGNOSTIC_CREW_LOST_MSG, 0);
+            }
+        }
+    }
+    return agnostic_ledger_outcome_a(a, entry);
+}
+
+# Cancel a submitted crew.
+#
+# ⚠ **This is `ORACLE-AUDIT.md` §3.2 and §3.5, and the whole function is the
+# answer to them.** The oracle addressed an id AgnosAI had never seen, discarded
+# the resulting 404, marked its own record cancelled — and never cancelled the
+# in-flight task, which later rewrote the record from `cancelled` back to
+# `completed`.
+#
+# Three properties here, one per failure:
+#
+#   * The id is the **engine's**, so the request reaches the crew it names.
+#   * A refusal from the engine is **returned, not discarded**, and the ledger is
+#     **not** relabelled. `ENGINE_UNKNOWN` means "we did not cancel anything" and
+#     the client is told exactly that.
+#   * Cancellation **stops work**: `agnosai_orchestrator_cancel_crew` sets the
+#     shared flag the runner checks before scheduling each further task. Work
+#     already in flight finishes; nothing new starts. It is not a relabelling.
+#
+# And an already-terminal crew is refused rather than relabelled — the latch in
+# `agnostic_ledger_latch` would refuse the write anyway, but reporting
+# `ALREADY_TERMINAL` says why instead of reporting a success that did nothing.
+fn agnostic_crew_cancel(crew_id: Str): i64 {
+    var entry = agnostic_ledger_entry(crew_id);
+    if (entry == 0) { return AGNOSTIC_CANCEL_NOT_SUBMITTED; }
+    if (agnostic_status_is_terminal(agnostic_ledger_status(entry)) == 1) {
+        return AGNOSTIC_CANCEL_ALREADY_TERMINAL;
+    }
+    if (_agnostic_orchestrator == 0) { return AGNOSTIC_CANCEL_ENGINE_UNKNOWN; }
+
+    # ⚠ The engine's convention here is **0 for success**; a non-zero return is
+    # the error object it built. This is not a truthy success flag, and reading
+    # it as one would invert the branch.
+    if (agnosai_orchestrator_cancel_crew(_agnostic_orchestrator, crew_id) != 0) {
+        agnostic_log_kv_str(SK_WARN, "cancel refused: engine does not know this crew", 46,
+          "crew_id", 7, crew_id);
+        return AGNOSTIC_CANCEL_ENGINE_UNKNOWN;
+    }
+
+    agnostic_ledger_latch(entry, AGNOSTIC_CREW_CANCELLED, 0, 0);
+    agnostic_log_kv_str(SK_INFO, "crew cancelled", 14, "crew_id", 7, crew_id);
+    return AGNOSTIC_CANCEL_OK;
+}

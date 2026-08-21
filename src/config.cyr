@@ -24,7 +24,10 @@ enum AgnosticConfigOff {
     AGNOSTIC_CFG_BACKLOG   = 48;
     AGNOSTIC_CFG_LOG_LEVEL = 56;
     AGNOSTIC_CFG_LOG_JSON  = 64;
-    AGNOSTIC_CFG_SIZE      = 72;
+    AGNOSTIC_CFG_CREW_SECS = 72;
+    AGNOSTIC_CFG_LLM_URL   = 80;
+    AGNOSTIC_CFG_LLM_KEY   = 88;
+    AGNOSTIC_CFG_SIZE      = 96;
 }
 
 # Defaults. The port matches the oracle's uvicorn default so an existing
@@ -35,6 +38,30 @@ var AGNOSTIC_DEFAULT_ARENA    = 65536;
 var AGNOSTIC_DEFAULT_MAX_BODY = 1048576;
 var AGNOSTIC_DEFAULT_IDLE_MS  = 30000;
 var AGNOSTIC_DEFAULT_BACKLOG  = 128;
+
+# The crew wall-clock ceiling, added at M2. Matches AgnosAI's own fallback, so an
+# unconfigured Agnostic behaves exactly as the engine would alone.
+#
+# Naming it here rather than leaving the budget unset is what makes it
+# *tunable*: `AGNOSAI_NO_LIMIT` in the duration slot makes
+# `agnosai_orchestrator_timeout_secs` substitute 3600 silently, so an operator
+# lowering the ceiling would have nothing to lower.
+#
+# ⚠ **There is deliberately no `AGNOSTIC_CREW_MAX_CONCURRENT_TASKS`**, even
+# though `ResourceBudget` has a slot for it. Verified against the bundle:
+# `agnosai_resource_budget_max_concurrent_tasks` has no reader outside its own
+# accessor and the budget serialiser, and `agnosai_orchestrator_budget` has
+# **zero** call sites — the field is stored, rendered, and enforced by nothing.
+# Exposing it would sell an operator a concurrency ceiling that does not exist,
+# which is the precise failure mode `agnostic_config_parse_bounded`'s own comment
+# was written about. The ceiling that *does* work is per-request
+# `max_concurrency` on process `parallel`, which `src/engine/request.cyr` accepts.
+var AGNOSTIC_DEFAULT_CREW_SECS = 3600;
+
+# What the budget's unenforced concurrency slot is filled with. The engine's own
+# `ResourceBudget::default()` value, so the record serialises identically to one
+# the engine built. Not configurable — see above.
+var AGNOSTIC_ENGINE_BUDGET_CONC = 10;
 
 # Strict u16 port parse. Returns the port, or -1 for anything malformed.
 #
@@ -190,6 +217,28 @@ fn agnostic_config_from_env(): i64 {
     }
     store64(c + AGNOSTIC_CFG_LOG_JSON, as_json);
 
+    store64(c + AGNOSTIC_CFG_CREW_SECS,
+      _agnostic_config_int_env("AGNOSTIC_CREW_TIMEOUT_SECS", AGNOSTIC_DEFAULT_CREW_SECS, 86400));
+    # The LLM gateway is OPTIONAL. Unset means the engine takes its placeholder
+    # path — crews orchestrate, tasks produce placeholder output — which is a
+    # legitimate configuration for a deployment exercising orchestration alone.
+    # `/ready` reports which of the two this process is, so the distinction is
+    # visible rather than inferred from output that looks oddly synthetic.
+    var url = 0;
+    var raw_url = getenv("AGNOSTIC_LLM_URL");
+    if (raw_url != 0) {
+        var u = str_from(raw_url);
+        if (str_len(u) > 0) { url = u; }
+    }
+    store64(c + AGNOSTIC_CFG_LLM_URL, url);
+
+    # ⚠ Read, stored, and never logged. `agnostic_log_kv_str` is never called
+    # with this value, and no accessor for it appears in any response body.
+    var key = str_from("");
+    var raw_key = getenv("AGNOSTIC_LLM_API_KEY");
+    if (raw_key != 0) { key = str_from(raw_key); }
+    store64(c + AGNOSTIC_CFG_LLM_KEY, key);
+
     return c;
 }
 
@@ -225,6 +274,31 @@ fn agnostic_config_log_level(c): i64 { if (c == 0) { return 0; } return load64(c
 # 1 when log output should be structured JSON rather than text.
 fn agnostic_config_log_json(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_LOG_JSON); }
 
+# Wall-clock ceiling in seconds for one crew run.
+#
+# Handed to `agnosai_resource_budget_new`'s duration slot. A crew that exceeds it
+# is reported FAILED with its partial results discarded — the engine's own
+# behaviour, matched deliberately: a caller must not read a timed-out crew's
+# partial output as if the crew had finished.
+fn agnostic_config_crew_timeout_secs(c): i64 {
+    if (c == 0) { return AGNOSTIC_DEFAULT_CREW_SECS; }
+    return load64(c + AGNOSTIC_CFG_CREW_SECS);
+}
+
+# The hoosh gateway base URL as a Str, or 0 when none is configured.
+fn agnostic_config_llm_url(c): i64 {
+    if (c == 0) { return 0; }
+    return load64(c + AGNOSTIC_CFG_LLM_URL);
+}
+
+# The gateway API key as a Str, empty when unset.
+#
+# ⚠ Never log this and never put it in a response body.
+fn agnostic_config_llm_api_key(c): i64 {
+    if (c == 0) { return str_from(""); }
+    return load64(c + AGNOSTIC_CFG_LLM_KEY);
+}
+
 # Report the first malformed field, or 0 when every field parsed. The caller
 # refuses to start on a non-zero answer.
 fn agnostic_config_invalid(c): i64 {
@@ -236,5 +310,6 @@ fn agnostic_config_invalid(c): i64 {
     if (load64(c + AGNOSTIC_CFG_IDLE_MS) < 0) { return 1; }
     if (load64(c + AGNOSTIC_CFG_BACKLOG) < 0) { return 1; }
     if (load64(c + AGNOSTIC_CFG_LOG_LEVEL) < 0) { return 1; }
+    if (load64(c + AGNOSTIC_CFG_CREW_SECS) < 0) { return 1; }
     return 0;
 }
