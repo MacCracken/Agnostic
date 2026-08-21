@@ -292,7 +292,7 @@ Three findings from that research are worth carrying independently of the decisi
 
 - **The oracle's identity surface is mostly dead code** — no `password_hash` writer, no user CRUD
   routes, no role assignment beyond a hardcoded `VIEWER`, no tenant-API-key writer, and three
-  unreachable OAuth providers. **None of it appears among ORACLE-AUDIT.md's 85 defects.** Anything
+  unreachable OAuth providers. **None of it appears among ORACLE-AUDIT.md's 86 defects.** Anything
   reading the oracle for an identity spec will be reading machinery that never ran.
 - **Argon2id makes login a DoS lever.** Measured in the SY probe: 8 concurrent attempts took
   `GET /health` from 6 ms to 942 ms; ~40 wedged a 4-worker pool. The mitigations must shed *before*

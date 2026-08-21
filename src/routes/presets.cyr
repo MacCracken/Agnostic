@@ -1,0 +1,75 @@
+# agnostic/routes/presets — the canonical preset library, read-only.
+#
+# ## The status contract
+#
+# | Route | Codes |
+# |---|---|
+# | `GET /api/v1/presets` | 200 |
+# | `GET /api/v1/presets/{name}` | 200 · 404 unknown name |
+#
+# **Read-only in M3, and the paths are still in the route table.** A `POST` to
+# either earns a **405 naming the mismatch**, not a 404 claiming the collection
+# does not exist — the same treatment `GET /api/v1/crews` already has. A
+# user-created preset is a durable object and belongs with M4; the oracle's
+# create endpoint is also doubly broken, since a preset it creates is listable
+# and gettable but the crew path resolves through a registry it never reloads,
+# so running it 404s.
+#
+# ## The listing is summaries, and that is not only arithmetic
+#
+# The 18 documents total 61,412 bytes of compact JSON against a 65,536-byte
+# default request arena, and the arena spills into the no-`free()` global bump —
+# so a full-document listing would leak permanently on every call. But summaries
+# are also simply the right answer: a caller listing presets is choosing one, and
+# then fetches the one it chose.
+#
+# ## ⚠ The document is served as-is, and never copied
+#
+# `agnostic_preset_document` returns the value parsed at mount. It is
+# global-allocated and never mutated, so handing it straight to the serve adapter
+# costs no per-request allocation beyond the rendered bytes. Do not "tidy" this
+# into a per-request rebuild — that would put the largest response in M3 through
+# the arena twice.
+
+# `GET /api/v1/presets` — every preset, as summaries.
+fn agnostic_route_presets_list_a(a): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0) { return 0; }
+
+    var arr = bayan_json_v_arr_new_a(a);
+    if (arr == 0) { return 0; }
+
+    var n = agnostic_presets_count();
+    var i = 0;
+    while (i < n) {
+        var s = agnostic_preset_summary_a(a, agnostic_preset_at(i));
+        if (s == 0) { return 0; }
+        bayan_json_v_arr_push_a(a, arr, s);
+        i = i + 1;
+    }
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_PRESETS, arr);
+    # `total` is the count of what was returned, not a promise about a larger
+    # collection — the library is compiled in and there is no pagination to be
+    # ambiguous about. It is present unconditionally so a client never has to
+    # infer emptiness from a missing field.
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_TOTAL, bayan_json_v_int_new_a(a, n));
+    return agnostic_response_json_a(a, HTTP_OK, obj);
+}
+
+# `GET /api/v1/presets/{name}` — the whole document, or 404.
+#
+# ⚠ **404 here means the name is not in the compiled-in library**, which is a
+# closed set of 18. There is no "expired" or "evicted" case to confuse it with,
+# unlike the crew surface — so unlike `agnostic_route_crew_get_a`, a miss really
+# is just a miss.
+fn agnostic_route_preset_get_a(a, name: Str): i64 {
+    if (name == 0) {
+        return agnostic_response_error_a(a, HTTP_NOT_FOUND, str_from_a(a, "preset not found"));
+    }
+    var p = agnostic_preset_find(name);
+    if (p == 0) {
+        return agnostic_response_error_a(a, HTTP_NOT_FOUND, str_from_a(a, "preset not found"));
+    }
+    return agnostic_response_json_a(a, HTTP_OK, agnostic_preset_document(p));
+}

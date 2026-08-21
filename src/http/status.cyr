@@ -28,6 +28,13 @@ var AGNOSTIC_HTTP_TOO_MANY_REQUESTS = 429;
 var AGNOSTIC_JK_STATUS    = str_from("status");
 var AGNOSTIC_JK_ERROR     = str_from("error");
 var AGNOSTIC_JK_VERSION   = str_from("version");
+# Shared from M3: `name` is used by the crew surface and the preset surface, and
+# `tools` by the preset library and the agent-definition decoder. A key with two
+# consumers belongs in the shared vocabulary rather than in whichever module
+# happened to need it first — and this file is included before both, so a
+# top-level initialiser reading it cannot silently evaluate to 0.
+var AGNOSTIC_JK_NAME      = str_from("name");
+var AGNOSTIC_JK_TOOLS     = str_from("tools");
 var AGNOSTIC_JK_CHECKS    = str_from("checks");
 var AGNOSTIC_JV_OK        = str_from("ok");
 var AGNOSTIC_JV_READY     = str_from("ready");

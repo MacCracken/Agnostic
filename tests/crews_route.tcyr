@@ -3,20 +3,9 @@
 # Covers the route table, the status contract, and the two behaviours
 # ORACLE-AUDIT.md §3.2 and §3.5 got wrong: a cancel that addresses an id the
 # engine never saw, and a cancel that relabels a record instead of stopping work.
-include "src/strcase.cyr"
-include "src/config.cyr"
-include "src/trace.cyr"
-include "src/log.cyr"
-include "src/http/status.cyr"
-include "src/http/response.cyr"
-include "src/http/codec.cyr"
-include "src/engine/outcome.cyr"
-include "src/engine/ledger.cyr"
-include "src/engine/request.cyr"
-include "src/engine/crew.cyr"
-include "src/routes/health.cyr"
-include "src/routes/crews.cyr"
-include "src/http/router.cyr"
+# The whole program, in its canonical order — see src/app.cyr for why this is
+# one include rather than a list every suite has to keep in step.
+include "src/app.cyr"
 
 var _T_BODY = "{\"name\":\"sweep\",\"agents\":[{\"key\":\"a1\",\"role\":\"tester\",\"goal\":\"find bugs\"}],\"tasks\":[{\"description\":\"run the suite\"}]}";
 

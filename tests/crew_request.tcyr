@@ -111,10 +111,10 @@ fn test_unknown_fields_named() {
     var rj: i64[1];
 
     var r = _t_decode(a,
-      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"gpu_strict\":true}],\"tasks\":[{\"description\":\"x\"}]}",
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"nonsense\":true}],\"tasks\":[{\"description\":\"x\"}]}",
       &rj);
     assert_eq(r, 0, "an unknown AGENT field is refused");
-    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "gpu_strict"), 1, "named");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "nonsense"), 1, "named");
     assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "agents[0]"), 1, "and located");
 
     var r2 = _t_decode(a,
@@ -125,17 +125,51 @@ fn test_unknown_fields_named() {
     assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "tasks[0]"), 1, "and located");
 }
 
+fn test_gpu_strict_is_refused_by_name() {
+    test_group("request/gpu-strict");
+
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+
+    # ⭐ ORACLE-AUDIT.md §2.2 / §3.11 — and the field is NOT `gpu_required`.
+    #
+    # The oracle declares both (`agents/base.py:61-62`) and hard-fails only on
+    # `gpu_required AND gpu_strict` (`config/gpu_scheduler.py:196`): `required`
+    # asks for a GPU, `strict` says fail rather than fall back to CPU. The oracle
+    # forwarded the first and dropped the second, so every hard-fail request
+    # silently became a CPU fallback.
+    #
+    # ⚠ The Cyrius engine cannot express strictness at all — `gpu_strict` appears
+    # ZERO times in lib/agnosai.cyr and `agnosai_agent_with_gpu` has no such
+    # parameter. So it is REFUSED, and refused with its own message: a caller who
+    # needs hard-fail must learn the platform cannot do it, not that they typo'd.
+    var r = _t_decode(a,
+      "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"gpu_required\":true,\"gpu_strict\":true}],\"tasks\":[{\"description\":\"x\"}]}",
+      &rj);
+    assert_eq(r, 0, "gpu_strict is refused, never accepted and dropped");
+    assert_eq(agnostic_reject_status(load64(&rj)), AGNOSTIC_HTTP_UNPROCESSABLE, "as a 422");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "gpu_strict"), 1, "naming the field");
+
+    # ⚠ And NOT with the generic "unknown field" message, which would read as a
+    # typo. The refusal says the capability does not exist and names the field
+    # that does exist.
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "unknown field"), 0,
+      "not the generic unknown-field message");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "hard-fail"), 1,
+      "explaining what is unsupported");
+    assert_eq(_t_has(agnostic_reject_message(load64(&rj)), "gpu_required"), 1,
+      "and pointing at the field that does work");
+}
+
 fn test_gpu_required_is_forwarded() {
     test_group("request/gpu");
 
     var a = arena_allocator(262144);
     var rj: i64[1];
 
-    # ⭐ ORACLE-AUDIT.md §2.2 / §3.11, IN ONE ASSERTION.
-    #
-    # `gpu_strict` — here `gpu_required` — is a HARD-FAIL requirement. The oracle
-    # dropped it in translation, so a caller demanding a GPU silently got a CPU.
-    # It must arrive on the agent definition the engine will actually schedule.
+    # The three GPU fields the engine CAN act on. `gpu_required` asks for a GPU;
+    # it is not the hard-fail flag — see `test_gpu_strict_is_refused_by_name`.
+    # All three must arrive on the agent definition the engine will schedule.
     var r = _t_decode(a,
       "{\"name\":\"s\",\"agents\":[{\"key\":\"a\",\"role\":\"t\",\"goal\":\"g\",\"gpu_required\":true,\"gpu_memory_min_mb\":8192}],\"tasks\":[{\"description\":\"x\"}]}",
       &rj);
@@ -387,6 +421,7 @@ fn main() {
     test_tasks_are_required();
     test_the_oracles_fallback_shape_is_rejected();
     test_unknown_fields_named();
+    test_gpu_strict_is_refused_by_name();
     test_gpu_required_is_forwarded();
     test_optional_agent_fields_forwarded();
     test_process_modes();

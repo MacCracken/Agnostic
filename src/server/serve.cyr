@@ -236,6 +236,19 @@ fn agnostic_serve_mount(cfg): i64 {
     _agnostic_serve_cfg = cfg;
     _agnostic_serve_stop = 0;
 
+    # ⚠ **A shortfall here refuses to start.** The library is compiled in, so a
+    # document that fails to parse is a build-time fault, not a runtime one —
+    # and silently serving 17 presets when 18 were embedded is exactly the
+    # "smaller result set reported as success" shape this port refuses. The
+    # count is the generator's, so the two cannot drift without the gate noticing.
+    var presets = agnostic_presets_init();
+    if (presets != AGNOSTIC_PRESET_JSON_COUNT) {
+        agnostic_log_kv_int(SK_ERROR,
+          "compiled-in preset library failed to parse; refusing to start", 61,
+          "parsed", 6, presets);
+        return 0;
+    }
+
     # ⚠ **Before `run_pooled`, without exception.** The orchestrator, the event
     # bus and the ledger are read lock-free by every worker; `run_pooled` spawns
     # those workers, so building them afterwards is a data race. Same rule, same

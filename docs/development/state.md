@@ -29,8 +29,9 @@ Python line was CalVer (`2026.3.18`).
 
 ## Source
 
-**M2 complete** — 17 files, 4,148 lines, 269 top-level definitions, all
-`agnostic_*`-prefixed.
+**M2 complete; M3 in progress** — 21 files, 5,536 lines, 326 top-level
+definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
+`src/presets_data.cyr`.
 
 | module | role |
 |---|---|
@@ -43,10 +44,21 @@ Python line was CalVer (`2026.3.18`).
 | `src/engine/ledger.cyr` | what Agnostic remembers about submitted crews; the terminal latch |
 | `src/engine/request.cyr` | one task model, allow-list decoded, DAG validated |
 | `src/engine/crew.cyr` | the orchestrator bridge — submit, poll, cancel |
+| `src/engine/presets.cyr` | the canonical preset library, parsed once at mount |
+| `src/presets_data.cyr` | **generated** — the 18 documents as Cyrius literals |
 | `src/routes/health.cyr` | `/health` and `/ready` |
 | `src/routes/crews.cyr` | the crew surface |
+| `src/routes/presets.cyr` | the preset surface, read-only |
 | `src/server/serve.cyr` | the only module that touches a socket |
-| `src/main.cyr` | entry; thin by convention |
+| `src/app.cyr` | the canonical include order — **no definitions** |
+| `src/main.cyr` | entry point alone; includes `app.cyr` |
+
+⚠ **`src/app.cyr` exists so adding a route stops breaking every suite.** The
+include order used to live in `main.cyr` and every suite reaching the router
+reproduced it, so a new route module failed them all with "undefined function"
+rather than "missing include" — three times across M2 and M3. `main.cyr` cannot
+serve that role itself: its two trailing top-level statements run at include time
+and would start a server inside a suite.
 
 The crew surface, and what each code means:
 
@@ -56,6 +68,8 @@ The crew surface, and what each code means:
 | `GET /api/v1/crews/{id}` | 200 · 404 never submitted · 422 malformed id |
 | `POST /api/v1/crews/{id}/cancel` | 200 · 404 · **409 already terminal** · 422 · 503 |
 | `GET /api/v1/crews/{id}/events` | 200 · 404 · 422 |
+| `GET /api/v1/presets` | 200 — summaries, not documents |
+| `GET /api/v1/presets/{name}` | 200 · 404 unknown name |
 
 ⚠ `GET /api/v1/crews` is in the table with no handler, so it answers **405**
 rather than a 404 claiming the collection does not exist. A listing endpoint
@@ -63,11 +77,11 @@ needs pagination and a tenancy scope; both arrive with M4/M5.
 
 The Python implementation is retained at `python-port/` as a behavioural oracle.
 It is never built or shipped, and it is **not** a specification —
-[`ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) records 85 verified defects in it.
+[`ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) records 86 verified defects in it.
 
 ## Tests
 
-**12 suites, 490 assertions, 0 failed** (`cyrius test`, run under the pin).
+**13 suites, 581 assertions, 0 failed** (`cyrius test`, run under the pin).
 
 ⚠ Counts here are assertion-suite lines only. `cyrius test`'s final
 `N passed, 0 failed` line is the **suite** tally, not a suite — earlier figures
@@ -80,10 +94,13 @@ in this repo (`222`) and in agnosai (`8,038`) double-counted it.
   an engine COMPLETED with an empty result set must demote to FAILED
 - `tests/ledger.tcyr` — **53 assertions**, the §3.4 barrier: a terminal status
   cannot be moved, in either direction, by any later observation
-- `tests/crew_request.tcyr` — **86 assertions**, the §3.3 barrier: `tasks` is
+- `tests/crew_request.tcyr` — **92 assertions**, the §3.3 barrier: `tasks` is
   required, there is no fallback, and a cyclic graph is refused before submission
 - `tests/crews_route.tcyr` — **59 assertions**, the surface end to end, including
   the §3.2 barrier: an id we never submitted is a 404 that relabels nothing
+- `tests/presets.tcyr` — **71 assertions**, the canonical library: all 18 parse,
+  the declared order, the off-canon `complete` domain, and the **38-name tool
+  manifest** that is M6's contract
 - `tests/agnostic.bcyr` — benchmark stub · `tests/agnostic.fcyr` — fuzz stub
 
 ## Dependencies
@@ -157,12 +174,42 @@ kavach ↔ sigil share the whole `syserr_*` family and seven `agnosys_*` helpers
 `libro` and `majra` both define `_sub_new`. 20 duplicate-`fn` warnings in total.
 Deferred deliberately — they are upstream, and they announce themselves.
 
+## Preset library
+
+**18 documents, 76 agents, 45 distinct agent keys, 38 distinct tool names.**
+Checked in at `src/presets/*.json` and embedded into `src/presets_data.cyr` by
+`scripts/gen-presets.sh`, because Cyrius has no `include_str!`. The generated file
+is committed; `check-clean.sh` runs the generator's `--check` mode so it cannot
+go stale.
+
+Parsed **once at mount** into a name-keyed registry — `agnosai_builtin_presets()`
+re-parses all eighteen on every call and the engine has no name lookup at all.
+A parse shortfall refuses to start rather than serving a quieter, smaller library.
+
+⚠ **The listing returns summaries, not documents.** The library is 61,412 bytes of
+compact JSON against a 65,536-byte default request arena, and the arena spills
+into the no-`free()` global bump — a full-document listing would leak permanently
+on every call. Measured live: the listing is **4,416 bytes** and the largest
+single document (`quality-large`) is **7,064**, so the default arena has ample
+headroom and was left unchanged.
+
+⚠ **The 38 tool names have never resolved to anything** — `ORACLE-AUDIT.md` §3.15.
+`agnostic_preset_tool_*` pins the union as M6's contract; two of the names
+(`ArtifactManagementTool`, `CIPipelineIntegrationTool`) have no implementation
+anywhere and M6 owes a decision on each.
+
 ## Next
 
-See [`roadmap.md`](roadmap.md). **M3 — definitions, presets, agents.** The
+See [`roadmap.md`](roadmap.md). **M3 — definitions, presets, agents.** The preset
+half is done; agent-definition CRUD is what remains. The
 field-forwarding gate it turns on is already built and under test:
-`src/engine/request.cyr` establishes the pattern M3 extends, and
-`ORACLE-AUDIT.md` §2.2's `gpu_strict` has its counterpart forwarded and asserted.
+`src/engine/request.cyr` establishes the pattern M3 extends.
+
+⚠ **`gpu_strict` is refused, not forwarded, and that is deliberate.** It is a
+field distinct from `gpu_required` — the oracle hard-fails only on
+`gpu_required AND gpu_strict` — and the Cyrius engine cannot express strictness
+at all (`gpu_strict` appears zero times in `lib/agnosai.cyr`). M2 refuses it with
+a message naming the missing capability rather than accepting and dropping it.
 
 ⚠ **Carried into M3 and beyond, from M2:**
 

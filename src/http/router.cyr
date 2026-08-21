@@ -32,6 +32,8 @@ enum AgnosticRouteId {
     AGNOSTIC_ROUTE_CREW_GET     = 4;
     AGNOSTIC_ROUTE_CREW_CANCEL  = 5;
     AGNOSTIC_ROUTE_CREW_EVENTS  = 6;
+    AGNOSTIC_ROUTE_PRESET_LIST  = 7;
+    AGNOSTIC_ROUTE_PRESET_GET   = 8;
 }
 
 var AGNOSTIC_METHOD_NONE   = 0;
@@ -246,6 +248,22 @@ fn agnostic_route_resolve_a(a, method, path: Str): i64 {
         }
     }
 
+    # The preset library (M3) — read-only. A POST to either path earns a 405
+    # naming the mismatch rather than a 404: the collection exists, the write
+    # surface does not. Creating a preset is a durable object, which is M4's.
+    if (agnostic_path_matches_a(a, clean, "/api/v1/presets", &param) == 1) {
+        path_hit = 1;
+        if (method == AGNOSTIC_METHOD_GET) {
+            return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_PRESET_LIST, param, 0);
+        }
+    }
+    if (agnostic_path_matches_a(a, clean, "/api/v1/presets/:name", &param) == 1) {
+        path_hit = 1;
+        if (method == AGNOSTIC_METHOD_GET) {
+            return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_PRESET_GET, param, 0);
+        }
+    }
+
     return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_NONE, 0, path_hit);
 }
 
@@ -304,6 +322,11 @@ fn agnostic_route_dispatch_a(a, method, path: Str, body: Str, max_body): i64 {
     }
     if (id == AGNOSTIC_ROUTE_CREW_EVENTS) {
         return agnostic_route_crew_events_a(a, agnostic_route_match_param(m));
+    }
+
+    if (id == AGNOSTIC_ROUTE_PRESET_LIST) { return agnostic_route_presets_list_a(a); }
+    if (id == AGNOSTIC_ROUTE_PRESET_GET) {
+        return agnostic_route_preset_get_a(a, agnostic_route_match_param(m));
     }
 
     # A resolved id with no dispatch arm is a table/ladder mismatch, not a client

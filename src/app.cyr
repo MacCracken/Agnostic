@@ -1,0 +1,56 @@
+# agnostic/app — the canonical include order for the whole program.
+#
+# ## Why this file exists
+#
+# `src/main.cyr` used to carry this list, and every test suite that reached the
+# router had to reproduce it. That meant **adding one route module broke every
+# such suite**, with a compile error naming an undefined function rather than the
+# missing include — three times during M2 and M3 before this file was written.
+#
+# The entry point is deliberately NOT here. `src/main.cyr` ends with two
+# top-level statements (`var _agnostic_exit_code = main();` and
+# `sys_exit_group(...)`) that run at include time, so a suite including it would
+# start a server instead of running its assertions. Same reasoning as the
+# `[lib]` stanza in agnosai's manifest, which excludes its own `src/main.cyr`
+# for exactly this.
+#
+# ## The order is leaves-before-hubs, and it is load-bearing
+#
+# Cyrius resolves function forward references across a translation unit, but a
+# top-level `var` initialiser that reads a global declared later **silently
+# evaluates to 0**. So a module holding state another module reads at load time
+# must be included first — which is why the shared JSON key vocabulary lives in
+# `src/http/status.cyr` near the top rather than in whichever module first
+# needed it.
+#
+# A suite that wants the whole program includes this file. A suite testing one
+# module in isolation should still include just that module and its
+# dependencies: compiling narrowly is what proves a module has no hidden
+# dependency on something further down this list.
+
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+
+# The compiled-in preset library (M3). Generated from `src/presets/*.json` by
+# `scripts/gen-presets.sh`; pure data with no dependencies, so it goes early.
+include "src/presets_data.cyr"
+
+# The engine tier. `outcome` defines the status vocabulary `ledger` latches,
+# `request` decodes what `crew` submits, `presets` is self-contained data, and
+# `crew` is the only one that touches the orchestrator.
+include "src/engine/outcome.cyr"
+include "src/engine/ledger.cyr"
+include "src/engine/request.cyr"
+include "src/engine/presets.cyr"
+include "src/engine/crew.cyr"
+
+include "src/routes/health.cyr"
+include "src/routes/crews.cyr"
+include "src/routes/presets.cyr"
+include "src/http/router.cyr"
+include "src/server/serve.cyr"

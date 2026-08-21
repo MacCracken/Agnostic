@@ -42,7 +42,6 @@ var AGNOSTIC_JK_EVENTS  = str_from("events");
 var AGNOSTIC_JK_DROPPED = str_from("dropped_events");
 var AGNOSTIC_JK_TYPE    = str_from("type");
 var AGNOSTIC_JK_DATA    = str_from("data");
-var AGNOSTIC_JK_NAME    = str_from("name");
 var AGNOSTIC_JK_MODE    = str_from("engine_mode");
 
 # Normalise a path-supplied crew id to the canonical form both registries key on.

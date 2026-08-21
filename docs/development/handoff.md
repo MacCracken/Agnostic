@@ -12,7 +12,7 @@ Read in this order:
 | [`state.md`](state.md) | Live numbers — versions, surface area, dep set, gates |
 | [`roadmap.md`](roadmap.md) | M0–M9 sequencing and per-milestone gates |
 | [`../../CYRIUS-PORT-BRIEF.md`](../../CYRIUS-PORT-BRIEF.md) | Research snapshot (2026-08-19): language notes, dep stack, **§7 decisions — binding** |
-| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 85 verified defects in the Python oracle. §3 gated M2; **§2.2 gates M3** |
+| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 86 verified defects in the Python oracle. §3 gated M2; **§2.2 gates M3** |
 | [`../adr/`](../adr/) | Two ADRs: health/readiness split, daimon Tier 1 deferral |
 
 ---
@@ -26,7 +26,7 @@ per-request arena, strict env config, JSON logging with thread-local trace ids, 
 `/ready`, signal-driven graceful shutdown) it now submits crews to AgnosAI in-process and answers
 **202-then-poll**: `POST /api/v1/crews`, `GET /api/v1/crews/{id}`, `.../cancel`, `.../events`.
 17 source files, 4,148 lines, 269 top-level definitions.
-**12 test suites, 490 assertions, 0 failed.**
+**12 test suites, 496 assertions, 0 failed.**
 
 Version is **0.1.0** and stays there. Per decision #4 the whole port ships as **one release,
 1.0.0** — no intermediate tags, so `main` stays green continuously rather than being stabilised
@@ -93,9 +93,16 @@ execute when the set is empty. Assume any new aggregate has the same hole until 
 
 **M3 is definitions, presets and agents**, and its gate is field forwarding: every field either
 forwarded or explicitly rejected, never silently dropped. That pattern is already built and under
-test — `src/engine/request.cyr` is the worked example, and `ORACLE-AUDIT.md` §2.2's `gpu_strict` has
-its counterpart (`gpu_required`) forwarded to `agnosai_agent_with_gpu` and asserted. Extend it
-rather than re-inventing it.
+test — `src/engine/request.cyr` is the worked example. Extend it rather than re-inventing it.
+
+⚠ **`gpu_strict` is the field to understand before touching agent definitions.** It is **not**
+`gpu_required`: the oracle declares both (`agents/base.py:61-62`) and hard-fails only on
+`gpu_required AND gpu_strict` (`config/gpu_scheduler.py:196`) — `required` asks for a GPU, `strict`
+says fail rather than silently fall back to CPU. The Cyrius engine cannot express strictness at all:
+zero occurrences in `lib/agnosai.cyr`, and `agnosai_agent_with_gpu` takes no such parameter. M2
+therefore **refuses** it, with a message naming the missing capability rather than reading like a
+typo. Do not "fix" this by mapping it onto `gpu_required` — that reinstates the exact silent CPU
+fallback `ORACLE-AUDIT.md` §3.11 records.
 
 ⚠ **Verify the oracle's 18 presets are viable before porting them.** A preset naming a tool the
 Cyrius registry cannot resolve fails **silently** — the crew assembles empty rather than erroring,
@@ -220,7 +227,7 @@ read past `_backend_table[320]` and was called as a function pointer. Renamed up
   agnosai is **98 suites / 7,940 assertions**, not 99 / 8,038. The wrong agnosai figure is in that
   repo's `state.md`, which is already tagged.
 - **The oracle is a behavioural reference, not a specification.** 203 Python files at
-  `python-port/`, 85 verified defects. Its identity surface in particular is mostly dead code — no
+  `python-port/`, 86 verified defects. Its identity surface in particular is mostly dead code — no
   `password_hash` writer, no user CRUD, no role assignment beyond a hardcoded `VIEWER` — and **none
   of that appears among the 85**. Anything reading it for an identity spec is reading machinery that
   never ran.

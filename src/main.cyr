@@ -1,28 +1,13 @@
-# agnostic — main entry point
-# Stdlib auto-included via cyrius.cyml
+# agnostic — main entry point.
+# Stdlib auto-included via cyrius.cyml.
 #
-# Include order is leaves-before-hubs. Cyrius resolves function forward
-# references across a translation unit, but a top-level `var` initialiser that
-# reads a global declared later silently evaluates to 0 — so a module holding
-# state another module reads must be included first.
-include "src/strcase.cyr"
-include "src/config.cyr"
-include "src/trace.cyr"
-include "src/log.cyr"
-include "src/http/status.cyr"
-include "src/http/response.cyr"
-include "src/http/codec.cyr"
-# The engine tier (M2). Strictly leaves-before-hubs: `outcome` defines the
-# status vocabulary `ledger` latches, `request` decodes what `crew` submits, and
-# `crew` is the only one of the four that touches the orchestrator.
-include "src/engine/outcome.cyr"
-include "src/engine/ledger.cyr"
-include "src/engine/request.cyr"
-include "src/engine/crew.cyr"
-include "src/routes/health.cyr"
-include "src/routes/crews.cyr"
-include "src/http/router.cyr"
-include "src/server/serve.cyr"
+# ⚠ **Thin on purpose, and it is the only file with an entry point.** The
+# program's include order lives in `src/app.cyr` so that test suites can pull in
+# the whole program without reproducing it — adding a route module used to break
+# every suite that reached the router. The two top-level statements at the bottom
+# of this file are why `app.cyr` cannot simply be this file: they run at include
+# time and would start a server inside a suite.
+include "src/app.cyr"
 
 # Entry point. Initialises the allocator and returns the process exit code.
 # Entry point. Reads config, wires logging, and serves until a shutdown signal.

@@ -38,10 +38,21 @@
 # ## Every field is forwarded or explicitly rejected — never dropped
 #
 # `ORACLE-AUDIT.md` §2.2 lists fourteen fields the oracle dropped in translation.
-# The sharp one is `gpu_strict`: a caller asking for a hard-fail GPU requirement
-# got a silent CPU fallback. Its counterpart here is `gpu_required`, and it is in
-# the allow-list, decoded, and passed to `agnosai_agent_with_gpu`. M3 inherits
-# this rule for definitions; M2 establishes it.
+# The sharp one is `gpu_strict`, and it deserves care because it is easy to think
+# it is covered here. It is not, and it is **not the same field as
+# `gpu_required`**: the oracle declares both (`agents/base.py:61-62`) and hard-fails
+# only on `gpu_required AND gpu_strict` (`config/gpu_scheduler.py:196`). `required`
+# asks for a GPU; `strict` says fail rather than fall back to CPU. The oracle
+# forwarded the first and dropped the second, so every hard-fail request became a
+# silent CPU fallback.
+#
+# ⚠ **The Cyrius engine cannot express strictness at all** — `gpu_strict` appears
+# zero times in `lib/agnosai.cyr`, `agnosai_agent_with_gpu` takes only
+# (required, preferred, memory_min_mb), and `agnosai_agent_hardware_requirement`
+# builds accelerators plus a memory floor with no fallback flag. So `gpu_required`,
+# `gpu_preferred` and `gpu_memory_min_mb` are forwarded here, and `gpu_strict` is
+# **refused** — see `agnostic_agent_req_decode_a`. Refusing is the honest answer:
+# a caller who needs hard-fail must not be told it was applied.
 
 # A rejected request — 16 bytes.
 #
@@ -207,9 +218,10 @@ fn agnostic_crew_req_fields_a(a): i64 {
 
 # The agent allow-list.
 #
-# `gpu_required` is the counterpart of the oracle's dropped `gpu_strict`
-# (`ORACLE-AUDIT.md` §2.2) — a hard-fail GPU requirement. It is listed, decoded
-# and forwarded; that is the whole point of the list existing.
+# `gpu_required`, `gpu_preferred` and `gpu_memory_min_mb` are listed, decoded and
+# forwarded — that is the whole point of the list existing. `gpu_strict` is
+# deliberately ABSENT, so it falls to the unknown-field arm and is refused with a
+# message saying why; see the module header for why refusing beats accepting.
 fn agnostic_agent_req_fields_a(a): i64 {
     var f = agnostic_fields_a(a);
     agnostic_field_a(a, f, "key");
@@ -323,6 +335,18 @@ fn agnostic_agent_req_decode_a(a, v, index, out): i64 {
         return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
           "agents[", index, "] is not an object");
     }
+    # ⚠ `gpu_strict` earns its own message rather than falling to the generic
+    # unknown-field arm below. A caller sending it is asking for a hard-fail GPU
+    # requirement — the platform cannot provide one, and "unknown field" reads
+    # like a typo rather than like a capability that does not exist. Telling them
+    # which is which is the difference between an error they can act on and one
+    # that sends them to read source.
+    if (bayan_json_v_obj_get_by_str(v, str_from("gpu_strict")) != 0) {
+        return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,
+          "agents[", index,
+          "]: 'gpu_strict' is unsupported: the engine cannot hard-fail on GPU; use 'gpu_required'");
+    }
+
     var allowed = agnostic_agent_req_fields_a(a);
     var unknown = agnostic_unknown_field(v, allowed);
     if (unknown != 0) {
@@ -431,10 +455,10 @@ fn agnostic_agent_req_decode_a(a, v, index, out): i64 {
     # GPU placement. All three travel together through one engine setter, so they
     # are read together and defaulted together.
     #
-    # ⚠ `gpu_required` is the field `ORACLE-AUDIT.md` §2.2 records the oracle
-    # dropping under the name `gpu_strict` — a hard-fail requirement that became
-    # a silent CPU fallback. It is forwarded, and a wrong type is a 422 rather
-    # than a false.
+    # ⚠ Forwarded, and a wrong type is a 422 rather than a silent false. These
+    # are the three the engine can actually act on; `gpu_strict` is a fourth
+    # field the engine has no slot for and is refused above rather than accepted
+    # and dropped, which is what `ORACLE-AUDIT.md` §2.2 records the oracle doing.
     var gpu_req = _agnostic_opt_bool(v, "gpu_required");
     if (gpu_req == AGNOSTIC_REQ_UNSET - 1) {
         return _agnostic_reject_at(a, out, AGNOSTIC_HTTP_UNPROCESSABLE,

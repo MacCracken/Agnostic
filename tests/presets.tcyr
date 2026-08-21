@@ -1,0 +1,264 @@
+# agnostic/engine/presets — the canonical library, and the tool manifest M6 owes.
+#
+# ⚠ The tool arrays these presets carry have NEVER EXECUTED. `ORACLE-AUDIT.md`
+# §3.15: the oracle's registry is never populated, so all 38 names resolved to
+# None and every agent was built with `tools=[]`. This suite pins the vocabulary
+# as a *contract for M6* — not as evidence that anything worked.
+include "src/strcase.cyr"
+include "src/config.cyr"
+include "src/trace.cyr"
+include "src/log.cyr"
+include "src/http/status.cyr"
+include "src/http/response.cyr"
+include "src/http/codec.cyr"
+include "src/presets_data.cyr"
+include "src/engine/presets.cyr"
+
+fn test_library_loads_whole() {
+    test_group("presets/load");
+
+    agnostic_presets_reset();
+    var n = agnostic_presets_init();
+
+    # ⚠ The count is the GENERATOR's, so a document added to src/presets/ without
+    # regenerating, or one that stops parsing, fails here rather than serving a
+    # quietly smaller library. `agnostic_serve_mount` refuses to start on the
+    # same mismatch.
+    assert_eq(AGNOSTIC_PRESET_JSON_COUNT, 18, "eighteen documents are embedded");
+    assert_eq(n, AGNOSTIC_PRESET_JSON_COUNT, "every embedded document parsed");
+    assert_eq(agnostic_presets_count(), 18, "and all eighteen are registered");
+
+    # Idempotent: mount calls it once, but a second call must not double the set.
+    assert_eq(agnostic_presets_init(), 18, "init is idempotent");
+    assert_eq(agnostic_presets_count(), 18, "and does not duplicate");
+}
+
+fn test_declared_order() {
+    test_group("presets/order");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    # The order is the generator's declared one — grouped by domain,
+    # lean -> standard -> large, off-pattern documents last — not the directory's
+    # alphabetical order, which would start `complete-lean, data-engineering-large`
+    # and read as accidental. `GET /api/v1/presets` renders in this order.
+    assert_eq(str_eq_cstr(agnostic_preset_name(agnostic_preset_at(0)), "quality-lean"), 1, "[0] quality-lean");
+    assert_eq(str_eq_cstr(agnostic_preset_name(agnostic_preset_at(1)), "quality-standard"), 1, "[1] quality-standard");
+    assert_eq(str_eq_cstr(agnostic_preset_name(agnostic_preset_at(2)), "quality-large"), 1, "[2] quality-large");
+    assert_eq(str_eq_cstr(agnostic_preset_name(agnostic_preset_at(3)), "software-engineering-lean"), 1, "[3] se-lean");
+    assert_eq(str_eq_cstr(agnostic_preset_name(agnostic_preset_at(17)), "complete-lean"), 1, "[17] complete-lean last");
+
+    assert_eq(agnostic_preset_at(18), 0, "past the end is 0");
+    assert_eq(agnostic_preset_at(0 - 1), 0, "before the start is 0");
+}
+
+fn test_lookup_by_name() {
+    test_group("presets/find");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    var p = agnostic_preset_find(str_from("devops-standard"));
+    assert_neq(p, 0, "found by name");
+    assert_eq(str_eq_cstr(agnostic_preset_name(p), "devops-standard"), 1, "the right one");
+    assert_eq(str_eq_cstr(agnostic_preset_domain(p), "devops"), 1, "domain read");
+    assert_eq(str_eq_cstr(agnostic_preset_tier(p), "standard"), 1, "size tier read");
+    assert_eq(str_eq_cstr(agnostic_preset_version(p), "1.0.0"), 1, "version read");
+
+    assert_eq(agnostic_preset_find(str_from("no-such-preset")), 0, "an unknown name is 0");
+    assert_eq(agnostic_preset_find(0), 0, "a null name is 0, not a fault");
+
+    # The engine has no name lookup at all — no `agnosai_preset_find`, `_get` or
+    # `_by_name` exists in the bundle — so this map is Agnostic's to own.
+}
+
+fn test_agent_rosters() {
+    test_group("presets/agents");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    var total = 0;
+    var i = 0;
+    while (i < agnostic_presets_count()) {
+        var p = agnostic_preset_at(i);
+        var c = agnostic_preset_agent_count(p);
+        assert_eq(c > 0, 1, "every preset declares at least one agent");
+        total = total + c;
+        i = i + 1;
+    }
+    assert_eq(total, 76, "76 agents across the library");
+
+    assert_eq(agnostic_preset_agent_count(agnostic_preset_find(str_from("quality-lean"))), 3,
+      "quality-lean is a 3-agent team");
+    assert_eq(agnostic_preset_agent_count(0), 0, "a null preset has no agents");
+}
+
+fn test_workflow_mode_is_optional() {
+    test_group("presets/workflow");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    # ⚠ One of the five fields AgnosAI's schema has no slot for — part of why
+    # this library is served from Agnostic rather than translated into the
+    # engine's. Present on 13 of 18, so 0 is a legitimate answer and must not be
+    # confused with a parse failure.
+    assert_eq(str_eq_cstr(
+        agnostic_preset_workflow_mode(agnostic_preset_find(str_from("quality-lean"))),
+        "consolidated"), 1, "quality-lean declares a workflow_mode");
+
+    var with_mode = 0;
+    var i = 0;
+    while (i < agnostic_presets_count()) {
+        if (agnostic_preset_workflow_mode(agnostic_preset_at(i)) != 0) { with_mode = with_mode + 1; }
+        i = i + 1;
+    }
+    assert_eq(with_mode, 13, "13 of the 18 declare one");
+    assert_eq(agnostic_preset_workflow_mode(0), 0, "a null preset declares none");
+}
+
+fn test_off_canon_domain_is_pinned() {
+    test_group("presets/domain");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    # ⚠ `complete-lean` uses domain "complete", which is NOT in the oracle's own
+    # DOMAINS tuple (quality, software-engineering, design, data-engineering,
+    # devops). It is unreachable through `get_agents_for_team()` and yet it is
+    # `recommend_preset()`'s no-signal default.
+    #
+    # Pinned deliberately so a later "domain cleanup" cannot silently delete a
+    # preset: six domains, one of them off-canon and known about.
+    assert_eq(str_eq_cstr(
+        agnostic_preset_domain(agnostic_preset_find(str_from("complete-lean"))), "complete"), 1,
+      "complete-lean's domain is off-canon, and that is known rather than accidental");
+}
+
+fn test_tool_manifest() {
+    test_group("presets/tools");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    # ⭐ THE M6 CONTRACT.
+    #
+    # The deduplicated union of every tool name every preset agent references.
+    # When M6 stands up the QA tool registry, every one of these must resolve —
+    # and a miss must be an ERROR, never an agent with fewer tools than it asked
+    # for, which is what the oracle did for all 38 of them.
+    assert_eq(agnostic_preset_tool_count(), 38, "38 distinct tool names across the library");
+
+    assert_eq(agnostic_preset_tool_is_named(str_from("RegressionTestingTool")), 1, "a real one is named");
+    assert_eq(agnostic_preset_tool_is_named(str_from("LoadTestingTool")), 1, "and another");
+    assert_eq(agnostic_preset_tool_is_named(str_from("TestPlanDecompositionTool")), 1, "and another");
+
+    # ⚠ These two are named by `quality-large` and have NO IMPLEMENTATION
+    # anywhere in the oracle — not merely unregistered, absent. M6 must either
+    # write them or strike them from the preset that names them; this assertion
+    # is what stops that decision being forgotten.
+    assert_eq(agnostic_preset_tool_is_named(str_from("ArtifactManagementTool")), 1,
+      "ArtifactManagementTool is named but has no implementation — M6 owes a decision");
+    assert_eq(agnostic_preset_tool_is_named(str_from("CIPipelineIntegrationTool")), 1,
+      "CIPipelineIntegrationTool likewise");
+
+    assert_eq(agnostic_preset_tool_is_named(str_from("NotARealTool")), 0, "an unnamed tool is not claimed");
+    assert_eq(agnostic_preset_tool_is_named(0), 0, "a null name is not claimed");
+
+    # ⚠ The vocabularies are DISJOINT from AgnosAI's, which is the decision that
+    # made this library canonical. AgnosAI's presets name snake_case capabilities
+    # (`code_analysis`, `load_testing`); ours name PascalCase classes. Not one
+    # name is shared, and serving AgnosAI's content here would name tools
+    # Agnostic cannot resolve.
+    assert_eq(agnostic_preset_tool_is_named(str_from("code_analysis")), 0,
+      "AgnosAI's snake_case vocabulary is not ours");
+    assert_eq(agnostic_preset_tool_is_named(str_from("load_testing")), 0, "nor this one");
+
+    var i = 0;
+    var nonempty = 0;
+    while (i < agnostic_preset_tool_count()) {
+        if (str_len(agnostic_preset_tool_at(i)) > 0) { nonempty = nonempty + 1; }
+        i = i + 1;
+    }
+    assert_eq(nonempty, 38, "every manifest entry is a non-empty name");
+    assert_eq(agnostic_preset_tool_at(38), 0, "past the end is 0");
+}
+
+fn test_summary_shape() {
+    test_group("presets/summary");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+    var a = arena_allocator(262144);
+
+    var v = agnostic_preset_summary_a(a, agnostic_preset_find(str_from("quality-lean")));
+    assert_neq(v, 0, "rendered");
+    assert_eq(str_eq_cstr(agnostic_req_str(v, AGNOSTIC_JK_NAME), "quality-lean"), 1, "name");
+    assert_eq(str_eq_cstr(agnostic_req_str(v, AGNOSTIC_JK_DOMAIN), "quality"), 1, "domain");
+    assert_eq(str_eq_cstr(agnostic_req_str(v, AGNOSTIC_JK_SIZE), "lean"), 1, "size");
+    assert_eq(bayan_json_v_int(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_AGENT_COUNT)), 3, "agent_count");
+
+    # ⚠ A summary carries NO `agents` array — that is the whole point. The 18
+    # documents total 61,412 bytes of compact JSON against a 65,536-byte default
+    # arena, and the arena spills into the no-free() global bump, so a
+    # full-document listing would leak permanently on every call.
+    assert_eq(bayan_json_v_obj_get_by_str(v, AGNOSTIC_JK_AGENTS), 0,
+      "a summary carries no agent roster");
+
+    # workflow_mode is omitted, not null, when the document declares none.
+    var none = agnostic_preset_summary_a(a, agnostic_preset_find(str_from("quality-security")));
+    var w = bayan_json_v_obj_get_by_str(none, AGNOSTIC_JK_WORKFLOW);
+    if (agnostic_preset_workflow_mode(agnostic_preset_find(str_from("quality-security"))) == 0) {
+        assert_eq(w, 0, "an absent workflow_mode is omitted rather than rendered null");
+    }
+
+    assert_neq(agnostic_preset_summary_a(a, 0), 0, "a null preset renders an empty object, not a fault");
+}
+
+fn test_document_is_served_as_parsed() {
+    test_group("presets/document");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+
+    var p = agnostic_preset_find(str_from("quality-lean"));
+    var doc = agnostic_preset_document(p);
+    assert_neq(doc, 0, "the document is retained");
+    assert_eq(bayan_json_v_is_obj(doc), 1, "as a parsed object");
+
+    # The full roster IS on the document — the distinction from the summary.
+    var agents = bayan_json_v_obj_get_by_str(doc, AGNOSTIC_JK_AGENTS);
+    assert_eq(bayan_json_v_is_arr(agents), 1, "carrying its agents");
+    assert_eq(bayan_json_v_arr_len(agents), 3, "all three");
+
+    # Fields AgnosAI's schema has no slot for survive verbatim, because the
+    # document is served as parsed rather than translated through the engine's
+    # record — which would silently drop them.
+    var first = bayan_json_v_arr_get(agents, 0);
+    assert_neq(bayan_json_v_obj_get_by_str(first, str_from("focus")), 0, "per-agent 'focus' survives");
+    assert_neq(bayan_json_v_obj_get_by_str(first, str_from("celery_queue")), 0, "'celery_queue' survives");
+    assert_neq(bayan_json_v_obj_get_by_str(first, str_from("redis_prefix")), 0, "'redis_prefix' survives");
+
+    assert_eq(agnostic_preset_document(0), 0, "a null preset has no document");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_library_loads_whole();
+    test_declared_order();
+    test_lookup_by_name();
+    test_agent_rosters();
+    test_workflow_mode_is_optional();
+    test_off_canon_domain_is_pinned();
+    test_tool_manifest();
+    test_summary_shape();
+    test_document_is_served_as_parsed();
+    return assert_summary();
+}
+
+var _agnostic_presets_test_exit = main();
+if (_agnostic_presets_test_exit > 0) { _agnostic_presets_test_exit = 1; }
+sys_exit_group(_agnostic_presets_test_exit);

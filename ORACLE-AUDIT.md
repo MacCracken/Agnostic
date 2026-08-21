@@ -3,6 +3,13 @@
 **Reviewed:** 2026-08-19 · **Tree:** `main @ c3bedf7` · **Method:** six parallel audits + adversarial verification pass
 **Result:** 109 candidate findings → 24 refuted → **85 confirmed** (18 high, 31 medium, 36 low)
 
+**Addendum 2026-08-21 — §3.15, found while opening M3: 86 confirmed (19 high).** The original sweep
+audited the *integration layer* — how crew requests were translated and how results were read. §3.15
+is one level below that: the tool registry those agents resolve against is never populated at all,
+so every agent in every preset is built with zero tools. It was found by checking the roadmap's M3
+question ("are the oracle's 18 presets still viable?") rather than by re-auditing, which is why the
+first pass did not surface it.
+
 > This document is the retained artifact of the Python implementation. The code itself moves to
 > `python-port/` and serves as an **oracle** — a behavioural reference for the Cyrius rewrite
 > (Agnostic 1.0.0) — **not** as a finalized product. Everything below describes what the oracle
@@ -225,6 +232,41 @@ that nothing installs.
 
 ### 3.14 The benchmark harness is not apples-to-apples
 `benchmarks/runner.py:88` — see §4.
+
+### 3.15 The tool registry is never populated, so every agent gets zero tools
+`agents/tool_registry.py:93` → `agents/base.py:206`
+
+**Found 2026-08-21, opening M3. This is the most consequential defect in the tree**: the QA tool
+surface — the product's reason for existing — is wired to nothing.
+
+`_resolve_tools` has exactly two sources, and neither ever fires in production:
+
+1. **`definition.tool_instances`** (`base.py:206`) is declared with `default_factory=list`, is
+   `exclude=True` from serialisation, and is explicitly stripped by `from_dict` (`base.py:93`). No
+   production code assigns it — only tests.
+2. **`tool_registry.get(name)`** reads `_REGISTRY`, which is **empty**.
+   `register_existing_qa_tools()` would populate four names from one module, and it has **exactly one
+   occurrence in the tree: its own `def` line.** It is never called. `@register_tool` has one use, in
+   a test. `@register_gpu_tool` has two, both test-local classes, plus one in a docstring example.
+   `register_tool_class` is called only from tests. The only production writer of `_REGISTRY` is
+   `load_tool_from_source`, the admin custom-tool upload path.
+
+So every one of the **38** tool names referenced across the 18 presets resolves to `None`. The miss
+is not an error: `_resolve_tools` logs `warning("Tool '%s' not found in registry")` and **skips**,
+so every agent is constructed with `tools=[]` and the crew runs with no tooling at all.
+
+The comment left in place — *"Add other agent modules as needed — the modules are large, so we only
+register the tool classes we can find"* — reads as a partial implementation nobody returned to.
+
+⚠ **Two of the 38 have no implementation anywhere**, so they would fail even with the registry
+wired: `ArtifactManagementTool` and `CIPipelineIntegrationTool`, both named by
+`presets/quality-large.json`. Of the remaining 36, all are defined but none are registered.
+
+**Consequence for the port.** The roadmap's M3 task — *"verify the oracle's 18 presets are still
+viable: every named tool resolvable"* — has a definitive answer: **they never were.** The preset tool
+vocabulary has never executed, so it is a *specification of intent*, not observed behaviour, and
+must be treated the way §5 treats the identity surface. It also corrects the M6 figure: the presets
+name **38** distinct tool classes, not 28.
 
 ---
 

@@ -1,20 +1,7 @@
 # agnostic/http/router — matching, resolution, and the dispatch ladder.
-include "src/strcase.cyr"
-include "src/config.cyr"
-include "src/trace.cyr"
-include "src/log.cyr"
-include "src/http/status.cyr"
-include "src/http/response.cyr"
-include "src/http/codec.cyr"
-# The engine tier, because the dispatch ladder reaches the crew handlers. Same
-# leaves-before-hubs order as src/main.cyr.
-include "src/engine/outcome.cyr"
-include "src/engine/ledger.cyr"
-include "src/engine/request.cyr"
-include "src/engine/crew.cyr"
-include "src/routes/health.cyr"
-include "src/routes/crews.cyr"
-include "src/http/router.cyr"
+# The whole program, in its canonical order — see src/app.cyr for why this is
+# one include rather than a list every suite has to keep in step.
+include "src/app.cyr"
 
 fn _t_has(s: Str, needle): i64 {
     var n = str_len(s);
@@ -187,10 +174,69 @@ fn test_body_limit() {
     assert_eq(agnostic_response_status(r), HTTP_OK, "a body exactly at the limit is accepted");
 }
 
+fn test_preset_routes() {
+    test_group("router/presets");
+
+    var a = arena_allocator(65536);
+
+    var l = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/presets"));
+    assert_eq(agnostic_route_match_id(l), AGNOSTIC_ROUTE_PRESET_LIST, "GET /api/v1/presets");
+
+    var g = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/presets/quality-lean"));
+    assert_eq(agnostic_route_match_id(g), AGNOSTIC_ROUTE_PRESET_GET, "GET /api/v1/presets/{name}");
+    assert_eq(str_eq_cstr(agnostic_route_match_param(g), "quality-lean"), 1, "the name is captured");
+
+    # ⚠ The library is READ-ONLY in M3, and the paths are still in the table — so
+    # a write earns a 405 naming the mismatch rather than a 404 claiming the
+    # collection does not exist. Creating a preset is a durable object: M4.
+    var post = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_POST, str_from("/api/v1/presets"));
+    assert_eq(agnostic_route_match_id(post), AGNOSTIC_ROUTE_NONE, "POST does not resolve");
+    assert_eq(agnostic_route_match_method_mismatch(post), 1, "but reports a method mismatch, not a miss");
+
+    var del = agnostic_route_resolve_a(a, AGNOSTIC_METHOD_DELETE, str_from("/api/v1/presets/quality-lean"));
+    assert_eq(agnostic_route_match_method_mismatch(del), 1, "and so does DELETE on one");
+
+    # Every preset route is privileged; the default in `agnostic_route_needs_auth`
+    # is what protects a route nobody remembered to classify.
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_PRESET_LIST), 1, "listing needs auth");
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_PRESET_GET), 1, "fetching needs auth");
+}
+
+fn test_preset_dispatch() {
+    test_group("router/preset-dispatch");
+
+    agnostic_presets_reset();
+    agnostic_presets_init();
+    var a = arena_allocator(262144);
+
+    var list = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/presets"),
+      str_from(""), 1048576);
+    assert_eq(agnostic_response_status(list), HTTP_OK, "the listing answers 200");
+    var body = agnostic_response_body(list);
+    assert_eq(bayan_json_v_int(bayan_json_v_obj_get_by_str(body, AGNOSTIC_JK_TOTAL)), 18,
+      "with all eighteen");
+
+    var one = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+      str_from("/api/v1/presets/devops-lean"), str_from(""), 1048576);
+    assert_eq(agnostic_response_status(one), HTTP_OK, "a known preset answers 200");
+    assert_eq(str_eq_cstr(agnostic_req_str(agnostic_response_body(one), AGNOSTIC_JK_NAME),
+        "devops-lean"), 1, "with the document it names");
+
+    var miss = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+      str_from("/api/v1/presets/no-such-thing"), str_from(""), 1048576);
+    assert_eq(agnostic_response_status(miss), HTTP_NOT_FOUND, "an unknown name is 404");
+
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
+          str_from("/api/v1/presets"), str_from(""), 1048576)), HTTP_METHOD_NOT_ALLOWED,
+      "and a write is 405");
+}
+
 fn main() {
     alloc_init();
     thread_local_init();
     test_method_parse();
+    test_preset_routes();
+    test_preset_dispatch();
     test_path_matching();
     test_named_param();
     test_query_stripping();

@@ -19,7 +19,7 @@ dependency order, not the Python tree's layout — see [`../../CYRIUS-PORT-BRIEF
 for the three-way split of ported / delegated / dropped.
 
 The oracle at `python-port/` is a **behavioural reference, not a specification**.
-[`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) records 85 verified defects in it; several of its
+[`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) records 86 verified defects in it; several of its
 paths are wrong, and reproducing them faithfully would reproduce the bugs. Check that document
 before porting any behaviour.
 
@@ -70,7 +70,7 @@ both response constructors. Security audit re-run —
 - Crew submit / status / cancel via `agnosai_orchestrator_submit_crew` (**D2**)
 - 202-then-poll semantics; live progress off the event bus
 
-**261 new assertions across 4 suites** (490 total across 12), 0 failed. All three gates green.
+**267 new assertions across 4 suites** (496 total across 12), 0 failed. All three gates green.
 Verified live over a socket: 202 with the engine's id, poll to `completed` with results, progress
 events drained (`crew_started` → `task_started` → `task_completed` → `crew_completed`), uppercase id
 normalised, 404/405/409/422/503 each on its own path, SIGTERM drains and exits 0.
@@ -139,9 +139,23 @@ This is a decision about **content, not linkage** — Agnostic still calls Agnos
 → **Cross-repo follow-up (agnosai):** streamline its preset set to a small illustrative example
 library rather than a competing production one, so the two stop diverging by accident.
 
-→ **M3 task:** verify the oracle's 18 presets are still *viable* — every named tool resolvable in the
-Cyrius tool registry, every role meaningful — before porting them wholesale. A preset naming a tool
-that no longer exists fails silently for the same reason.
+→ **M3 task — ✅ answered 2026-08-21, and the answer is no.** The presets were never viable, in the
+oracle itself. See `ORACLE-AUDIT.md` §3.15:
+
+- The 18 presets hold **76 agents** naming **38 distinct** PascalCase tool classes.
+- The oracle's `_REGISTRY` is **never populated** — `register_existing_qa_tools()` has exactly one
+  occurrence in the tree, its own `def` line. Every one of the 38 resolves to `None`, and
+  `_resolve_tools` logs a warning and **skips**, so every agent is built with `tools=[]`.
+- **Two of the 38 have no implementation anywhere** — `ArtifactManagementTool` and
+  `CIPipelineIntegrationTool`, both named by `quality-large.json`. The other 36 exist as classes.
+
+So the preset tool vocabulary is a **specification of intent, not observed behaviour** — the same
+category as the identity surface in M5, and it must be read the same way. Port the presets as
+*documents*; do not treat their tool lists as evidence that anything worked.
+
+⚠ **The viability gate moves to M6, where it can actually be evaluated**, and M3 carries the half it
+can: the 38-name union is pinned as a manifest, and a preset naming an unresolvable tool must be an
+**error**, never a silently smaller agent.
 
 ### M4 — Persistence + audit chain (v0.5.0)
 
@@ -173,7 +187,7 @@ Local password login cannot succeed (`_authenticate_local` reads `password_hash`
 such field, so the writer's guard is permanently false); no user can create an API key (everyone is
 `VIEWER`, no role assignment exists, the endpoint needs `SUPER_ADMIN`); tenant API keys are
 read-only (the validator reads a key nothing writes); the three OAuth providers are unreachable (no
-caller passes a provider). **None of this is among the 85 audited defects** — it was found while
+caller passes a provider). **None of this is among the 86 audited defects** — it was found while
 deciding this. Scope covers what the oracle actually executes.
 
 ⚠ **Carry SY's login-abuse controls over — they are load-bearing, not polish.** Argon2id at ~244 ms
@@ -188,8 +202,19 @@ key creation serializes).
 
 ### M6 — QA tool surface (v0.7.0)
 
-- All 28 QA tools (**D4**). The 5–8 figure in `first-party-standards.md:625` is a soft guideline
-  for typical projects, not a ceiling for platform-scale ones.
+- The QA tools (**D4**). The 5–8 figure in `first-party-standards.md:625` is a soft guideline for
+  typical projects, not a ceiling for platform-scale ones.
+
+⚠ **The count is 38, not 28.** Corrected 2026-08-21 by extracting the union of every tool name across
+the 18 presets: **38 distinct classes**, of which **36 exist** in the oracle and **2 do not exist at
+all** (`ArtifactManagementTool`, `CIPipelineIntegrationTool`, both named by `quality-large.json`).
+None of the 36 is ever registered — `ORACLE-AUDIT.md` §3.15 — so none has ever run, and each must be
+treated as a fresh implementation against its preset-declared intent rather than as a port of
+working code.
+
+**M6 owns the viability gate M3 could not evaluate**: every name in the manifest M3 pins must
+resolve in the Cyrius registry, and the two that have no implementation must be either written or
+struck from the presets that name them. A registry miss must be an error, not a smaller agent.
 - Sandboxing **delegated to kavach** — `first-party-standards.md:76`: *"kavach owns the sandbox,
   not the application."* The oracle hand-rolled an rlimit subprocess; do not repeat it.
 - Browser automation via `yantra`; CV pipeline on chitra + ranga + rosnet

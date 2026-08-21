@@ -1,0 +1,369 @@
+# agnostic/engine/presets — the canonical preset library, parsed once at mount.
+#
+# ## Agnostic's library is canonical, and it is not AgnosAI's
+#
+# Decided 2026-08-20 (roadmap M3). The two sets are not two versions of one
+# library — they are unrelated content sharing a naming scheme. 18 each, 15 names
+# collide, and **not one** of the 15 has a matching description, agent roster or
+# tool vocabulary. Agnostic's documents name 38 PascalCase QA tool classes;
+# AgnosAI's name 23 snake_case capabilities. The intersection is empty, verified
+# by reading both.
+#
+# So this module does **not** call `agnosai_builtin_presets()`. That would serve
+# AgnosAI's content under Agnostic's API.
+#
+# ## ⚠ The tool vocabulary has never executed — `ORACLE-AUDIT.md` §3.15
+#
+# Read this before trusting a preset's `tools` array as evidence of anything.
+#
+# In the Python oracle the tool registry is **never populated**:
+# `register_existing_qa_tools()` has exactly one occurrence in the tree — its own
+# `def` line — and nothing calls it. The only other resolution path,
+# `definition.tool_instances`, is `exclude=True`, stripped by `from_dict`, and set
+# only in tests. So every one of the 38 names below resolved to `None`, and
+# `_resolve_tools` logged a warning and **skipped**, building every agent with
+# `tools=[]`.
+#
+# The arrays are therefore a **specification of intent**, not observed behaviour —
+# the same category as the oracle's identity surface. Two of the 38 have no
+# implementation anywhere (`ArtifactManagementTool`, `CIPipelineIntegrationTool`,
+# both in `quality-large`), so they would fail even with a registry wired.
+#
+# **M3 pins the vocabulary; M6 owns resolving it.** `agnostic_preset_tool_count`
+# and friends exist so the manifest is a checkable contract rather than a
+# comment, and `tests/presets.tcyr` asserts its size and membership. When M6
+# stands up the registry, every name here must resolve or the preset naming it
+# must change — and a miss must be an **error**, never a silently smaller agent.
+#
+# ## No preset-to-crew expansion here, deliberately
+#
+# A client that wants to run a preset does `GET /api/v1/presets/{name}`, takes the
+# `agents` array, and posts it to `POST /api/v1/crews`. Expanding it server-side
+# would give `POST /api/v1/crews` a **second source of agents** beside the one
+# M2 established — and `ORACLE-AUDIT.md` §3.3 is exactly what a second, silently
+# preferred source costs. One model, no fallback path.
+
+# A parsed preset — 64 bytes.
+#
+# `AGNOSTIC_PS_DOC` retains the whole parsed document, which is what
+# `GET /api/v1/presets/{name}` answers with. The named fields beside it are the
+# summary the listing needs, lifted once at mount rather than re-walked per
+# request.
+enum AgnosticPresetOff {
+    AGNOSTIC_PS_NAME     = 0;
+    AGNOSTIC_PS_DESC     = 8;
+    AGNOSTIC_PS_DOMAIN   = 16;
+    AGNOSTIC_PS_TIER     = 24;
+    AGNOSTIC_PS_VERSION  = 32;
+    AGNOSTIC_PS_WORKFLOW = 40;
+    AGNOSTIC_PS_AGENTS   = 48;
+    AGNOSTIC_PS_DOC      = 56;
+    AGNOSTIC_PS_SIZE     = 64;
+}
+
+# The registry, built at mount and read lock-free by every worker thereafter.
+#
+# ⚠ **Mount time only**, like the readiness registry and the orchestrator.
+# `sandhi_server_run_pooled` spawns the workers, so anything built after the run
+# call is a data race. Nothing here is written once serving begins, which is why
+# no mutex appears in this module at all.
+var _agnostic_presets = 0;
+var _agnostic_presets_by_name = 0;
+var _agnostic_preset_tools = 0;
+
+# The wire keys this module owns, interned once at load time.
+var AGNOSTIC_JK_DOMAIN      = str_from("domain");
+var AGNOSTIC_JK_SIZE        = str_from("size");
+var AGNOSTIC_JK_DESCRIPTION = str_from("description");
+var AGNOSTIC_JK_WORKFLOW    = str_from("workflow_mode");
+var AGNOSTIC_JK_AGENT_COUNT = str_from("agent_count");
+var AGNOSTIC_JK_AGENTS      = str_from("agents");
+var AGNOSTIC_JK_PRESETS     = str_from("presets");
+var AGNOSTIC_JK_TOTAL       = str_from("total");
+
+# Lift a required string field off a parsed document, or 0 when absent.
+fn _agnostic_preset_str(doc, key: Str): i64 {
+    var f = bayan_json_v_obj_get_by_str(doc, key);
+    if (f == 0) { return 0; }
+    if (bayan_json_v_is_str(f) != 1) { return 0; }
+    return bayan_json_v_str(f);
+}
+
+# Whether `name` is already in the tool manifest.
+fn _agnostic_preset_tool_seen(name: Str): i64 {
+    if (_agnostic_preset_tools == 0) { return 0; }
+    var n = vec_len(_agnostic_preset_tools);
+    var i = 0;
+    while (i < n) {
+        if (str_eq(vec_get(_agnostic_preset_tools, i), name) == 1) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Fold one agent's `tools` array into the manifest, first appearance wins.
+fn _agnostic_preset_collect_tools(agent): i64 {
+    var tools = bayan_json_v_obj_get_by_str(agent, AGNOSTIC_JK_TOOLS);
+    if (tools == 0) { return 0; }
+    if (bayan_json_v_is_arr(tools) != 1) { return 0; }
+    var n = bayan_json_v_arr_len(tools);
+    var i = 0;
+    var added = 0;
+    while (i < n) {
+        var t = bayan_json_v_arr_get(tools, i);
+        if (bayan_json_v_is_str(t) == 1) {
+            var name = bayan_json_v_str(t);
+            if (_agnostic_preset_tool_seen(name) == 0) {
+                vec_push(_agnostic_preset_tools, name);
+                added = added + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return added;
+}
+
+# Parse one embedded document into a preset record. 0 when it is unusable.
+#
+# ⚠ **A document that does not parse is dropped, and `agnostic_presets_init`
+# reports the shortfall.** Silently serving 17 presets when 18 were compiled in
+# is the shape this port refuses; the count mismatch is a startup failure, not a
+# smaller library.
+fn _agnostic_preset_parse(i): i64 {
+    var raw = agnostic_preset_json(i);
+    if (raw == 0) { return 0; }
+    var doc = bayan_json_v_parse(str_from(raw));
+    if (doc == 0) { return 0; }
+    if (bayan_json_v_is_obj(doc) != 1) { return 0; }
+
+    var name = _agnostic_preset_str(doc, AGNOSTIC_JK_NAME);
+    if (name == 0) { return 0; }
+
+    var agents = bayan_json_v_obj_get_by_str(doc, AGNOSTIC_JK_AGENTS);
+    if (agents == 0) { return 0; }
+    if (bayan_json_v_is_arr(agents) != 1) { return 0; }
+
+    var p = alloc(AGNOSTIC_PS_SIZE);
+    if (p == 0) { return 0; }
+    store64(p + AGNOSTIC_PS_NAME, name);
+    store64(p + AGNOSTIC_PS_DESC, _agnostic_preset_str(doc, AGNOSTIC_JK_DESCRIPTION));
+    store64(p + AGNOSTIC_PS_DOMAIN, _agnostic_preset_str(doc, AGNOSTIC_JK_DOMAIN));
+    store64(p + AGNOSTIC_PS_TIER, _agnostic_preset_str(doc, AGNOSTIC_JK_SIZE));
+    store64(p + AGNOSTIC_PS_VERSION, _agnostic_preset_str(doc, AGNOSTIC_JK_VERSION));
+    # `workflow_mode` is present on 13 of the 18 and absent on the rest, so 0 is
+    # a legitimate value here rather than a defect.
+    store64(p + AGNOSTIC_PS_WORKFLOW, _agnostic_preset_str(doc, AGNOSTIC_JK_WORKFLOW));
+    store64(p + AGNOSTIC_PS_AGENTS, agents);
+    store64(p + AGNOSTIC_PS_DOC, doc);
+
+    var n = bayan_json_v_arr_len(agents);
+    var j = 0;
+    while (j < n) {
+        _agnostic_preset_collect_tools(bayan_json_v_arr_get(agents, j));
+        j = j + 1;
+    }
+    return p;
+}
+
+# Parse the compiled-in library. Mount time only.
+#
+# **Parsed once here, not per request.** `agnosai_builtin_presets()` re-parses all
+# eighteen documents on **every call**, and `agnosai_preset_from_value` allocates
+# from the global bump — which has no `free()` — so a per-request parse would leak
+# in proportion to traffic. The engine also has no name lookup at all: there is no
+# `agnosai_preset_find`, `_get` or `_by_name` anywhere in the bundle, so the
+# name-keyed map below is Agnostic's to build regardless.
+#
+# Returns the number parsed; the caller refuses to start if it is not
+# `AGNOSTIC_PRESET_JSON_COUNT`.
+fn agnostic_presets_init(): i64 {
+    if (_agnostic_presets != 0) { return vec_len(_agnostic_presets); }
+    _agnostic_presets = vec_new();
+    _agnostic_presets_by_name = map_new_str();
+    _agnostic_preset_tools = vec_new();
+
+    var i = 0;
+    while (i < AGNOSTIC_PRESET_JSON_COUNT) {
+        var p = _agnostic_preset_parse(i);
+        if (p != 0) {
+            vec_push(_agnostic_presets, p);
+            map_set(_agnostic_presets_by_name, str_clone(load64(p + AGNOSTIC_PS_NAME)), p);
+        }
+        i = i + 1;
+    }
+    return vec_len(_agnostic_presets);
+}
+
+# Drop the registry. For tests — the server initialises once at mount.
+fn agnostic_presets_reset(): i64 {
+    _agnostic_presets = 0;
+    _agnostic_presets_by_name = 0;
+    _agnostic_preset_tools = 0;
+    return 0;
+}
+
+# How many presets the registry holds.
+fn agnostic_presets_count(): i64 {
+    if (_agnostic_presets == 0) { return 0; }
+    return vec_len(_agnostic_presets);
+}
+
+# The `i`th preset in library order, or 0 when out of range.
+#
+# Library order is the generator's declared order — grouped by domain,
+# lean -> standard -> large — not the directory's alphabetical order. It is what
+# `GET /api/v1/presets` renders, and `scripts/gen-presets.sh` owns it.
+fn agnostic_preset_at(i): i64 {
+    if (_agnostic_presets == 0) { return 0; }
+    if (i < 0 || i >= vec_len(_agnostic_presets)) { return 0; }
+    return vec_get(_agnostic_presets, i);
+}
+
+# The preset with this name, or 0.
+fn agnostic_preset_find(name: Str): i64 {
+    if (_agnostic_presets_by_name == 0) { return 0; }
+    if (name == 0) { return 0; }
+    return map_get(_agnostic_presets_by_name, name);
+}
+
+# The preset's name.
+fn agnostic_preset_name(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_NAME);
+}
+
+# The preset's human description.
+fn agnostic_preset_description(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_DESC);
+}
+
+# The preset's domain.
+fn agnostic_preset_domain(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_DOMAIN);
+}
+
+# The preset's size tier — the wire's `size`: "lean", "standard" or "large".
+#
+# Named `tier` in the record because `AGNOSTIC_PS_SIZE` is the record's own byte
+# count, and one name for two meanings in a file full of `alloc(…_SIZE)` calls is
+# how a struct gets under-allocated.
+fn agnostic_preset_tier(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_TIER);
+}
+
+# The preset's version string.
+fn agnostic_preset_version(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_VERSION);
+}
+
+# The preset's `workflow_mode`, or 0 when it declares none.
+#
+# ⚠ Absent on 5 of the 18, so 0 is a legitimate answer. It is one of the fields
+# AgnosAI's schema has no slot for, which is part of why this library is served
+# from Agnostic rather than translated into the engine's.
+fn agnostic_preset_workflow_mode(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_WORKFLOW);
+}
+
+# The preset's agent array, as the parsed bayan value.
+fn agnostic_preset_agents(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_AGENTS);
+}
+
+# How many agents the preset declares.
+fn agnostic_preset_agent_count(p): i64 {
+    var a = agnostic_preset_agents(p);
+    if (a == 0) { return 0; }
+    return bayan_json_v_arr_len(a);
+}
+
+# The whole parsed document.
+#
+# ⚠ Returned **as-is** to `GET /api/v1/presets/{name}`, not copied into the
+# request arena. It is global-allocated at mount and never mutated, so a worker
+# rendering it is reading process-lifetime data — which is why the largest
+# response in M3 costs no per-request allocation beyond the rendered bytes.
+fn agnostic_preset_document(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PS_DOC);
+}
+
+# The listing entry for one preset: name, description, domain, size, version,
+# workflow_mode and agent_count — **not** the document.
+#
+# ⚠ The whole library is 61,412 bytes of compact JSON and the default request
+# arena is 65,536 (`AGNOSTIC_DEFAULT_ARENA`). Rendering 18 full documents into a
+# list would consume 94% of the arena for the output string alone, before the
+# value tree that produces it — and the arena's `ARENA_FULL_SPILL` policy
+# satisfies an overflow from the global bump, which has no `free()`. A full-document
+# listing would therefore leak, permanently, on every call.
+#
+# Summaries are ~4 KB, and they are the right answer on merit anyway: a caller
+# listing presets is choosing one, and fetches the document it chose.
+fn agnostic_preset_summary_a(a, p): i64 {
+    var obj = bayan_json_v_obj_new_a(a);
+    if (obj == 0 || p == 0) { return obj; }
+
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_NAME,
+      bayan_json_v_str_new_a(a, agnostic_preset_name(p)));
+    var d = agnostic_preset_description(p);
+    if (d != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DESCRIPTION, bayan_json_v_str_new_a(a, d));
+    }
+    var dom = agnostic_preset_domain(p);
+    if (dom != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_DOMAIN, bayan_json_v_str_new_a(a, dom));
+    }
+    var tier = agnostic_preset_tier(p);
+    if (tier != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_SIZE, bayan_json_v_str_new_a(a, tier));
+    }
+    var v = agnostic_preset_version(p);
+    if (v != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_VERSION, bayan_json_v_str_new_a(a, v));
+    }
+    # Omitted rather than null when the document declares none — the same rule
+    # `agnostic_outcome_to_value_a` follows for `error`.
+    var w = agnostic_preset_workflow_mode(p);
+    if (w != 0) {
+        bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_WORKFLOW, bayan_json_v_str_new_a(a, w));
+    }
+    bayan_json_v_obj_set_a(a, obj, AGNOSTIC_JK_AGENT_COUNT,
+      bayan_json_v_int_new_a(a, agnostic_preset_agent_count(p)));
+    return obj;
+}
+
+# --- The tool manifest ----------------------------------------------------
+#
+# The deduplicated union of every tool name every preset agent references, in
+# first-appearance order. **This is M6's contract**, not decoration: when the QA
+# tool surface lands, every name here must resolve in the registry, and a miss
+# must be an error rather than an agent with fewer tools than it asked for.
+#
+# `tests/presets.tcyr` pins the size and spot-checks membership, so a preset edit
+# that introduces a new tool name fails the suite and has to be deliberate.
+
+# How many distinct tool names the library references.
+fn agnostic_preset_tool_count(): i64 {
+    if (_agnostic_preset_tools == 0) { return 0; }
+    return vec_len(_agnostic_preset_tools);
+}
+
+# The `i`th distinct tool name, or 0 when out of range.
+fn agnostic_preset_tool_at(i): i64 {
+    if (_agnostic_preset_tools == 0) { return 0; }
+    if (i < 0 || i >= vec_len(_agnostic_preset_tools)) { return 0; }
+    return vec_get(_agnostic_preset_tools, i);
+}
+
+# Whether any preset references this tool name.
+fn agnostic_preset_tool_is_named(name: Str): i64 {
+    if (name == 0) { return 0; }
+    return _agnostic_preset_tool_seen(name);
+}
