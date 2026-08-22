@@ -267,6 +267,10 @@ fn test_definition_routes() {
 fn test_definition_dispatch() {
     test_group("router/definition-dispatch");
 
+    # The store is patra-backed as of M4, so the routes need a database open —
+    # without one, `create` answers MISSING and the handler 500s. That is the
+    # right failure: a route that cannot persist must not report success.
+    agnostic_definitions_open(str_from("/tmp/agnostic-router-test.patra"));
     agnostic_definitions_reset();
     var a = arena_allocator(262144);
     var body = "{\"key\":\"qa-1\",\"role\":\"tester\",\"goal\":\"find bugs\",\"focus\":\"orchestration\"}";
@@ -277,8 +281,8 @@ fn test_definition_dispatch() {
       "creating a definition is 201, not 202 — it is complete when the call returns");
 
     var cb = agnostic_response_body(created);
-    assert_eq(str_eq_cstr(agnostic_req_str(cb, AGNOSTIC_JK_STORAGE), "memory"), 1,
-      "and every response says where it lives");
+    assert_eq(str_eq_cstr(agnostic_req_str(cb, AGNOSTIC_JK_STORAGE), "patra"), 1,
+      "and every response says where it lives — 'patra' since M4, one literal");
     assert_eq(bayan_json_v_arr_len(bayan_json_v_obj_get_by_str(cb, AGNOSTIC_JK_UNFORWARDED)), 1,
       "naming the field that was retained but shapes nothing");
 

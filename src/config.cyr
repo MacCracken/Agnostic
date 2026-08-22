@@ -27,7 +27,8 @@ enum AgnosticConfigOff {
     AGNOSTIC_CFG_CREW_SECS = 72;
     AGNOSTIC_CFG_LLM_URL   = 80;
     AGNOSTIC_CFG_LLM_KEY   = 88;
-    AGNOSTIC_CFG_SIZE      = 96;
+    AGNOSTIC_CFG_DB_PATH   = 96;
+    AGNOSTIC_CFG_SIZE      = 104;
 }
 
 # Defaults. The port matches the oracle's uvicorn default so an existing
@@ -57,6 +58,14 @@ var AGNOSTIC_DEFAULT_BACKLOG  = 128;
 # was written about. The ceiling that *does* work is per-request
 # `max_concurrency` on process `parallel`, which `src/engine/request.cyr` accepts.
 var AGNOSTIC_DEFAULT_CREW_SECS = 3600;
+
+# Where the patra database lives, when AGNOSTIC_DB_PATH says nothing.
+#
+# ⚠ Relative to the working directory, deliberately. An absolute default under
+# /var or $HOME would be wrong for at least one deployment shape and silently
+# surprising in the others; a relative default is obviously the operator's to
+# set, and mount logs the resolved path so it is never a guess.
+var AGNOSTIC_DEFAULT_DB_PATH = "agnostic.patra";
 
 # What the budget's unenforced concurrency slot is filled with. The engine's own
 # `ResourceBudget::default()` value, so the record serialises identically to one
@@ -239,6 +248,18 @@ fn agnostic_config_from_env(): i64 {
     if (raw_key != 0) { key = str_from(raw_key); }
     store64(c + AGNOSTIC_CFG_LLM_KEY, key);
 
+    # The database path is OPERATOR config, not request input — it never comes
+    # from a client, so it is not the path-traversal surface M4's audit bullet
+    # is about. That surface is the identifiers which become row keys, and they
+    # are validated by `agnostic_key_is_valid`.
+    var db = str_from(AGNOSTIC_DEFAULT_DB_PATH);
+    var raw_db = getenv("AGNOSTIC_DB_PATH");
+    if (raw_db != 0) {
+        var p = str_from(raw_db);
+        if (str_len(p) > 0) { db = p; }
+    }
+    store64(c + AGNOSTIC_CFG_DB_PATH, db);
+
     return c;
 }
 
@@ -297,6 +318,13 @@ fn agnostic_config_llm_url(c): i64 {
 fn agnostic_config_llm_api_key(c): i64 {
     if (c == 0) { return str_from(""); }
     return load64(c + AGNOSTIC_CFG_LLM_KEY);
+}
+
+# The patra database path as a Str. Never 0 — an unset or empty value falls back
+# to `AGNOSTIC_DEFAULT_DB_PATH`.
+fn agnostic_config_db_path(c): i64 {
+    if (c == 0) { return str_from(AGNOSTIC_DEFAULT_DB_PATH); }
+    return load64(c + AGNOSTIC_CFG_DB_PATH);
 }
 
 # Report the first malformed field, or 0 when every field parsed. The caller

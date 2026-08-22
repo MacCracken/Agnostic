@@ -46,7 +46,7 @@ Python line was CalVer (`2026.3.18`).
 | `src/engine/crew.cyr` | the orchestrator bridge — submit, poll, cancel |
 | `src/engine/reject.cyr` | how a request says no; the typed-field readers |
 | `src/engine/agentdef.cyr` | **one** agent model — forwarded, retained, or refused |
-| `src/engine/definitions.cyr` | the in-memory definition store, until M4 |
+| `src/engine/definitions.cyr` | the definition store — **patra-backed** since M4 |
 | `src/engine/presets.cyr` | the canonical preset library, parsed once at mount |
 | `src/presets_data.cyr` | **generated** — the 18 documents as Cyrius literals |
 | `src/routes/health.cyr` | `/health` and `/ready` |
@@ -95,7 +95,7 @@ It is never built or shipped, and it is **not** a specification —
 
 ## Tests
 
-**14 suites, 702 assertions, 0 failed** (`cyrius test`, run under the pin).
+**14 suites, 711 assertions, 0 failed** (`cyrius test`, run under the pin).
 
 ⚠ Counts here are assertion-suite lines only. `cyrius test`'s final
 `N passed, 0 failed` line is the **suite** tally, not a suite — earlier figures
@@ -239,11 +239,21 @@ decoder already did and one model cannot have two spellings.
 record is `ai-hwaccel`-shaped and Agnostic has no decoder for it. Every other
 refusal is refused because the engine genuinely cannot act on it.
 
-⚠ **The store is memory-resident and never evicts.** 256 definitions; past that
-`POST` answers **507**, and every existing key still answers. Disclosed by
-`"storage": "memory"` on all five responses and a WARN at mount — M4 flips the
-literal to `"patra"` and nothing else on the wire moves. `src/routes/definitions.cyr`
-reaches the store only through `agnostic_definitions_*`, so M4 changes no handler.
+✅ **The store is durable, in patra, since M4.** `"storage": "patra"` on all five
+responses; the nine store functions kept their signatures and
+`src/routes/definitions.cyr` was not touched. A definition created in one process
+is served by another after a restart — asserted in `tests/agentdef.tcyr` and
+verified live.
+
+The stored document is the **wire form**, read back through the same decoder that
+validates a client request — so there is no second serialiser, a row that no
+longer decodes is caught rather than half-read, and the two retained fields
+persist without a column each.
+
+⚠ `AGNOSTIC_DEFINITIONS_MAX` is now a **decode-cache bound, not a store ceiling**
+— there is still no `free()`, so decoding per `GET` would leak. The cache assumes
+this process is the only writer; patra is flock-arbitrated and multi-process, so
+if that changes the cache goes rather than gets patched.
 
 ## Next
 

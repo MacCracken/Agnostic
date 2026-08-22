@@ -21,6 +21,11 @@ stdlib = [
     "async",
     "bayan",
     "net", "http", "tls", "sakshi", "sandhi",
+    # M4 — persistence. `patra` is an embedded single-file store folded into the
+    # toolchain stdlib, so it is a stdlib entry rather than a `[deps.*]` block.
+    # ⚠ `libro`, the audit chain, is NOT in the toolchain snapshot: it reaches
+    # `lib/` only transitively through agnosai. See `[deps.libro]` below.
+    "patra",
 ]
 
 # Release artifacts. `bins` is the native build; `cross_bins` is what the

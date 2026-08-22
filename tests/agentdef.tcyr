@@ -250,10 +250,19 @@ fn test_wire_form_is_ours() {
     assert_eq(str_eq_cstr(agnostic_agent_def_key(round), "qa-1"), 1, "preserving the key");
 }
 
+# Open the suite's database. A fixed path under /tmp, reset between groups —
+# `agnostic_definitions_reset` clears the TABLE as well as the cache, so a
+# previous run's rows cannot leak into this one.
+fn _t_open_db() {
+    agnostic_definitions_open(str_from("/tmp/agnostic-agentdef-test.patra"));
+    agnostic_definitions_reset();
+    return 0;
+}
+
 fn test_store_crud() {
     test_group("definitions/store");
 
-    agnostic_definitions_reset();
+    _t_open_db();
     var a = arena_allocator(262144);
     var rj: i64[1];
     var d = _t_decode(a, _T_MIN, &rj);
@@ -285,10 +294,43 @@ fn test_store_crud() {
     assert_eq(agnostic_definitions_remove(key), AGNOSTIC_DEF_MISSING, "removing twice is refused");
 }
 
+fn test_store_survives_a_reopen() {
+    test_group("definitions/durable");
+
+    _t_open_db();
+    var a = arena_allocator(262144);
+    var rj: i64[1];
+    var d = _t_decode(a, "{\"key\":\"persisted\",\"role\":\"r\",\"goal\":\"g\",\"focus\":\"durability\"}", &rj);
+    assert_eq(agnostic_definitions_create(agnostic_agent_def_key(d), d), AGNOSTIC_DEF_OK, "created");
+
+    # ⭐ THE M4 DELIVERABLE, IN ONE ASSERTION.
+    #
+    # Close the database and reopen it — a different handle, an empty decode
+    # cache, and nothing in memory from before. What comes back has to come off
+    # disk.
+    agnostic_definitions_close();
+    assert_eq(agnostic_definitions_open(str_from("/tmp/agnostic-agentdef-test.patra")), 1, "reopened");
+
+    var back = agnostic_definitions_get(str_from("persisted"));
+    assert_neq(back, 0, "the definition survived the reopen");
+    assert_eq(str_eq_cstr(agnostic_agent_def_key(back), "persisted"), 1, "with its key");
+    assert_eq(str_eq_cstr(agnosai_agent_role(agnostic_agent_def_engine(back)), "r"), 1, "and its role");
+
+    # ⚠ And the retained field survived too. `focus` has no engine slot, so it
+    # persists only because the stored document is the WIRE form rather than a
+    # projection onto the engine's record.
+    assert_eq(str_eq_cstr(agnostic_agent_def_focus(back), "durability"), 1,
+      "and `focus`, which the engine has no slot for");
+
+    assert_eq(agnostic_definitions_count(), 1, "the count comes from patra, not the cache");
+    agnostic_definitions_reset();
+    assert_eq(agnostic_definitions_get(str_from("persisted")), 0, "and a reset really clears the table");
+}
+
 fn test_store_is_bounded_and_never_evicts() {
     test_group("definitions/cap");
 
-    agnostic_definitions_reset();
+    _t_open_db();
     var a = arena_allocator(1048576);
     var rj: i64[1];
 
@@ -312,15 +354,19 @@ fn test_store_is_bounded_and_never_evicts() {
     assert_eq(all_ok, 1, "every create up to the cap succeeds");
     assert_eq(agnostic_definitions_count(), AGNOSTIC_DEFINITIONS_MAX, "at the cap");
 
+    # ⚠ **`AGNOSTIC_DEFINITIONS_MAX` is now a CACHE bound, not a store ceiling.**
+    # In M3 it was a real limit and `create` refused past it, because the store
+    # was memory and there is no `free()`. patra has no such limit, so the store
+    # keeps accepting — what stops at the bound is only the decode cache.
     var over = _t_decode(a, "{\"key\":\"one-too-many\",\"role\":\"r\",\"goal\":\"g\"}", &rj);
-    assert_eq(agnostic_definitions_create(agnostic_agent_def_key(over), over), AGNOSTIC_DEF_FULL,
-      "one more is refused with FULL");
+    assert_eq(agnostic_definitions_create(agnostic_agent_def_key(over), over), AGNOSTIC_DEF_OK,
+      "past the cache bound a create still succeeds — patra is not full");
+    assert_eq(agnostic_definitions_count(), AGNOSTIC_DEFINITIONS_MAX + 1, "and the row is there");
 
-    # ⚠ And crucially it does NOT evict. The ledger drops terminal entries at its
-    # cap because nobody named them; evicting a definition the user created would
-    # 404 something they made.
-    assert_eq(agnostic_definitions_count(), AGNOSTIC_DEFINITIONS_MAX, "nothing was evicted");
+    # Nothing was evicted: every earlier key still answers, cached or not.
     assert_neq(agnostic_definitions_get(str_from("k0")), 0, "the first definition still answers");
+    assert_neq(agnostic_definitions_get(str_from("one-too-many")), 0,
+      "and so does the uncached one, decoded straight from patra");
 }
 
 fn main() {
@@ -334,6 +380,7 @@ fn main() {
     test_required_and_key_syntax();
     test_wire_form_is_ours();
     test_store_crud();
+    test_store_survives_a_reopen();
     test_store_is_bounded_and_never_evicts();
     return assert_summary();
 }

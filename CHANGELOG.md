@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M4 (part 1), agent definitions are durable in patra
+
+**106 assertions** in `tests/agentdef.tcyr`; 711 total across 14 suites, 0 failed.
+Verified live: a definition created in one process is served by a *different*
+process after a restart, with its retained fields intact.
+
+`patra` joins `[deps].stdlib` — it is folded into the toolchain stdlib rather
+than being a `[deps.*]` block. New config: **`AGNOSTIC_DB_PATH`**, defaulting to
+`agnostic.patra` relative to the working directory, with the resolved path logged
+at mount.
+
+- **The nine store functions kept their signatures**, so
+  `src/routes/definitions.cyr` was not touched. That rule existed for exactly
+  this moment. The one thing that moved on the wire is the `storage` literal:
+  `"memory"` → `"patra"`.
+- **The stored document is the wire form.** A definition is persisted as the JSON
+  `agnostic_agent_def_to_value_a` renders and read back through
+  `agnostic_agent_def_decode_a` — the same decoder that validates a client
+  request. So there is no second serialiser to drift, a row that no longer
+  decodes is caught rather than half-read, and `focus` / `allow_delegation`
+  persist for free because they are in the wire form. The restart test asserts
+  exactly that: `focus`, which the engine has no slot for, survives.
+- **A decode cache, because there is still no `free()`.** Decoding per `GET`
+  would leak from the global bump on every read. patra is authoritative for
+  existence, `count` and `keys`; the cache only avoids re-decoding a document
+  already read. ⚠ It assumes this process is the only writer — patra is
+  flock-arbitrated and genuinely multi-process, so if that stops being true the
+  cache has to go rather than be patched.
+- **`AGNOSTIC_DEFINITIONS_MAX` changed meaning** from a store ceiling to a cache
+  bound. M3 refused a create past it because memory had no `free()`; patra has no
+  such limit, so creates now succeed past it and only caching stops. The suite
+  asserts the new behaviour rather than the old.
+- **A store that cannot open is a startup failure.** Accepting a definition
+  against a database that is not there would lose it, which is worse than
+  refusing to start.
+
+⚠ **Two patra constraints confirmed by reading it, both real.** Exactly **one
+index per table** — `SCH_IDX_COL` is a single slot in the schema page, and a
+second `CREATE INDEX` replaces the first. And `COL_STR` is a fixed 256-byte slot,
+so long values need `COL_TEXT`, which is chain-paged and **cannot be indexed or
+used in `WHERE`**. Neither binds M4: definitions index on `dkey` and carry the
+document as TEXT. The single-index limit will bind **M5**, where users need
+lookup by both id and email.
+
+Durability is configurable, contrary to the roadmap's shorthand:
+`PATRA_SYNC_FULL` (fdatasync per mutating exec) is the default, but
+`PATRA_SYNC_BATCH`, `patra_flush` and explicit `patra_begin`/`patra_commit`
+transactions all exist.
+
 ### Added — M3 (part 2), agent definitions: one model, three dispositions
 
 **97 assertions** in `tests/agentdef.tcyr`; 702 total across 14 suites, 0 failed.

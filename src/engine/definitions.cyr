@@ -1,52 +1,48 @@
-# agnostic/engine/definitions — where agent definitions live until M4.
+# agnostic/engine/definitions — agent definitions, durable in patra.
 #
-# ## The M2 ledger's shape, with three policy inversions
+# ## The nine functions did not change; what is behind them did
 #
-# The mechanics are `src/engine/ledger.cyr`'s and were proven there: a
-# `map_new_str()` behind one `mutex_new()`, global-allocated values because they
-# outlive the request that created them, a hard cap because `lib/alloc.cyr` has
-# **no `free()`**, and the rule that the lock is never held across a call into
-# the engine.
+# M3 backed these with a `map_new_str()` and told every response
+# `"storage": "memory"`. M4 replaces the body of each with patra and flips the
+# literal to `"patra"`. **`src/routes/definitions.cyr` was not touched** — it
+# reaches the store only through the functions below, which is why that rule
+# existed.
 #
-# The policy is deliberately the opposite in three places, because a definition
-# is **a named object the user created**, not an observation of something the
-# engine did:
+# ## ⚠ The document IS the wire form, and that is the point
 #
-#   1. **No latch.** `agnostic_ledger_latch` refuses to overwrite a terminal
-#      status — that is `ORACLE-AUDIT.md` §3.4's barrier. A definition is *meant*
-#      to be replaced. What guards it instead is that **create and replace are
-#      different operations**: `create` refuses an existing key, `replace`
-#      refuses an absent one. There is no upsert, because an upsert turns a
-#      typo'd key into a second silently-created definition and gives the caller
-#      no way to tell which happened.
-#   2. **No eviction.** The ledger drops terminal entries at its cap — an honest
-#      degradation for a crew nobody polled. Evicting a definition the user
-#      *named* would make `GET` 404 for something they created, which is the
-#      "successful run indistinguishable from a typo" failure in a worse place.
-#      At the cap `create` reports FULL and every existing key still answers.
-#   3. **A remove exists.** The engine's own
-#      `agnosai_app_state_definition_*` has insert, get, count and list — and no
-#      remove at all, which is one of three reasons this store is not that one.
-#      The others: it holds bare engine records, so `focus` and
-#      `allow_delegation` would have nowhere to live; and reaching it needs
-#      `agnosai_app_state_new` with six subsystems Agnostic does not construct.
+# A definition is stored as the JSON `agnostic_agent_def_to_value_a` renders,
+# and read back through `agnostic_agent_def_decode_a` — the same decoder that
+# validates a client's request. Three consequences, all wanted:
 #
-# ## ⚠ Everything here is lost on restart, and that is disclosed
+#   * There is **no second serialiser** to drift from the first. A field added to
+#     the wire form is stored without anyone remembering to add a column.
+#   * A row that no longer decodes is **caught**, not silently mis-read. If a
+#     future schema change makes an old document invalid, `get` answers 0 and the
+#     key behaves as absent rather than returning a half-built record.
+#   * The store never has to know what a definition contains. `focus` and
+#     `allow_delegation` — the two fields the engine has no slot for — persist
+#     for free, because they are in the wire form.
 #
-# Process-lifetime, exactly like crew outcomes. A restart empties the store and
-# every `GET` 404s. No property of the record can distinguish durable from not,
-# so it is closed the way M2 closed placeholder mode — by **disclosure**:
-# `"storage": "memory"` on every definitions response, and a WARN at mount.
+# ## ⚠ The decode cache exists because there is no `free()`
 #
-# M4's job is to reimplement the functions below against `patra` with no change
-# to `src/routes/definitions.cyr`. That is why the route module must never touch
-# `_agnostic_definitions` directly.
+# `agnostic_definitions_get` must return a record the caller can hold for the
+# request. Decoding one per call would allocate from the global bump on every
+# `GET`, forever — a leak proportional to traffic, which is the same reasoning
+# that put a per-request arena in `serve.cyr`. But the decoder allocates
+# globally *by design*, because the crew path needs its records to outlive the
+# request that made them.
+#
+# So decoding happens **once per key**, into a write-through cache. patra is the
+# source of truth for existence and for `count`/`keys`; the cache only avoids
+# re-decoding a document we have already read.
+#
+# ⚠ **The cache assumes this process is the only writer.** patra is
+# flock-arbitrated and genuinely multi-process, so a second process writing the
+# same file would leave this one's cache stale. Agnostic runs as a single server
+# process and `patra_open` is called once at mount; if that ever stops being
+# true, the cache has to go — not be patched.
 
-# What a store operation reports.
-#
-# Four outcomes rather than a boolean, because each maps to a different status
-# and collapsing them is what leaves a caller guessing — the same reasoning as
-# `AgnosticCancelResult` in `src/engine/crew.cyr`.
+# What a store operation reports. Unchanged from M3, so no caller moved.
 enum AgnosticDefResult {
     AGNOSTIC_DEF_OK      = 0;
     AGNOSTIC_DEF_EXISTS  = 1;
@@ -54,132 +50,272 @@ enum AgnosticDefResult {
     AGNOSTIC_DEF_FULL    = 3;
 }
 
-# How many definitions the store holds.
+# How many decoded definitions the cache holds before it stops caching.
 #
-# Bounded because the allocator has no `free()`. Unlike the ledger's cap this one
-# never evicts, so it is a real ceiling — `create` refuses past it and the caller
-# gets a 507 naming the condition. The cap disappears at M4.
+# ⚠ **A cache bound, not a store bound.** M3's identically-named cap was a real
+# ceiling — `create` refused past it. patra has no such limit, so creates are no
+# longer refused; past this many distinct keys, `get` simply decodes each time
+# and the process trades speed for memory it was going to spend anyway.
 var AGNOSTIC_DEFINITIONS_MAX = 256;
 
-# Str-keyed map of key to `AgnosticAgentDef`.
-#
-# The record is stored directly rather than wrapped in an entry that repeats the
-# key: the key is already inside the engine record, and a second copy is a second
-# thing to keep in step.
-var _agnostic_definitions = 0;
+# The patra handle, opened once at mount.
+var _agnostic_db = 0;
 
-# The lock guarding the map. Pool workers run handlers concurrently, so two
-# clients creating the same key genuinely race.
+# key -> decoded AgnosticAgentDef. Never authoritative; see the module header.
+var _agnostic_def_cache = 0;
+
+# Guards the cache. patra does its own flock arbitration, so this protects only
+# the map — and it is never held across a patra call.
 var _agnostic_definitions_mutex = 0;
 
-# Prepare the store. Mount time only, before any worker exists.
+var AGNOSTIC_DEF_TABLE_SQL = "CREATE TABLE agnostic_definitions (dkey STR, doc TEXT)";
+var AGNOSTIC_DEF_INDEX_SQL = "CREATE INDEX ON agnostic_definitions (dkey)";
+
+# Open the database and ensure the schema. Mount time only, before any worker.
+#
+# Returns 1 on success, 0 when the database cannot be opened or the schema
+# cannot be established — and the caller refuses to start on 0, because a
+# product tier that cannot persist what a user creates should say so at startup
+# rather than at the first `POST`.
+#
+# ⚠ `CREATE TABLE` on an existing table answers `PATRA_ERR_EXISTS`, which is the
+# normal path on every start after the first. It is tolerated; any *other* error
+# is fatal. Treating all errors as fine here would turn a corrupt file into an
+# empty-looking store.
+fn agnostic_definitions_open(path: Str): i64 {
+    if (_agnostic_db != 0) { return 1; }
+    patra_init();
+
+    var db = patra_open(str_data(path));
+    if (db == 0) { return 0; }
+
+    var rc = patra_exec(db, AGNOSTIC_DEF_TABLE_SQL);
+    if (rc != PATRA_OK && rc != PATRA_ERR_EXISTS) { return 0; }
+    # The index is created with the table and is equally idempotent. patra
+    # allows exactly ONE index per table — `SCH_IDX_COL` is a single slot in the
+    # schema page — so this is the one, and it is on the column every lookup
+    # uses. A second index would silently replace it.
+    var ri = patra_exec(db, AGNOSTIC_DEF_INDEX_SQL);
+    if (ri != PATRA_OK && ri != PATRA_ERR_EXISTS) { return 0; }
+
+    _agnostic_def_cache = map_new_str();
+    if (_agnostic_definitions_mutex == 0) { _agnostic_definitions_mutex = mutex_new(); }
+    _agnostic_db = db;
+    return 1;
+}
+
+# Prepare the cache without a database. Kept so the M3-era call site compiles;
+# real startup goes through `agnostic_definitions_open`.
 fn agnostic_definitions_init(): i64 {
-    if (_agnostic_definitions == 0) { _agnostic_definitions = map_new_str(); }
+    if (_agnostic_def_cache == 0) { _agnostic_def_cache = map_new_str(); }
     if (_agnostic_definitions_mutex == 0) { _agnostic_definitions_mutex = mutex_new(); }
     return 1;
 }
 
-# Drop every definition. For tests — the server initialises once at mount.
+# Drop every definition. For tests — the server opens once at mount.
+#
+# ⚠ Clears the **table** as well as the cache. A reset that emptied only the
+# cache would leave a suite's rows behind for the next suite, which is the kind
+# of shared state that makes a test pass alone and fail in a run.
 fn agnostic_definitions_reset(): i64 {
-    _agnostic_definitions = map_new_str();
-    if (_agnostic_definitions_mutex == 0) { _agnostic_definitions_mutex = mutex_new(); }
+    agnostic_definitions_init();
+    _agnostic_def_cache = map_new_str();
+    if (_agnostic_db != 0) { patra_exec(_agnostic_db, "DELETE FROM agnostic_definitions"); }
     return 0;
 }
 
-# How many definitions the store holds.
+# Close the database. Flushes any batched writes.
+fn agnostic_definitions_close(): i64 {
+    if (_agnostic_db == 0) { return 0; }
+    patra_close(_agnostic_db);
+    _agnostic_db = 0;
+    return 0;
+}
+
+# How many definitions the store holds. Answered by patra, not by the cache.
 fn agnostic_definitions_count(): i64 {
-    if (_agnostic_definitions == 0) { return 0; }
-    mutex_lock(_agnostic_definitions_mutex);
-    var n = map_size(_agnostic_definitions);
-    mutex_unlock(_agnostic_definitions_mutex);
+    if (_agnostic_db == 0) { return 0; }
+    var rs = patra_query(_agnostic_db, "SELECT dkey FROM agnostic_definitions");
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
     return n;
+}
+
+# Whether a key has a row. patra is the authority on existence, never the cache.
+fn _agnostic_def_row_exists(key: Str): i64 {
+    if (_agnostic_db == 0) { return 0; }
+    var st = patra_prepare(_agnostic_db,
+      "SELECT dkey FROM agnostic_definitions WHERE dkey = ?");
+    if (st == 0) { return 0; }
+    patra_bind_text(st, 0, str_data(key), str_len(key));
+    var rs = patra_query_prepared(_agnostic_db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    if (n > 0) { return 1; }
+    return 0;
+}
+
+# Render a definition to the JSON document that is stored.
+#
+# Global allocator: the bytes are handed to patra and copied into a page, so the
+# buffer is short-lived — but there is no arena at mount time and `create` can
+# be called from one. Bounded by writes, not by reads, which is the trade this
+# module can afford.
+fn _agnostic_def_document(d): i64 {
+    var v = agnostic_agent_def_to_value_a(default_alloc(), d);
+    if (v == 0) { return 0; }
+    return bayan_json_v_build(v);
+}
+
+# Put a definition in the cache, if there is room. Never fails a caller.
+fn _agnostic_def_cache_put(key: Str, d): i64 {
+    agnostic_definitions_init();
+    mutex_lock(_agnostic_definitions_mutex);
+    if (map_size(_agnostic_def_cache) < AGNOSTIC_DEFINITIONS_MAX) {
+        map_set(_agnostic_def_cache, str_clone(key), d);
+    }
+    mutex_unlock(_agnostic_definitions_mutex);
+    return 0;
 }
 
 # Store a definition under a key that must not already exist.
 #
-# Returns OK, EXISTS, or FULL. **Never an upsert** — see the module header.
+# ⚠ **Never an upsert.** `POST` to an existing key is a 409, because an upsert
+# turns a typo'd key into a second silently-created definition.
 fn agnostic_definitions_create(key: Str, def): i64 {
-    agnostic_definitions_init();
     if (key == 0 || def == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (_agnostic_db == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (_agnostic_def_row_exists(key) == 1) { return AGNOSTIC_DEF_EXISTS; }
 
-    mutex_lock(_agnostic_definitions_mutex);
-    if (map_get(_agnostic_definitions, key) != 0) {
-        mutex_unlock(_agnostic_definitions_mutex);
-        return AGNOSTIC_DEF_EXISTS;
-    }
-    # ⚠ Checked under the SAME lock as the insert. Checking the count first and
-    # inserting after would let two workers both see room and both insert.
-    if (map_size(_agnostic_definitions) >= AGNOSTIC_DEFINITIONS_MAX) {
-        mutex_unlock(_agnostic_definitions_mutex);
-        return AGNOSTIC_DEF_FULL;
-    }
-    map_set(_agnostic_definitions, str_clone(key), def);
-    mutex_unlock(_agnostic_definitions_mutex);
+    var doc = _agnostic_def_document(def);
+    if (doc == 0) { return AGNOSTIC_DEF_MISSING; }
+
+    var st = patra_prepare(_agnostic_db,
+      "INSERT INTO agnostic_definitions (dkey, doc) VALUES (?, ?)");
+    if (st == 0) { return AGNOSTIC_DEF_MISSING; }
+    patra_bind_text(st, 0, str_data(key), str_len(key));
+    patra_bind_text(st, 1, str_data(doc), str_len(doc));
+    var rc = patra_exec_prepared(_agnostic_db, st);
+    patra_finalize(st);
+
+    # ⚠ A failed write must NOT be reported as success. patra answers a code;
+    # ignoring it is how "created" goes out for a row that is not there — the
+    # §3.1 shape, one layer down.
+    if (rc == PATRA_ERR_FULL) { return AGNOSTIC_DEF_FULL; }
+    if (rc != PATRA_OK) { return AGNOSTIC_DEF_MISSING; }
+
+    _agnostic_def_cache_put(key, def);
     return AGNOSTIC_DEF_OK;
 }
 
-# Replace the definition under an existing key.
-#
-# Returns OK or MISSING. **Never creates** — a `PUT` to a key that does not exist
-# is a 404, not a quiet create under a name the caller may have mistyped.
+# Replace the definition under an existing key. Never creates.
 fn agnostic_definitions_replace(key: Str, def): i64 {
-    agnostic_definitions_init();
     if (key == 0 || def == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (_agnostic_db == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (_agnostic_def_row_exists(key) == 0) { return AGNOSTIC_DEF_MISSING; }
 
+    var doc = _agnostic_def_document(def);
+    if (doc == 0) { return AGNOSTIC_DEF_MISSING; }
+
+    var st = patra_prepare(_agnostic_db,
+      "UPDATE agnostic_definitions SET doc = ? WHERE dkey = ?");
+    if (st == 0) { return AGNOSTIC_DEF_MISSING; }
+    patra_bind_text(st, 0, str_data(doc), str_len(doc));
+    patra_bind_text(st, 1, str_data(key), str_len(key));
+    var rc = patra_exec_prepared(_agnostic_db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return AGNOSTIC_DEF_MISSING; }
+
+    # The cached record is now wrong; replace it rather than evicting, since the
+    # caller is about to render exactly this.
+    agnostic_definitions_init();
     mutex_lock(_agnostic_definitions_mutex);
-    if (map_get(_agnostic_definitions, key) == 0) {
-        mutex_unlock(_agnostic_definitions_mutex);
-        return AGNOSTIC_DEF_MISSING;
-    }
-    map_set(_agnostic_definitions, str_clone(key), def);
+    map_set(_agnostic_def_cache, str_clone(key), def);
     mutex_unlock(_agnostic_definitions_mutex);
     return AGNOSTIC_DEF_OK;
 }
 
 # The definition under this key, or 0.
+#
+# Cache first, then patra. A row whose document no longer decodes answers 0 —
+# see the module header for why that is the right failure.
 fn agnostic_definitions_get(key: Str): i64 {
-    if (_agnostic_definitions == 0 || key == 0) { return 0; }
+    if (key == 0 || _agnostic_db == 0) { return 0; }
+
+    agnostic_definitions_init();
     mutex_lock(_agnostic_definitions_mutex);
-    var d = map_get(_agnostic_definitions, key);
+    var hit = map_get(_agnostic_def_cache, key);
     mutex_unlock(_agnostic_definitions_mutex);
+    if (hit != 0) { return hit; }
+
+    var st = patra_prepare(_agnostic_db,
+      "SELECT doc FROM agnostic_definitions WHERE dkey = ?");
+    if (st == 0) { return 0; }
+    patra_bind_text(st, 0, str_data(key), str_len(key));
+    var rs = patra_query_prepared(_agnostic_db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+    if (patra_result_count(rs) == 0) { patra_result_free(rs); return 0; }
+
+    var len = patra_result_get_text_len(rs, 0, 0);
+    if (len <= 0) { patra_result_free(rs); return 0; }
+    var buf = alloc(len);
+    if (buf == 0) { patra_result_free(rs); return 0; }
+    if (patra_result_read_text(_agnostic_db, rs, 0, 0, buf) != PATRA_OK) {
+        patra_result_free(rs);
+        return 0;
+    }
+    patra_result_free(rs);
+
+    var v = bayan_json_v_parse_buf(buf, len);
+    if (v == 0) { return 0; }
+    var reject: i64[1];
+    store64(&reject, 0);
+    # -1: not inside an `agents` array, so a rejection reads as a document
+    # problem rather than as an array index nobody sent.
+    var d = agnostic_agent_def_decode_a(default_alloc(), v, 0 - 1, &reject);
+    if (d == 0) { return 0; }
+
+    _agnostic_def_cache_put(key, d);
     return d;
 }
 
 # Remove a definition. Returns OK or MISSING.
-#
-# ⚠ The record itself is **not** reclaimed — there is no `free()`. Removing drops
-# the map entry so the key stops answering and stops counting against the cap;
-# the bytes stay until the process exits. That is the same bargain every
-# global-allocated record in this tree makes, and it is why the cap exists.
 fn agnostic_definitions_remove(key: Str): i64 {
-    if (_agnostic_definitions == 0 || key == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (key == 0 || _agnostic_db == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (_agnostic_def_row_exists(key) == 0) { return AGNOSTIC_DEF_MISSING; }
+
+    var st = patra_prepare(_agnostic_db, "DELETE FROM agnostic_definitions WHERE dkey = ?");
+    if (st == 0) { return AGNOSTIC_DEF_MISSING; }
+    patra_bind_text(st, 0, str_data(key), str_len(key));
+    var rc = patra_exec_prepared(_agnostic_db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return AGNOSTIC_DEF_MISSING; }
+
+    agnostic_definitions_init();
     mutex_lock(_agnostic_definitions_mutex);
-    if (map_get(_agnostic_definitions, key) == 0) {
-        mutex_unlock(_agnostic_definitions_mutex);
-        return AGNOSTIC_DEF_MISSING;
-    }
-    map_delete(_agnostic_definitions, key);
+    map_delete(_agnostic_def_cache, key);
     mutex_unlock(_agnostic_definitions_mutex);
     return AGNOSTIC_DEF_OK;
 }
 
-# A snapshot of every key, as a vec of Str.
-#
-# ⚠ A **snapshot**, taken under the lock and released before the caller walks it.
-# Holding the lock across a caller's rendering would stall every other worker's
-# lookups, and a key removed between the snapshot and the fetch simply answers 0
-# — which the listing skips. That is the same trade `agnosai_orchestrator_crew_ids`
-# documents and makes for the same reason.
+# A snapshot of every key, as a vec of Str. Answered by patra.
 fn agnostic_definitions_keys(): i64 {
     var out = vec_new();
-    if (_agnostic_definitions == 0) { return out; }
-    mutex_lock(_agnostic_definitions_mutex);
-    var keys = map_keys(_agnostic_definitions);
+    if (_agnostic_db == 0) { return out; }
+    var rs = patra_query(_agnostic_db, "SELECT dkey FROM agnostic_definitions");
+    if (rs == 0) { return out; }
+    var n = patra_result_count(rs);
     var i = 0;
-    while (i < vec_len(keys)) {
-        vec_push(out, vec_get(keys, i));
+    while (i < n) {
+        var p = patra_result_get_str(rs, i, 0);
+        var l = patra_result_get_str_len(rs, i, 0);
+        if (p != 0 && l > 0) { vec_push(out, str_new(p, l)); }
         i = i + 1;
     }
-    mutex_unlock(_agnostic_definitions_mutex);
+    patra_result_free(rs);
     return out;
 }

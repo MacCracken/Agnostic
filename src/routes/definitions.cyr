@@ -42,12 +42,12 @@
 var AGNOSTIC_JK_DEFINITION  = str_from("definition");
 var AGNOSTIC_JK_DEFINITIONS = str_from("definitions");
 var AGNOSTIC_JK_STORAGE     = str_from("storage");
-var AGNOSTIC_JV_MEMORY      = str_from("memory");
+var AGNOSTIC_JV_PATRA       = str_from("patra");
 var AGNOSTIC_JV_DELETED     = str_from("deleted");
 
 # Where definitions live. One literal, so M4 has one thing to change.
 fn agnostic_definitions_storage(): i64 {
-    return AGNOSTIC_JV_MEMORY;
+    return AGNOSTIC_JV_PATRA;
 }
 
 # Stamp `storage` onto a response body.
