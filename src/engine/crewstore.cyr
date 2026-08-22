@@ -1,0 +1,142 @@
+# agnostic/engine/crewstore — crew outcomes that survive the process.
+#
+# ## ⚠ Only TERMINAL outcomes are written, and that is the whole design
+#
+# A crew runs on a detached thread. When the process dies, that thread dies with
+# it — so a crew that was PENDING or RUNNING at the moment of death is not
+# "resumable", it is simply **gone**. Persisting non-terminal state would mean
+# loading, on the next start, a crew that claims to be running and never will be:
+# a poller would wait on it forever, and the ledger's terminal latch could never
+# correct it because the wrong value would be latched first.
+#
+# Writing only COMPLETED / FAILED / CANCELLED removes the problem rather than
+# guarding it. There is no stale "running" to load because one is never written.
+# What that costs is honest and small: a crew interrupted mid-flight answers 404
+# after a restart, which is true — nothing ran it to completion and no outcome
+# exists.
+#
+# ## The stored document is the wire form, served verbatim
+#
+# Same choice as `src/engine/definitions.cyr`, for the same reasons, plus one
+# more: reconstructing an outcome record from JSON would mean rebuilding the
+# engine's task-result objects, and a lossy rebuild of a *result* is worse than
+# no rebuild at all. On a ledger miss the stored bytes go out as they were
+# written — the response a caller would have got from the run that produced them.
+#
+# ## One table, one index, one database
+#
+# Shares `src/engine/store.cyr`'s handle with the definition table. patra allows
+# 63 tables and exactly **one index each**, so `crew_id` gets it — the only
+# column anything looks up by.
+
+var AGNOSTIC_CREW_TABLE_SQL =
+"CREATE TABLE agnostic_crews (crew_id STR, cname STR, cstatus INT, doc TEXT)";
+var AGNOSTIC_CREW_INDEX_SQL = "CREATE INDEX ON agnostic_crews (crew_id)";
+
+# Ensure the schema. Mount time only. Returns 1 when it is in place.
+fn agnostic_crews_ensure(): i64 {
+    if (agnostic_store_ensure(AGNOSTIC_CREW_TABLE_SQL) == 0) { return 0; }
+    if (agnostic_store_ensure(AGNOSTIC_CREW_INDEX_SQL) == 0) { return 0; }
+    return 1;
+}
+
+# Whether a crew already has a stored row.
+fn _agnostic_crews_exists(crew_id: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    var st = patra_prepare(db, "SELECT crew_id FROM agnostic_crews WHERE crew_id = ?");
+    if (st == 0) { return 0; }
+    patra_bind_text(st, 0, str_data(crew_id), str_len(crew_id));
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    if (n > 0) { return 1; }
+    return 0;
+}
+
+# Persist a terminal crew outcome. Returns 1 when it was written.
+#
+# ⚠ **Refuses a non-terminal status outright** rather than trusting the caller.
+# `agnostic_ledger_latch` is the only caller today and only calls on a terminal
+# latch, but the guard is what makes the module header's claim true for every
+# future caller as well.
+#
+# ⚠ A row is written **once**. A crew reaching a terminal state twice is not a
+# thing the latch permits, and re-writing would mean the second answer wins —
+# which is the ordering `ORACLE-AUDIT.md` §3.4 got wrong. An existing row stands.
+fn agnostic_crews_save(crew_id: Str, name: Str, status, doc: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    if (crew_id == 0 || doc == 0) { return 0; }
+    if (agnostic_status_is_terminal(status) == 0) { return 0; }
+    if (_agnostic_crews_exists(crew_id) == 1) { return 0; }
+
+    var nm = name;
+    if (nm == 0) { nm = str_from(""); }
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_crews (crew_id, cname, cstatus, doc) VALUES (?, ?, ?, ?)");
+    if (st == 0) { return 0; }
+    patra_bind_text(st, 0, str_data(crew_id), str_len(crew_id));
+    patra_bind_text(st, 1, str_data(nm), str_len(nm));
+    patra_bind_int(st, 2, status);
+    patra_bind_text(st, 3, str_data(doc), str_len(doc));
+    var rc = patra_exec_prepared(db, st);
+    patra_finalize(st);
+
+    # ⚠ A failed write must not read as success — the same rule the definition
+    # store follows. The caller counts the failure; the outcome is simply not
+    # durable, and a poll after a restart will 404 rather than lie.
+    if (rc != PATRA_OK) { return 0; }
+    return 1;
+}
+
+# The stored outcome document for a crew, as a Str, or 0.
+#
+# Allocated in `a` — the bytes are rendered into this request's response and
+# nothing holds them afterwards, which is the difference from the definition
+# store's decode cache.
+fn agnostic_crews_doc_a(a, crew_id: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || crew_id == 0) { return 0; }
+
+    var st = patra_prepare(db, "SELECT doc FROM agnostic_crews WHERE crew_id = ?");
+    if (st == 0) { return 0; }
+    patra_bind_text(st, 0, str_data(crew_id), str_len(crew_id));
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+    if (patra_result_count(rs) == 0) { patra_result_free(rs); return 0; }
+
+    var len = patra_result_get_text_len(rs, 0, 0);
+    if (len <= 0) { patra_result_free(rs); return 0; }
+    var buf = alloc_via(a, len);
+    if (buf == 0) { patra_result_free(rs); return 0; }
+    if (patra_result_read_text(db, rs, 0, 0, buf) != PATRA_OK) {
+        patra_result_free(rs);
+        return 0;
+    }
+    patra_result_free(rs);
+    return str_new_a(a, buf, len);
+}
+
+# How many terminal outcomes are stored.
+fn agnostic_crews_count(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    var rs = patra_query(db, "SELECT crew_id FROM agnostic_crews");
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+# Drop every stored outcome. For tests.
+fn agnostic_crews_reset(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    patra_exec(db, "DELETE FROM agnostic_crews");
+    return 0;
+}

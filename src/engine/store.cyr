@@ -1,0 +1,74 @@
+# agnostic/engine/store — the one patra handle everything durable shares.
+#
+# ## Why the handle is here rather than in whichever module opened it first
+#
+# `src/engine/definitions.cyr` owned it through M4's first half. Crew outcomes
+# then needed durability too, and the alternatives were both worse than moving
+# it: a second `patra_open` on the same file puts two flock-arbitrated handles
+# in one process, and a second *file* multiplies the operator's backup surface
+# for no reason. patra allows 63 tables per database (`MAX_TABLES`), so one
+# handle and two tables is the shape.
+#
+# The audit chain is the deliberate exception — `patrastore_open` opens its own
+# handle and owns its own schema, so it gets its own file. That is libro's call,
+# not ours.
+#
+# ## ⚠ patra_init stomps the host's log level
+#
+# Its last line is an unconditional `sakshi_set_level(SK_WARN)`
+# (`lib/patra.cyr:4472`), so an operator who set `AGNOSTIC_LOG_LEVEL=info`
+# silently loses every INFO line in the process — including `listening`. Saved
+# and restored here, at the single call site, so no other module has to know.
+#
+# Filed upstream 2026-08-21:
+# `patra/docs/development/requests/2026-08-21-patra-init-must-not-set-the-host-log-level.md`.
+
+# The shared handle. 0 until mount opens it.
+var _agnostic_store_db = 0;
+
+# Open the database. Mount time only, before any worker exists.
+#
+# Returns 1 on success, 0 when the file cannot be opened. Idempotent.
+fn agnostic_store_open(path: Str): i64 {
+    if (_agnostic_store_db != 0) { return 1; }
+
+    var level = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(level);
+
+    var db = patra_open(str_data(path));
+    if (db == 0) { return 0; }
+    _agnostic_store_db = db;
+    return 1;
+}
+
+# The handle, or 0 when nothing is open.
+#
+# ⚠ Every caller must treat 0 as "no persistence" and say so rather than
+# reporting a write that did not happen.
+fn agnostic_store_db(): i64 {
+    return _agnostic_store_db;
+}
+
+# Close the database, flushing anything batched.
+fn agnostic_store_close(): i64 {
+    if (_agnostic_store_db == 0) { return 0; }
+    patra_close(_agnostic_store_db);
+    _agnostic_store_db = 0;
+    return 0;
+}
+
+# Run a schema statement, tolerating "already exists".
+#
+# ⚠ `CREATE TABLE` on an existing table answers `PATRA_ERR_EXISTS`, which is the
+# normal path on every start after the first. Any *other* error is real: treating
+# them all as fine would turn a corrupt file into an empty-looking store.
+#
+# Returns 1 when the schema is in place, 0 when it is not.
+fn agnostic_store_ensure(sql): i64 {
+    if (_agnostic_store_db == 0) { return 0; }
+    var rc = patra_exec(_agnostic_store_db, sql);
+    if (rc == PATRA_OK) { return 1; }
+    if (rc == PATRA_ERR_EXISTS) { return 1; }
+    return 0;
+}

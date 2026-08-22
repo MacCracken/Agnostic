@@ -253,7 +253,33 @@ fn agnostic_ledger_latch(e, status, error, results): i64 {
     if (error != 0) { store64(e + AGNOSTIC_LE_ERROR, error); }
     if (results != 0) { store64(e + AGNOSTIC_LE_RESULTS, results); }
     mutex_unlock(_agnostic_ledger_mutex);
+
+    # ⚠ **Persisted outside the lock, on the one transition that matters.** This
+    # is the single point where a crew becomes terminal — the latch refuses every
+    # later write — so it is exactly where durability belongs, and doing it here
+    # means no caller has to remember.
+    #
+    # The patra call is deliberately NOT under `_agnostic_ledger_mutex`: holding
+    # our lock across a library that takes its own is how a lock-order hazard
+    # gets built. The entry is already updated and the latch is closed, so
+    # nothing can change underneath this.
+    if (agnostic_status_is_terminal(status) == 1) { _agnostic_ledger_persist(e); }
     return 1;
+}
+
+# Write a now-terminal entry to the durable store.
+#
+# Failure is logged and counted by the store, not raised: a crew that ran
+# correctly should not be reported as failed because the disk was full. What it
+# costs is that the outcome 404s after a restart, which is true rather than wrong.
+fn _agnostic_ledger_persist(e): i64 {
+    if (agnostic_store_db() == 0) { return 0; }
+    var o = agnostic_ledger_outcome_a(default_alloc(), e);
+    if (o == 0) { return 0; }
+    var doc = bayan_json_v_build(agnostic_outcome_to_value_a(default_alloc(), o));
+    if (doc == 0) { return 0; }
+    return agnostic_crews_save(agnostic_ledger_crew_id(e), agnostic_ledger_name(e),
+      agnostic_outcome_status(o), doc);
 }
 
 # Append one event to an entry's bounded window. The caller holds the lock.

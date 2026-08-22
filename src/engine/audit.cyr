@@ -84,9 +84,15 @@ var _agnostic_audit_appended = 0;
 #
 # Verifying at open is also simply the right moment: the question a
 # tamper-evident chain answers is "was this file altered while I was not
-# running", and that is exactly what start-up can see. A live re-verify endpoint
-# is worth having and needs libro to stop sharing prepared statements across
-# threads — worth reporting upstream.
+# running", and that is exactly what start-up can see. What it does not cover is
+# tampering *during* a run — a small loss, since that implies someone already has
+# write access to the file this process is holding.
+#
+# Filed upstream 2026-08-21 as a defect in `libro/docs/development/roadmap.md`
+# (active patch line, first item), together with the
+# `patrastore_load_and_verify` return-type ambiguity noted on
+# `agnostic_audit_verify` below. A live re-verify endpoint becomes possible when
+# that lands.
 var _agnostic_audit_intact = 1;
 var _agnostic_audit_bad_index = 0 - 1;
 var _agnostic_audit_at_open = 0;
@@ -231,7 +237,7 @@ fn agnostic_audit_record(severity, source: Str, action: Str, details: Str): i64 
 #
 # `patrastore_load_all` then `verify_chain` is the unambiguous pair: `verify_chain`
 # answers 0 for intact and an error object otherwise, and there is nothing to
-# confuse it with. Worth reporting upstream to libro.
+# confuse it with. Reported upstream 2026-08-21 — see the module header.
 fn agnostic_audit_is_intact(): i64 {
     return _agnostic_audit_intact;
 }

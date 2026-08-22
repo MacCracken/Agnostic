@@ -47,6 +47,8 @@ Python line was CalVer (`2026.3.18`).
 | `src/engine/reject.cyr` | how a request says no; the typed-field readers |
 | `src/engine/agentdef.cyr` | **one** agent model — forwarded, retained, or refused |
 | `src/engine/definitions.cyr` | the definition store — **patra-backed** since M4 |
+| `src/engine/store.cyr` | the one patra handle the durable tables share |
+| `src/engine/crewstore.cyr` | terminal crew outcomes, durable |
 | `src/engine/audit.cyr` | the tamper-evident trail, libro over patra |
 | `src/engine/presets.cyr` | the canonical preset library, parsed once at mount |
 | `src/presets_data.cyr` | **generated** — the 18 documents as Cyrius literals |
@@ -96,7 +98,7 @@ It is never built or shipped, and it is **not** a specification —
 
 ## Tests
 
-**15 suites, 746 assertions, 0 failed** (`cyrius test`, run under the pin).
+**16 suites, 771 assertions, 0 failed** (`cyrius test`, run under the pin).
 
 ⚠ Counts here are assertion-suite lines only. `cyrius test`'s final
 `N passed, 0 failed` line is the **suite** tally, not a suite — earlier figures
@@ -113,6 +115,8 @@ in this repo (`222`) and in agnosai (`8,038`) double-counted it.
   required, there is no fallback, and a cyclic graph is refused before submission
 - `tests/crews_route.tcyr` — **59 assertions**, the surface end to end, including
   the §3.2 barrier: an id we never submitted is a 404 that relabels nothing
+- `tests/crewstore.tcyr` — **25 assertions**, terminal-only persistence, written
+  once, and durable across a reopen
 - `tests/audit.tcyr` — **35 assertions**, the trail: durable across a reopen, and
   a byte edited on disk is **detected** with the failing entry named
 - `tests/agentdef.tcyr` — **106 assertions**, the one agent model: every field
@@ -258,13 +262,38 @@ persist without a column each.
 this process is the only writer; patra is flock-arbitrated and multi-process, so
 if that changes the cache goes rather than gets patched.
 
+## Persistence
+
+**One patra database, two tables**, behind `src/engine/store.cyr`:
+`agnostic_definitions (dkey, doc)` and `agnostic_crews (crew_id, cname, cstatus,
+doc)`. patra allows exactly **one index per table** — `SCH_IDX_COL` is a single
+slot in the schema page — so each gets it on the column everything looks up by.
+The audit chain has its own file: `patrastore_open` opens its own handle.
+
+⚠ **Only terminal crew outcomes are stored.** A running crew's thread dies with
+the process, so persisting non-terminal state would load a crew that claims to
+run and never will. A crew interrupted mid-flight 404s after a restart.
+
+⚠ **Two sibling-library defects are worked around, both filed upstream
+2026-08-21.** `patra_init` stomps the host's log level (saved/restored in
+`store.cyr`); libro's `PatraStore` caches prepared statements that fault on any
+thread but the opener's, so audit verification runs once at open. Both
+work-arounds carry a pointer to the filing and can be removed when they land.
+
 ## Next
 
-See [`roadmap.md`](roadmap.md). **M4 — persistence and the audit chain.** It
-inherits two seams built for it: `agnostic_definitions_*` (nine functions, one
-storage literal) and `src/engine/ledger.cyr`. Agent keys are constrained to
-`[a-z0-9][a-z0-9-]*`, so an on-disk path built from one is safe **by
-construction** rather than by validation — do not widen that character set. The
+See [`roadmap.md`](roadmap.md). **M5 — identity and tenancy.** Two things it
+inherits:
+
+⚠ **patra's single index per table will bind here.** M5 needs users by id *and*
+by email; the roadmap already plans two tables or a scan. This is the concrete
+case for improving patra rather than working around it — decide it against that
+requirement.
+
+⚠ **Agent keys are `[a-z0-9][a-z0-9-]*`** so an identifier can never become a
+path component. Audit point 6 is answered for M4 (no filesystem call in `src/`
+takes request input) and genuinely re-opens at **M8**, where report filenames are
+built from user text. Keep the character set narrow. The
 field-forwarding gate it turns on is already built and under test:
 `src/engine/request.cyr` establishes the pattern M3 extends.
 

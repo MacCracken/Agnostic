@@ -168,11 +168,56 @@ category as the identity surface in M5, and it must be read the same way. Port t
 can: the 38-name union is pinned as a manifest, and a preset naming an unresolvable tool must be an
 **error**, never a silently smaller agent.
 
-### M4 — Persistence + audit chain (v0.5.0)
+### M4 — Persistence + audit chain (v0.5.0) — ✅ 2026-08-21
 
-- `patra` for sessions, crews, results, tenants
+- `patra` for crews, results and agent definitions
 - `libro` tamper-evident audit chain
-- Path-traversal validation on every externally-derived path (re-opens audit point 6)
+
+**60 new assertions across 2 suites** (771 total across 16), 0 failed. All three gates green.
+Verified live across real process restarts: a definition, a completed crew's results, and the audit
+chain each survive; a byte edited in the audit file is **detected** with the failing entry named.
+
+⚠ **Sessions and tenants were cut from M4 and belong to M5.** The line above said "sessions, crews,
+results, tenants", but tenancy is identity-shaped and M5 already owns "Tenant CRUD in `patra`" —
+building it here would mean designing a tenant model before the identity model that gives it
+meaning, and the oracle's identity surface is mostly dead code (M5's own warning). Crews, results
+and definitions are what M2 and M3 actually produce, and those are durable now.
+
+⚠ **Only TERMINAL crew outcomes are persisted, and that is the design.** A crew runs on a detached
+thread; when the process dies the thread dies with it, so a PENDING or RUNNING crew is not
+resumable — it is gone. Writing non-terminal state would load, on the next start, a crew claiming to
+run that never will, and the ledger's terminal latch could never correct it because the wrong value
+would be latched first. Writing only COMPLETED / FAILED / CANCELLED removes the problem instead of
+guarding it: there is no stale "running" to load because one is never written. A crew interrupted
+mid-flight 404s after a restart, which is true.
+
+**Durability seams:** one patra handle (`src/engine/store.cyr`) shared by the definition and crew
+tables — patra allows 63 tables and exactly one index each, so `dkey` and `crew_id` get them. The
+audit chain keeps its own file because `patrastore_open` opens its own handle.
+
+⚠ **Two sibling-library defects found and filed** (2026-08-21), both worked around rather than
+blocking:
+- `patra_init` ends with an unconditional `sakshi_set_level(SK_WARN)`, silently discarding the
+  operator's log level — filed as a consumer request in `patra/docs/development/requests/`.
+- libro's `PatraStore` caches prepared statements at open, and patra's SQL parse scratch is
+  per-thread, so reading the store from a pool worker **kills the process** — filed at the top of
+  `libro/docs/development/roadmap.md`'s active patch line. Audit verification therefore runs once,
+  at open, on the main thread.
+- Path-traversal validation on every externally-derived path (audit point 6)
+
+**✅ Audit point 6 answered 2026-08-21 — the surface does not exist yet, and M4 did not create
+it.** Re-running the audit's own probe over `src/` finds **zero** filesystem calls. Exactly two
+paths reach the disk — `patra_open` and `patrastore_open` — and both take **operator config**
+(`AGNOSTIC_DB_PATH`, `AGNOSTIC_AUDIT_PATH`), never request input.
+
+M4's persistence is a *database keyed by validated identifiers*, not a filesystem layout, so
+nothing a client sends becomes a path component. The identifiers that would matter are already
+closed sets: agent keys are `[a-z0-9][a-z0-9-]*` (`agnostic_key_is_valid`), preset names are a
+compiled-in library of 18, and crew ids are UUIDs — a key that cannot contain `/` or `.` is safe
+**by construction** rather than by a `../` check.
+
+⚠ **It genuinely re-opens at M8**, not here: report and artefact storage is the first thing that
+builds a filename from user-supplied text. Keep `agnostic_key_is_valid` narrow for that reason.
 
 ⚠ `patra` is an embedded single-file store, `flock`-arbitrated, with **no client/server mode** —
 the oracle's multi-container "everyone talks to postgres" topology cannot be reproduced.

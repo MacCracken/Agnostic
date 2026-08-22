@@ -58,9 +58,6 @@ enum AgnosticDefResult {
 # and the process trades speed for memory it was going to spend anyway.
 var AGNOSTIC_DEFINITIONS_MAX = 256;
 
-# The patra handle, opened once at mount.
-var _agnostic_db = 0;
-
 # key -> decoded AgnosticAgentDef. Never authoritative; see the module header.
 var _agnostic_def_cache = 0;
 
@@ -83,37 +80,15 @@ var AGNOSTIC_DEF_INDEX_SQL = "CREATE INDEX ON agnostic_definitions (dkey)";
 # is fatal. Treating all errors as fine here would turn a corrupt file into an
 # empty-looking store.
 fn agnostic_definitions_open(path: Str): i64 {
-    if (_agnostic_db != 0) { return 1; }
-
-    # ⚠ **`patra_init` stomps the application's log level.** Its last line is an
-    # unconditional `sakshi_set_level(SK_WARN)` (`lib/patra.cyr:4472`), so an
-    # operator who set `AGNOSTIC_LOG_LEVEL=info` silently loses every INFO line
-    # in the process — including `listening`, which is how you know the server
-    # came up. agnosai hit this and avoided patra entirely, leaving a note for
-    # "whoever does reach for patra later" (`lib/agnosai.cyr:29933`).
-    #
-    # Saved and restored here rather than in the caller, so the wart stays in the
-    # one module that triggers it and no future caller has to remember. Worth
-    # fixing upstream: a library has no business setting the host's log level.
-    var level = sakshi_get_level();
-    patra_init();
-    sakshi_set_level(level);
-
-    var db = patra_open(str_data(path));
-    if (db == 0) { return 0; }
-
-    var rc = patra_exec(db, AGNOSTIC_DEF_TABLE_SQL);
-    if (rc != PATRA_OK && rc != PATRA_ERR_EXISTS) { return 0; }
-    # The index is created with the table and is equally idempotent. patra
-    # allows exactly ONE index per table — `SCH_IDX_COL` is a single slot in the
-    # schema page — so this is the one, and it is on the column every lookup
-    # uses. A second index would silently replace it.
-    var ri = patra_exec(db, AGNOSTIC_DEF_INDEX_SQL);
-    if (ri != PATRA_OK && ri != PATRA_ERR_EXISTS) { return 0; }
+    if (agnostic_store_open(path) == 0) { return 0; }
+    if (agnostic_store_ensure(AGNOSTIC_DEF_TABLE_SQL) == 0) { return 0; }
+    # patra allows exactly ONE index per table — `SCH_IDX_COL` is a single slot
+    # in the schema page — so this is the one, and it is on the column every
+    # lookup uses. A second `CREATE INDEX` would silently replace it.
+    if (agnostic_store_ensure(AGNOSTIC_DEF_INDEX_SQL) == 0) { return 0; }
 
     _agnostic_def_cache = map_new_str();
     if (_agnostic_definitions_mutex == 0) { _agnostic_definitions_mutex = mutex_new(); }
-    _agnostic_db = db;
     return 1;
 }
 
@@ -133,22 +108,19 @@ fn agnostic_definitions_init(): i64 {
 fn agnostic_definitions_reset(): i64 {
     agnostic_definitions_init();
     _agnostic_def_cache = map_new_str();
-    if (_agnostic_db != 0) { patra_exec(_agnostic_db, "DELETE FROM agnostic_definitions"); }
+    if (agnostic_store_db() != 0) { patra_exec(agnostic_store_db(), "DELETE FROM agnostic_definitions"); }
     return 0;
 }
 
 # Close the database. Flushes any batched writes.
 fn agnostic_definitions_close(): i64 {
-    if (_agnostic_db == 0) { return 0; }
-    patra_close(_agnostic_db);
-    _agnostic_db = 0;
-    return 0;
+    return agnostic_store_close();
 }
 
 # How many definitions the store holds. Answered by patra, not by the cache.
 fn agnostic_definitions_count(): i64 {
-    if (_agnostic_db == 0) { return 0; }
-    var rs = patra_query(_agnostic_db, "SELECT dkey FROM agnostic_definitions");
+    if (agnostic_store_db() == 0) { return 0; }
+    var rs = patra_query(agnostic_store_db(), "SELECT dkey FROM agnostic_definitions");
     if (rs == 0) { return 0; }
     var n = patra_result_count(rs);
     patra_result_free(rs);
@@ -157,12 +129,12 @@ fn agnostic_definitions_count(): i64 {
 
 # Whether a key has a row. patra is the authority on existence, never the cache.
 fn _agnostic_def_row_exists(key: Str): i64 {
-    if (_agnostic_db == 0) { return 0; }
-    var st = patra_prepare(_agnostic_db,
+    if (agnostic_store_db() == 0) { return 0; }
+    var st = patra_prepare(agnostic_store_db(),
       "SELECT dkey FROM agnostic_definitions WHERE dkey = ?");
     if (st == 0) { return 0; }
     patra_bind_text(st, 0, str_data(key), str_len(key));
-    var rs = patra_query_prepared(_agnostic_db, st);
+    var rs = patra_query_prepared(agnostic_store_db(), st);
     patra_finalize(st);
     if (rs == 0) { return 0; }
     var n = patra_result_count(rs);
@@ -200,18 +172,18 @@ fn _agnostic_def_cache_put(key: Str, d): i64 {
 # turns a typo'd key into a second silently-created definition.
 fn agnostic_definitions_create(key: Str, def): i64 {
     if (key == 0 || def == 0) { return AGNOSTIC_DEF_MISSING; }
-    if (_agnostic_db == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (agnostic_store_db() == 0) { return AGNOSTIC_DEF_MISSING; }
     if (_agnostic_def_row_exists(key) == 1) { return AGNOSTIC_DEF_EXISTS; }
 
     var doc = _agnostic_def_document(def);
     if (doc == 0) { return AGNOSTIC_DEF_MISSING; }
 
-    var st = patra_prepare(_agnostic_db,
+    var st = patra_prepare(agnostic_store_db(),
       "INSERT INTO agnostic_definitions (dkey, doc) VALUES (?, ?)");
     if (st == 0) { return AGNOSTIC_DEF_MISSING; }
     patra_bind_text(st, 0, str_data(key), str_len(key));
     patra_bind_text(st, 1, str_data(doc), str_len(doc));
-    var rc = patra_exec_prepared(_agnostic_db, st);
+    var rc = patra_exec_prepared(agnostic_store_db(), st);
     patra_finalize(st);
 
     # ⚠ A failed write must NOT be reported as success. patra answers a code;
@@ -227,18 +199,18 @@ fn agnostic_definitions_create(key: Str, def): i64 {
 # Replace the definition under an existing key. Never creates.
 fn agnostic_definitions_replace(key: Str, def): i64 {
     if (key == 0 || def == 0) { return AGNOSTIC_DEF_MISSING; }
-    if (_agnostic_db == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (agnostic_store_db() == 0) { return AGNOSTIC_DEF_MISSING; }
     if (_agnostic_def_row_exists(key) == 0) { return AGNOSTIC_DEF_MISSING; }
 
     var doc = _agnostic_def_document(def);
     if (doc == 0) { return AGNOSTIC_DEF_MISSING; }
 
-    var st = patra_prepare(_agnostic_db,
+    var st = patra_prepare(agnostic_store_db(),
       "UPDATE agnostic_definitions SET doc = ? WHERE dkey = ?");
     if (st == 0) { return AGNOSTIC_DEF_MISSING; }
     patra_bind_text(st, 0, str_data(doc), str_len(doc));
     patra_bind_text(st, 1, str_data(key), str_len(key));
-    var rc = patra_exec_prepared(_agnostic_db, st);
+    var rc = patra_exec_prepared(agnostic_store_db(), st);
     patra_finalize(st);
     if (rc != PATRA_OK) { return AGNOSTIC_DEF_MISSING; }
 
@@ -256,7 +228,7 @@ fn agnostic_definitions_replace(key: Str, def): i64 {
 # Cache first, then patra. A row whose document no longer decodes answers 0 —
 # see the module header for why that is the right failure.
 fn agnostic_definitions_get(key: Str): i64 {
-    if (key == 0 || _agnostic_db == 0) { return 0; }
+    if (key == 0 || agnostic_store_db() == 0) { return 0; }
 
     agnostic_definitions_init();
     mutex_lock(_agnostic_definitions_mutex);
@@ -264,11 +236,11 @@ fn agnostic_definitions_get(key: Str): i64 {
     mutex_unlock(_agnostic_definitions_mutex);
     if (hit != 0) { return hit; }
 
-    var st = patra_prepare(_agnostic_db,
+    var st = patra_prepare(agnostic_store_db(),
       "SELECT doc FROM agnostic_definitions WHERE dkey = ?");
     if (st == 0) { return 0; }
     patra_bind_text(st, 0, str_data(key), str_len(key));
-    var rs = patra_query_prepared(_agnostic_db, st);
+    var rs = patra_query_prepared(agnostic_store_db(), st);
     patra_finalize(st);
     if (rs == 0) { return 0; }
     if (patra_result_count(rs) == 0) { patra_result_free(rs); return 0; }
@@ -277,7 +249,7 @@ fn agnostic_definitions_get(key: Str): i64 {
     if (len <= 0) { patra_result_free(rs); return 0; }
     var buf = alloc(len);
     if (buf == 0) { patra_result_free(rs); return 0; }
-    if (patra_result_read_text(_agnostic_db, rs, 0, 0, buf) != PATRA_OK) {
+    if (patra_result_read_text(agnostic_store_db(), rs, 0, 0, buf) != PATRA_OK) {
         patra_result_free(rs);
         return 0;
     }
@@ -298,13 +270,13 @@ fn agnostic_definitions_get(key: Str): i64 {
 
 # Remove a definition. Returns OK or MISSING.
 fn agnostic_definitions_remove(key: Str): i64 {
-    if (key == 0 || _agnostic_db == 0) { return AGNOSTIC_DEF_MISSING; }
+    if (key == 0 || agnostic_store_db() == 0) { return AGNOSTIC_DEF_MISSING; }
     if (_agnostic_def_row_exists(key) == 0) { return AGNOSTIC_DEF_MISSING; }
 
-    var st = patra_prepare(_agnostic_db, "DELETE FROM agnostic_definitions WHERE dkey = ?");
+    var st = patra_prepare(agnostic_store_db(), "DELETE FROM agnostic_definitions WHERE dkey = ?");
     if (st == 0) { return AGNOSTIC_DEF_MISSING; }
     patra_bind_text(st, 0, str_data(key), str_len(key));
-    var rc = patra_exec_prepared(_agnostic_db, st);
+    var rc = patra_exec_prepared(agnostic_store_db(), st);
     patra_finalize(st);
     if (rc != PATRA_OK) { return AGNOSTIC_DEF_MISSING; }
 
@@ -318,8 +290,8 @@ fn agnostic_definitions_remove(key: Str): i64 {
 # A snapshot of every key, as a vec of Str. Answered by patra.
 fn agnostic_definitions_keys(): i64 {
     var out = vec_new();
-    if (_agnostic_db == 0) { return out; }
-    var rs = patra_query(_agnostic_db, "SELECT dkey FROM agnostic_definitions");
+    if (agnostic_store_db() == 0) { return out; }
+    var rs = patra_query(agnostic_store_db(), "SELECT dkey FROM agnostic_definitions");
     if (rs == 0) { return out; }
     var n = patra_result_count(rs);
     var i = 0;

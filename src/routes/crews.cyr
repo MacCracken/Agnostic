@@ -189,7 +189,19 @@ fn agnostic_route_crew_get_a(a, id: Str): i64 {
     if (key == 0) { return _agnostic_crew_bad_id_a(a); }
 
     var outcome = agnostic_crew_poll_a(a, key);
-    if (outcome == 0) { return _agnostic_crew_not_found_a(a); }
+    if (outcome == 0) {
+        # ⚠ **Not in this process's ledger — but it may be on disk from a
+        # previous run.** Only terminal outcomes are ever persisted, so anything
+        # found here finished; there is no stale "running" to mistake for live
+        # work. The stored bytes go out verbatim, which is the response the run
+        # that produced them would have given.
+        var stored = agnostic_crews_doc_a(a, key);
+        if (stored != 0) {
+            var v = bayan_json_v_parse_buf_a(a, str_data(stored), str_len(stored));
+            if (v != 0) { return agnostic_response_json_a(a, HTTP_OK, v); }
+        }
+        return _agnostic_crew_not_found_a(a);
+    }
 
     var body = agnostic_outcome_to_value_a(a, outcome);
     if (body == 0) { return 0; }

@@ -4,15 +4,9 @@
 # returned a sentinel the caller read as success, so the aggregator overwrote it
 # with `completed`. The latch is the structural answer — there is no code path
 # that moves a terminal status — and this suite is what holds that true.
-include "src/strcase.cyr"
-include "src/config.cyr"
-include "src/trace.cyr"
-include "src/log.cyr"
-include "src/http/status.cyr"
-include "src/http/response.cyr"
-include "src/http/codec.cyr"
-include "src/engine/outcome.cyr"
-include "src/engine/ledger.cyr"
+# The whole program — the latch now persists terminal outcomes, so the ledger
+# reaches the store. See src/app.cyr for why this is one include.
+include "src/app.cyr"
 
 # A distinct, well-formed-looking crew id per index.
 fn _t_id(n): i64 {

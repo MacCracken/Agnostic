@@ -1,0 +1,145 @@
+# agnostic/engine/crewstore — terminal crew outcomes, and only terminal ones.
+#
+# The design claim this suite holds: a crew that was running when the process
+# died is GONE, not resumable, so persisting non-terminal state would load a
+# crew on the next start that claims to be running and never will be. Writing
+# only terminal outcomes removes that rather than guarding it.
+include "src/app.cyr"
+
+var _T_CREWDB = "/tmp/agnostic-crewstore-suite.patra";
+
+fn _t_open() {
+    agnostic_store_close();
+    sys_unlink(_T_CREWDB);
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    agnostic_store_open(str_from(_T_CREWDB));
+    agnostic_crews_ensure();
+    return 0;
+}
+
+fn test_terminal_outcomes_persist() {
+    test_group("crewstore/save");
+
+    _t_open();
+    assert_eq(agnostic_crews_count(), 0, "starts empty");
+
+    var id = str_from("11111111-1111-1111-1111-111111111111");
+    var doc = str_from("{\"crew_id\":\"11111111-1111-1111-1111-111111111111\",\"status\":\"completed\"}");
+    assert_eq(agnostic_crews_save(id, str_from("sweep"), AGNOSTIC_CREW_COMPLETED, doc), 1,
+      "a completed crew is stored");
+    assert_eq(agnostic_crews_count(), 1, "and counted");
+
+    var a = arena_allocator(65536);
+    var back = agnostic_crews_doc_a(a, id);
+    assert_neq(back, 0, "and reads back");
+    assert_eq(str_eq(back, doc), 1, "byte for byte — the document is served verbatim");
+
+    assert_eq(agnostic_crews_doc_a(a, str_from("22222222-2222-2222-2222-222222222222")), 0,
+      "an unstored id reads as 0");
+}
+
+fn test_non_terminal_is_refused() {
+    test_group("crewstore/terminal-only");
+
+    _t_open();
+    var doc = str_from("{\"status\":\"running\"}");
+
+    # ⭐ THE DESIGN, IN THREE ASSERTIONS.
+    #
+    # A PENDING or RUNNING crew belongs to a thread that dies with the process.
+    # Storing one would mean the next start loads a crew that claims to be
+    # running and never will be — and the ledger's terminal latch could never
+    # correct it, because the wrong value would be latched first.
+    assert_eq(agnostic_crews_save(str_from("p"), str_from("n"), AGNOSTIC_CREW_PENDING, doc), 0,
+      "a PENDING crew is refused");
+    assert_eq(agnostic_crews_save(str_from("r"), str_from("n"), AGNOSTIC_CREW_RUNNING, doc), 0,
+      "a RUNNING crew is refused");
+    assert_eq(agnostic_crews_save(str_from("u"), str_from("n"), AGNOSTIC_CREW_UNKNOWN, doc), 0,
+      "and so is UNKNOWN, which is not terminal either");
+    assert_eq(agnostic_crews_count(), 0, "nothing was written");
+
+    # All three terminal states are accepted.
+    assert_eq(agnostic_crews_save(str_from("c"), str_from("n"), AGNOSTIC_CREW_COMPLETED, doc), 1,
+      "COMPLETED is stored");
+    assert_eq(agnostic_crews_save(str_from("f"), str_from("n"), AGNOSTIC_CREW_FAILED, doc), 1,
+      "FAILED is stored");
+    assert_eq(agnostic_crews_save(str_from("x"), str_from("n"), AGNOSTIC_CREW_CANCELLED, doc), 1,
+      "CANCELLED is stored");
+    assert_eq(agnostic_crews_count(), 3, "three terminal outcomes");
+}
+
+fn test_a_row_is_written_once() {
+    test_group("crewstore/write-once");
+
+    _t_open();
+    var id = str_from("33333333-3333-3333-3333-333333333333");
+    var first = str_from("{\"status\":\"completed\"}");
+    var second = str_from("{\"status\":\"failed\"}");
+
+    assert_eq(agnostic_crews_save(id, str_from("n"), AGNOSTIC_CREW_COMPLETED, first), 1, "first write lands");
+
+    # ⚠ The second answer does NOT win. A crew reaching a terminal state twice
+    # is not something the ledger's latch permits, and letting a later write
+    # overwrite an earlier terminal outcome is the ordering ORACLE-AUDIT §3.4 got
+    # wrong — there, a sentinel overwrote a real `failed` with `completed`.
+    assert_eq(agnostic_crews_save(id, str_from("n"), AGNOSTIC_CREW_FAILED, second), 0,
+      "a second write is refused");
+
+    var a = arena_allocator(65536);
+    assert_eq(str_eq(agnostic_crews_doc_a(a, id), first), 1, "and the first outcome still stands");
+    assert_eq(agnostic_crews_count(), 1, "with one row");
+}
+
+fn test_outcomes_survive_a_reopen() {
+    test_group("crewstore/durable");
+
+    _t_open();
+    var id = str_from("44444444-4444-4444-4444-444444444444");
+    var doc = str_from("{\"crew_id\":\"44444444-4444-4444-4444-444444444444\",\"status\":\"completed\",\"task_count\":2}");
+    agnostic_crews_save(id, str_from("persisted"), AGNOSTIC_CREW_COMPLETED, doc);
+
+    # ⭐ Close and reopen — a different handle, nothing carried in memory.
+    agnostic_store_close();
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    assert_eq(agnostic_store_open(str_from(_T_CREWDB)), 1, "reopened");
+    assert_eq(agnostic_crews_ensure(), 1, "the schema is already there and that is fine");
+
+    var a = arena_allocator(65536);
+    assert_eq(str_eq(agnostic_crews_doc_a(a, id), doc), 1, "the outcome came off disk intact");
+    assert_eq(agnostic_crews_count(), 1, "and is counted");
+}
+
+fn test_no_database_is_not_a_silent_success() {
+    test_group("crewstore/no-db");
+
+    agnostic_store_close();
+    var a = arena_allocator(65536);
+
+    # ⚠ With no store open, a write must report failure rather than pretend.
+    # The caller's contract is that a 0 means "not durable", and the outcome
+    # 404s after a restart — which is true, rather than wrong.
+    assert_eq(agnostic_crews_save(str_from("z"), str_from("n"), AGNOSTIC_CREW_COMPLETED,
+        str_from("{}")), 0, "saving without a database reports failure");
+    assert_eq(agnostic_crews_doc_a(a, str_from("z")), 0, "and nothing reads back");
+    assert_eq(agnostic_crews_count(), 0, "and the count is 0, not a fault");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_terminal_outcomes_persist();
+    test_non_terminal_is_refused();
+    test_a_row_is_written_once();
+    test_outcomes_survive_a_reopen();
+    test_no_database_is_not_a_silent_success();
+    agnostic_store_close();
+    return assert_summary();
+}
+
+var _agnostic_crewstore_test_exit = main();
+if (_agnostic_crewstore_test_exit > 0) { _agnostic_crewstore_test_exit = 1; }
+sys_exit_group(_agnostic_crewstore_test_exit);

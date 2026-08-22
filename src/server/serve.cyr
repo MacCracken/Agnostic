@@ -273,6 +273,10 @@ fn agnostic_serve_mount(cfg): i64 {
           "path", 4, db_path);
         return 0;
     }
+    if (agnostic_crews_ensure() == 0) {
+        sakshi_error("could not create the crew table; refusing to start", 50);
+        return 0;
+    }
     agnostic_log_kv_str(SK_INFO, "database open", 13, "path", 4, db_path);
 
     # ⚠ Also fatal. A trail that silently stops recording is worse than a
