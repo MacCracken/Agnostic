@@ -187,6 +187,32 @@ if [ -n "$collisions" ]; then
     fail=1
 fi
 
+# --- Rule 4: no lib/ <-> lib/ constant is defined twice with different values ---
+# Rules 1-3 all take src/ as one side of the comparison. None of them can see a
+# collision BETWEEN TWO DEPENDENCIES, and neither can the compiler: cycc warns on a
+# duplicate `fn` and is SILENT for `var` and for enum members.
+#
+# That blind spot is not hypothetical. kavach's `var BACKEND_COUNT = 10` and
+# ai-hwaccel's `= 18` both reached this binary through agnosai; the 18 won, admitting
+# ids 0-17 into a 10-slot function-pointer table and calling whatever sat 224 bytes
+# past its end. It was found by hand and fixed upstream in kavach 3.11.15 /
+# ai-hwaccel 2.3.18 (agnosai CHANGELOG 2.0.4) — nothing in any repo reported it.
+#
+# lib/ here is ~1.6 MB of vendored dependency, most of it arriving TRANSITIVELY
+# through agnosai (kavach, ai-hwaccel, libro, bote-core, majra, tyche), so this repo
+# carries the exposure without declaring most of the deps that create it.
+#
+# The check resolves the REAL compile set from cyrius.cyml — [deps].stdlib, each
+# dist's .deps sidecar, and every dep dist lib/ carries — and excludes the
+# per-platform stdlib variants, which define the same names on purpose and never
+# co-compile. Verified against the historical defect: with kavach 3.11.14 and
+# ai-hwaccel 2.3.17 restored it reports BACKEND_COUNT 18-vs-10 and fails.
+#
+# Known, filed, unreachable divergences live in scripts/lib-symbol-allow.txt.
+if ! python3 scripts/check-lib-symbols.py; then
+    fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
     n=$(find src -name '*.cyr' -exec grep -hcE '^(fn|var|enum) ' {} + | awk '{s+=$1} END {print s}')
     echo "symbol check OK — $n top-level definitions across $(find src -name "*.cyr" | wc -l) files, no duplicates, all prefixed"

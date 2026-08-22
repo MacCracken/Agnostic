@@ -1,0 +1,442 @@
+# agnostic/auth/store — users and API keys, durable, on the shared patra handle.
+#
+# ## ⚠ The lookup key is a BUCKET, not an identity
+#
+# patra allows exactly one index per table and `tbl_create` auto-indexes column 0
+# when its type is `COL_INT` (`lib/patra.cyr:3438`). So both tables put a
+# 63-bit truncated SHA-256 in column 0 and get their index for free: this module
+# issues **zero `CREATE INDEX`** statements, and `uid` serves both "find by id"
+# and "find by email" without a second table or a scan.
+#
+# The cost is that a hit is a *candidate*, not an answer. patra re-checks its own
+# STR index hits; it gives no such re-check for an app-computed INT key, because
+# its INT equality is exact on the truncated value stored. **A 64-bit collision
+# accepted without a full compare is an authentication bypass.** Every lookup
+# below therefore re-verifies the full value before returning, and the API-key
+# path does it in constant time. Do not "optimise" those compares away.
+#
+# ## ⚠ A STR column is 256 fixed bytes, so an over-long value TRUNCATES
+#
+# `COL_STR_SZ = 256` (`lib/patra.cyr:29`) and `_row_write_str` memsets then
+# copies — a longer value is silently cut. For an email that is not a storage
+# wart, it is a **collision primitive**: two addresses sharing their first 255
+# bytes would become one row, and whichever registered first would own the
+# other's login. Length is refused at the door instead, in
+# `agnostic_users_create_a`, rather than discovered later.
+#
+# ## What is stored, and what is not
+#
+# - Passwords: only `agnostic_password_hash_a`'s record, parameters included.
+# - API keys: only the SHA-256 hex. The raw key is returned **once**, at mint,
+#   and never written — a stolen table yields nothing usable.
+# - Emails: folded to lower case once, by `agnostic_str_lower_a`, and the folded
+#   bytes are what both the bucket and the row hold. Deriving the bucket from
+#   unfolded text would let `A@b.com` and `a@b.com` register twice.
+
+# Roles, lowest privilege first. The role→permission mapping is deliberately not
+# here — this module stores an identity, it does not decide what one may do.
+enum AgnosticRole {
+    AGNOSTIC_ROLE_VIEWER      = 0;
+    AGNOSTIC_ROLE_OPERATOR    = 1;
+    AGNOSTIC_ROLE_ADMIN       = 2;
+    AGNOSTIC_ROLE_SUPER_ADMIN = 3;
+}
+
+# The longest email this accepts: `COL_STR_SZ` minus the NUL.
+var AGNOSTIC_EMAIL_MAX = 255;
+
+var AGNOSTIC_USERS_TABLE_SQL =
+"CREATE TABLE agnostic_users (uid INT, email STR, pwhash TEXT, urole INT, tenant STR, created INT)";
+
+var AGNOSTIC_APIKEYS_TABLE_SQL =
+"CREATE TABLE agnostic_apikeys (kid INT, khash STR, kuid INT, label STR, created INT)";
+
+# Ensure both tables. Mount time only. Returns 1 when the schema is in place.
+#
+# ⚠ No `CREATE INDEX` — see the module header. Adding one would be a second
+# index on the same table, which patra cannot hold.
+fn agnostic_auth_ensure(): i64 {
+    if (agnostic_store_ensure(AGNOSTIC_USERS_TABLE_SQL) == 0) { return 0; }
+    if (agnostic_store_ensure(AGNOSTIC_APIKEYS_TABLE_SQL) == 0) { return 0; }
+    return 1;
+}
+
+# Whether `role` is one this build knows.
+#
+# ⚠ An unknown role must never be stored. A row carrying 7 would be read back by
+# the permission table as "not admin, not operator, not viewer" — which fails
+# closed today and is one careless `>=` away from failing open.
+fn agnostic_role_is_valid(role): i64 {
+    if (role < AGNOSTIC_ROLE_VIEWER) { return 0; }
+    if (role > AGNOSTIC_ROLE_SUPER_ADMIN) { return 0; }
+    return 1;
+}
+
+# The role's stable lowercase name, or "unknown".
+fn agnostic_role_name(role): i64 {
+    if (role == AGNOSTIC_ROLE_VIEWER) { return "viewer"; }
+    if (role == AGNOSTIC_ROLE_OPERATOR) { return "operator"; }
+    if (role == AGNOSTIC_ROLE_ADMIN) { return "admin"; }
+    if (role == AGNOSTIC_ROLE_SUPER_ADMIN) { return "super_admin"; }
+    return "unknown";
+}
+
+# Parse a role name. Returns the role, or -1 when the name is not one of ours.
+#
+# ⚠ Returns -1 rather than defaulting to VIEWER. A typo in an operator's
+# provisioning script should be refused, not silently granted the lowest role —
+# the caller then reports the bad name instead of creating a user nobody asked
+# for.
+fn agnostic_role_parse(name: Str): i64 {
+    if (name == 0) { return 0 - 1; }
+    if (agnostic_str_eq_cstr_ci(name, "viewer") == 1) { return AGNOSTIC_ROLE_VIEWER; }
+    if (agnostic_str_eq_cstr_ci(name, "operator") == 1) { return AGNOSTIC_ROLE_OPERATOR; }
+    if (agnostic_str_eq_cstr_ci(name, "admin") == 1) { return AGNOSTIC_ROLE_ADMIN; }
+    if (agnostic_str_eq_cstr_ci(name, "super_admin") == 1) { return AGNOSTIC_ROLE_SUPER_ADMIN; }
+    return 0 - 1;
+}
+
+# Copy a STR column out of a result row into arena `a`. 0 when absent or empty.
+#
+# ⚠ The pointer `patra_result_get_str` returns points **into the result set**,
+# which `patra_result_free` releases. Copy before freeing, always.
+fn _agnostic_auth_str_a(a, rs, row, col): i64 {
+    var n = patra_result_get_str_len(rs, row, col);
+    if (n <= 0) { return 0; }
+    return str_new_a(a, patra_result_get_str(rs, row, col), n);
+}
+
+# Copy a TEXT column out of a result row into arena `a`. 0 when absent or empty.
+fn _agnostic_auth_text_a(a, db, rs, row, col): i64 {
+    var n = patra_result_get_text_len(rs, row, col);
+    if (n <= 0) { return 0; }
+    var buf = alloc_via(a, n);
+    if (buf == 0) { return 0; }
+    if (patra_result_read_text(db, rs, row, col, buf) != PATRA_OK) { return 0; }
+    return str_new_a(a, buf, n);
+}
+
+# The `uid` for an email — the bucket key, derived from the FOLDED address.
+#
+# Returns 0 when the arena is exhausted. 0 is not a legal uid for that reason.
+fn agnostic_users_uid_a(a, email: Str): i64 {
+    if (email == 0) { return 0; }
+    var lower = agnostic_str_lower_a(a, email);
+    if (lower == 0) { return 0; }
+    var uid = agnostic_key64(lower);
+    if (uid == 0) { return 1; }
+    return uid;
+}
+
+# Create a user. Returns the new `uid`, or 0.
+#
+# Refuses, rather than corrupting: an email longer than `AGNOSTIC_EMAIL_MAX`
+# (which a STR column would truncate into somebody else's row), an unknown role,
+# an address that already exists, and a password the hasher would not take.
+#
+# ⚠ **A shed hash is not a failure of this function's contract but it looks like
+# one.** `agnostic_password_hash_a` answers 0 both when the Argon2 pool is full
+# and when the CSPRNG failed; the caller distinguishes them with
+# `agnostic_argon_shed_count` and answers 429 or 500 accordingly.
+fn agnostic_users_create_a(a, email: Str, password: Str, role, tenant: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || email == 0 || password == 0) { return 0; }
+    if (str_len(email) == 0 || str_len(email) > AGNOSTIC_EMAIL_MAX) { return 0; }
+    if (agnostic_role_is_valid(role) == 0) { return 0; }
+
+    var lower = agnostic_str_lower_a(a, email);
+    if (lower == 0) { return 0; }
+    if (agnostic_users_find_a(a, lower) != 0) { return 0; }
+
+    var uid = agnostic_users_uid_a(a, lower);
+    if (uid == 0) { return 0; }
+
+    var rec = agnostic_password_hash_a(a, password);
+    if (rec == 0) { return 0; }
+
+    var tn = tenant;
+    if (tn == 0) { tn = str_from(""); }
+    if (str_len(tn) > AGNOSTIC_EMAIL_MAX) { return 0; }
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_users (uid, email, pwhash, urole, tenant, created) VALUES (?, ?, ?, ?, ?, ?)");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, uid);
+    patra_bind_text(st, 1, str_data(lower), str_len(lower));
+    patra_bind_text(st, 2, str_data(rec), str_len(rec));
+    patra_bind_int(st, 3, role);
+    patra_bind_text(st, 4, str_data(tn), str_len(tn));
+    patra_bind_int(st, 5, clock_epoch_secs());
+    var rc = patra_exec_prepared(db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return 0; }
+    return uid;
+}
+
+# The `uid` of the user with this email, or 0 when there is none.
+#
+# ⚠ **The full-address re-check is the security boundary, not a nicety.** The
+# `WHERE uid = ?` hit only says "some row shares this 63-bit bucket". Returning
+# it unchecked would let anyone who found a colliding address log in as the
+# holder of this one.
+fn agnostic_users_find_a(a, email: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || email == 0) { return 0; }
+    var lower = agnostic_str_lower_a(a, email);
+    if (lower == 0) { return 0; }
+    var uid = agnostic_users_uid_a(a, lower);
+    if (uid == 0) { return 0; }
+
+    var st = patra_prepare(db, "SELECT uid, email FROM agnostic_users WHERE uid = ?");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, uid);
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+
+    var n = patra_result_count(rs);
+    var i = 0;
+    var found = 0;
+    while (i < n) {
+        var got = _agnostic_auth_str_a(a, rs, i, 1);
+        if (got != 0) {
+            if (ct_eq_bytes_lens(str_data(got), str_len(got),
+                str_data(lower), str_len(lower)) == 1) {
+                found = patra_result_get_int(rs, i, 0);
+                i = n;
+            }
+        }
+        i = i + 1;
+    }
+    patra_result_free(rs);
+    return found;
+}
+
+# Read one column of a user row by uid, as a STR/TEXT copy in `a`, or 0.
+fn _agnostic_users_col_a(a, uid, sql, is_text): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || uid == 0) { return 0; }
+    var st = patra_prepare(db, sql);
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, uid);
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+    if (patra_result_count(rs) == 0) { patra_result_free(rs); return 0; }
+    var out = 0;
+    if (is_text == 1) { out = _agnostic_auth_text_a(a, db, rs, 0, 0); }
+    else { out = _agnostic_auth_str_a(a, rs, 0, 0); }
+    patra_result_free(rs);
+    return out;
+}
+
+# The stored email for a uid, or 0.
+fn agnostic_users_email_a(a, uid): i64 {
+    return _agnostic_users_col_a(a, uid,
+      "SELECT email FROM agnostic_users WHERE uid = ?", 0);
+}
+
+# The tenant a uid belongs to, or 0 when unset or unknown.
+fn agnostic_users_tenant_a(a, uid): i64 {
+    return _agnostic_users_col_a(a, uid,
+      "SELECT tenant FROM agnostic_users WHERE uid = ?", 0);
+}
+
+# The role for a uid, or -1 when there is no such user.
+#
+# ⚠ -1, not VIEWER. A missing user must not read as a low-privilege one — the
+# caller has to handle "no such identity" distinctly or it will authorise a
+# deleted account.
+fn agnostic_users_role(uid): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || uid == 0) { return 0 - 1; }
+    var st = patra_prepare(db, "SELECT urole FROM agnostic_users WHERE uid = ?");
+    if (st == 0) { return 0 - 1; }
+    patra_bind_int(st, 0, uid);
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0 - 1; }
+    if (patra_result_count(rs) == 0) { patra_result_free(rs); return 0 - 1; }
+    var role = patra_result_get_int(rs, 0, 0);
+    patra_result_free(rs);
+    if (agnostic_role_is_valid(role) == 0) { return 0 - 1; }
+    return role;
+}
+
+# Verify a password. Returns the `uid` on success, 0 on any failure.
+#
+# `out_shed`, when non-zero, receives 1 if the attempt was refused for want of an
+# Argon2 buffer rather than because the credential was wrong — the caller answers
+# **429** in that case, not 401, and must not count it as a failed login.
+#
+# ⚠ **A missing user still costs an Argon2.** Returning early on an unknown
+# address turns login into a user-enumeration oracle: absent accounts would answer
+# in microseconds and present ones in ~244 ms. The unknown-user path verifies the
+# supplied password against a fixed decoy record so both take the same work.
+fn agnostic_users_verify_a(a, email: Str, password: Str, out_shed): i64 {
+    if (out_shed != 0) { store64(out_shed, 0); }
+    var db = agnostic_store_db();
+    if (db == 0 || email == 0 || password == 0) { return 0; }
+
+    var uid = agnostic_users_find_a(a, email);
+    var stored = 0;
+    if (uid != 0) {
+        stored = _agnostic_users_col_a(a, uid,
+          "SELECT pwhash FROM agnostic_users WHERE uid = ?", 1);
+    }
+    if (stored == 0) {
+        # Decoy: a well-formed record for a password nothing will match. The
+        # shed signal still propagates, so a full pool answers 429 for unknown
+        # and known addresses alike — otherwise the 429/401 split leaks
+        # existence just as the timing would.
+        var decoy = agnostic_auth_decoy_record_a(a);
+        if (decoy == 0) { return 0; }
+        agnostic_password_verify_a(a, password, decoy, out_shed);
+        return 0;
+    }
+
+    var ok = agnostic_password_verify_a(a, password, stored, out_shed);
+    if (ok != 1) { return 0; }
+    return uid;
+}
+
+# A syntactically valid password record that no password verifies against.
+#
+# Built once per call in `a` rather than held in a global: the verify path reads
+# it on pool workers, and a shared mutable record would be one more thing to
+# lock for no benefit. The salt is fixed — it is not protecting anything, it only
+# has to make the hasher do its work.
+fn agnostic_auth_decoy_record_a(a): i64 {
+    return str_from_a(a,
+      "v1$2$19456$1$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000");
+}
+
+# How many users are stored.
+fn agnostic_users_count(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    var rs = patra_query(db, "SELECT uid FROM agnostic_users");
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+# Drop every user. For tests.
+fn agnostic_users_reset(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    patra_exec(db, "DELETE FROM agnostic_users");
+    return 0;
+}
+
+# --- API keys -------------------------------------------------------------
+
+# Mint an API key for `uid`. Returns the raw key as hex, in `a`, or 0.
+#
+# ⚠ **The return value is the only time the key exists.** Only its SHA-256 hex
+# reaches the table. A caller that discards this Str has to mint another; there
+# is no recovery path, by design.
+fn agnostic_apikey_issue_a(a, uid, label: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || uid == 0) { return 0; }
+    if (agnostic_users_role(uid) < 0) { return 0; }
+
+    var raw = agnostic_apikey_generate_a(a);
+    if (raw == 0) { return 0; }
+    var digest = agnostic_sha256_hex_a(a, raw);
+    if (digest == 0) { return 0; }
+
+    var kid = agnostic_key64(raw);
+    if (kid == 0) { kid = 1; }
+
+    var lb = label;
+    if (lb == 0) { lb = str_from(""); }
+    if (str_len(lb) > AGNOSTIC_EMAIL_MAX) { return 0; }
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_apikeys (kid, khash, kuid, label, created) VALUES (?, ?, ?, ?, ?)");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, kid);
+    patra_bind_text(st, 1, str_data(digest), str_len(digest));
+    patra_bind_int(st, 2, uid);
+    patra_bind_text(st, 3, str_data(lb), str_len(lb));
+    patra_bind_int(st, 4, clock_epoch_secs());
+    var rc = patra_exec_prepared(db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return 0; }
+    return raw;
+}
+
+# The `uid` an API key authenticates, or 0.
+#
+# ⚠ **Constant-time on the full digest, over every bucket candidate.** The `kid`
+# hit narrows to a bucket; the digest compare is what decides. It runs for every
+# candidate row without early exit on the first mismatch, so neither the number
+# of candidates nor the position of the difference is observable.
+fn agnostic_apikey_resolve_a(a, presented: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || presented == 0) { return 0; }
+    if (str_len(presented) == 0) { return 0; }
+
+    var kid = agnostic_key64(presented);
+    if (kid == 0) { kid = 1; }
+
+    var st = patra_prepare(db, "SELECT kid, khash, kuid FROM agnostic_apikeys WHERE kid = ?");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, kid);
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+
+    var n = patra_result_count(rs);
+    var i = 0;
+    var found = 0;
+    while (i < n) {
+        var stored = _agnostic_auth_str_a(a, rs, i, 1);
+        if (stored != 0) {
+            if (agnostic_apikey_matches_a(a, presented, stored) == 1) {
+                found = patra_result_get_int(rs, i, 2);
+            }
+        }
+        i = i + 1;
+    }
+    patra_result_free(rs);
+    return found;
+}
+
+# Revoke every key whose digest matches `presented`. Returns how many went.
+fn agnostic_apikey_revoke_a(a, presented: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || presented == 0) { return 0; }
+    if (agnostic_apikey_resolve_a(a, presented) == 0) { return 0; }
+    var digest = agnostic_sha256_hex_a(a, presented);
+    if (digest == 0) { return 0; }
+
+    var st = patra_prepare(db, "DELETE FROM agnostic_apikeys WHERE khash = ?");
+    if (st == 0) { return 0; }
+    patra_bind_text(st, 0, str_data(digest), str_len(digest));
+    var rc = patra_exec_prepared(db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return 0; }
+    return 1;
+}
+
+# How many API keys are stored.
+fn agnostic_apikeys_count(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    var rs = patra_query(db, "SELECT kid FROM agnostic_apikeys");
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+# Drop every API key. For tests.
+fn agnostic_apikeys_reset(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    patra_exec(db, "DELETE FROM agnostic_apikeys");
+    return 0;
+}

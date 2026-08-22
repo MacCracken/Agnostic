@@ -1,0 +1,256 @@
+# agnostic/auth/jwt — HS256 bearer tokens.
+#
+# The design claim this suite holds: verification NEVER reads the token's own
+# `alg` header. It recomputes HS256 and compares, so the whole `alg` family —
+# `none`, an algorithm swap, a stripped signature — dies at the MAC compare
+# rather than at a validation branch that could be forgotten.
+include "src/app.cyr"
+
+fn _t_jwt_secret() {
+    var k = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(k + i, 64 + i); i = i + 1; }
+    agnostic_jwt_set_secret(k, 32);
+    return 0;
+}
+
+fn test_b64u_roundtrip() {
+    test_group("jwt/base64url");
+
+    var a = arena_allocator(65536);
+
+    # Every remainder class: 3|n, 3|n-1, 3|n-2.
+    var n = 1;
+    while (n <= 12) {
+        var buf = alloc_via(a, n);
+        var i = 0;
+        while (i < n) { store8(buf + i, (i * 37 + 11) & 255); i = i + 1; }
+
+        var enc = agnostic_b64u_encode_a(a, buf, n);
+        assert_neq(enc, 0, "encodes");
+
+        # ⭐ Cross-checked against bayan's independent encoder. A round-trip
+        # against my own decoder would pass even if both halves shared a bug.
+        assert_eq(str_eq_cstr(enc, base64url_encode(buf, n)), 1,
+          "byte-identical to bayan's encoder");
+
+        var outlen = alloc_via(a, 8);
+        var dec = agnostic_b64u_decode_a(a, str_data(enc), str_len(enc), outlen);
+        assert_neq(dec, 0, "decodes");
+        assert_eq(load64(outlen), n, "to the original length");
+        assert_eq(ct_eq_bytes(dec, buf, n), 1, "and the original bytes");
+        n = n + 1;
+    }
+
+    # ⚠ A 4k+1 remainder decodes to nothing but is not empty. Accepting it would
+    # let two distinct segments carry one payload.
+    assert_eq(agnostic_b64u_declen(5), 0 - 1, "a remainder of 1 char is impossible");
+    assert_eq(agnostic_b64u_decode_a(a, str_data(str_from("AAAAA")), 5, 0), 0,
+      "and is refused rather than truncated");
+    assert_eq(agnostic_b64u_decode_a(a, str_data(str_from("AA*A")), 4, 0), 0,
+      "a non-alphabet character is refused");
+}
+
+fn test_issue_and_verify() {
+    test_group("jwt/roundtrip");
+
+    _t_jwt_secret();
+    var a = arena_allocator(262144);
+
+    var tok = agnostic_jwt_issue_a(a, 4242, AGNOSTIC_ROLE_OPERATOR, str_from("acme"), 60);
+    assert_neq(tok, 0, "a token is issued");
+
+    var v = agnostic_jwt_verify_a(a, tok);
+    assert_neq(v, 0, "and verifies");
+    assert_eq(agnostic_jwt_claim_uid(v), 4242, "the uid survives the round trip");
+    assert_eq(agnostic_jwt_claim_role(v), AGNOSTIC_ROLE_OPERATOR, "so does the role");
+    assert_eq(str_eq_cstr(agnostic_jwt_claim_tenant(v), "acme"), 1, "and the tenant");
+
+    assert_eq(agnostic_jwt_issue_a(a, 0, AGNOSTIC_ROLE_VIEWER, 0, 60), 0,
+      "uid 0 is not issuable");
+    assert_eq(agnostic_jwt_issue_a(a, 1, 9, 0, 60), 0, "nor is an unknown role");
+    assert_eq(agnostic_jwt_issue_a(a, 1, AGNOSTIC_ROLE_VIEWER, 0, 0), 0,
+      "nor a zero TTL");
+}
+
+# Rebuild a token from a caller-supplied header, keeping the issued payload, and
+# signing with whatever `sign` says. Returns the compact form.
+fn _t_forge(a, hdr_json, payload_b64, sign_it) {
+    var hb = agnostic_b64u_encode_a(a, hdr_json, strlen(hdr_json));
+    var si_len = str_len(hb) + 1 + str_len(payload_b64);
+    var si = alloc_via(a, si_len);
+    memcpy(si, str_data(hb), str_len(hb));
+    store8(si + str_len(hb), 46);
+    memcpy(si + str_len(hb) + 1, str_data(payload_b64), str_len(payload_b64));
+
+    var sig = str_from("");
+    if (sign_it == 1) {
+        var mac = alloc_via(a, 32);
+        var k = alloc_via(a, 32);
+        var i = 0;
+        while (i < 32) { store8(k + i, 1); i = i + 1; }
+        hmac_sha256(k, 32, si, si_len, mac);
+        sig = agnostic_b64u_encode_a(a, mac, 32);
+    }
+
+    var tl = si_len + 1 + str_len(sig);
+    var t = alloc_via(a, tl);
+    memcpy(t, si, si_len);
+    store8(t + si_len, 46);
+    if (str_len(sig) > 0) { memcpy(t + si_len + 1, str_data(sig), str_len(sig)); }
+    return str_new_a(a, t, tl);
+}
+
+# The payload segment of a token — everything between the two dots.
+fn _t_payload_seg(a, tok) {
+    var p = str_data(tok);
+    var n = str_len(tok);
+    var d1 = _agnostic_jwt_find(p, n, 46, 0);
+    var d2 = _agnostic_jwt_find(p, n, 46, d1 + 1);
+    return str_new_a(a, p + d1 + 1, d2 - d1 - 1);
+}
+
+fn test_alg_attacks() {
+    test_group("jwt/alg-family");
+
+    _t_jwt_secret();
+    var a = arena_allocator(262144);
+    var good = agnostic_jwt_issue_a(a, 7, AGNOSTIC_ROLE_ADMIN, str_from("t"), 60);
+    assert_neq(agnostic_jwt_verify_a(a, good), 0, "the genuine token verifies");
+    var payload = _t_payload_seg(a, good);
+
+    # ⭐ alg=none with the signature stripped — the canonical JWT forgery.
+    var none_tok = _t_forge(a, "{\"alg\":\"none\",\"typ\":\"JWT\"}", payload, 0);
+    assert_eq(agnostic_jwt_verify_a(a, none_tok), 0,
+      "alg=none with an empty signature is REFUSED");
+
+    # ⭐ alg=none carrying a plausible-looking signature.
+    var none_sig = _t_forge(a, "{\"alg\":\"none\",\"typ\":\"JWT\"}", payload, 1);
+    assert_eq(agnostic_jwt_verify_a(a, none_sig), 0,
+      "alg=none signed with the WRONG key is refused — the header is never consulted");
+
+    # ⭐ An algorithm swap. We do not branch on `alg`, so this is just a token
+    # whose MAC does not match.
+    var rs = _t_forge(a, "{\"alg\":\"RS256\",\"typ\":\"JWT\"}", payload, 1);
+    assert_eq(agnostic_jwt_verify_a(a, rs), 0, "an RS256 header buys nothing");
+
+    # The same claims under our own header but the attacker's key.
+    var wrongkey = _t_forge(a, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload, 1);
+    assert_eq(agnostic_jwt_verify_a(a, wrongkey), 0, "a token signed with another key is refused");
+}
+
+fn test_tampering_and_shape() {
+    test_group("jwt/tampering");
+
+    _t_jwt_secret();
+    var a = arena_allocator(262144);
+    var tok = agnostic_jwt_issue_a(a, 9, AGNOSTIC_ROLE_VIEWER, 0, 60);
+    var n = str_len(tok);
+
+    # Flip one byte of the payload segment.
+    var buf = alloc_via(a, n);
+    memcpy(buf, str_data(tok), n);
+    var d1 = _agnostic_jwt_find(buf, n, 46, 0);
+    store8(buf + d1 + 2, (load8(buf + d1 + 2) & 255) ^ 1);
+    assert_eq(agnostic_jwt_verify_a(a, str_new_a(a, buf, n)), 0, "a flipped payload byte is caught");
+
+    # Flip one byte of the signature.
+    var buf2 = alloc_via(a, n);
+    memcpy(buf2, str_data(tok), n);
+    store8(buf2 + n - 1, (load8(buf2 + n - 1) & 255) ^ 1);
+    assert_eq(agnostic_jwt_verify_a(a, str_new_a(a, buf2, n)), 0, "a flipped signature byte is caught");
+
+    # Truncated signature — a length the constant-time compare must reject.
+    assert_eq(agnostic_jwt_verify_a(a, str_new_a(a, str_data(tok), n - 4)), 0,
+      "a truncated signature is refused");
+
+    assert_eq(agnostic_jwt_verify_a(a, str_from("")), 0, "an empty token is refused");
+    assert_eq(agnostic_jwt_verify_a(a, str_from("abcdef")), 0, "no dots at all");
+    assert_eq(agnostic_jwt_verify_a(a, str_from("a.b")), 0, "one dot is not a JWS");
+    assert_eq(agnostic_jwt_verify_a(a, str_from("a..c")), 0, "an empty payload segment");
+    assert_eq(agnostic_jwt_verify_a(a, str_from("a.b.c.d")), 0,
+      "a fourth segment is refused — this is compact serialisation, not JWE");
+    assert_eq(agnostic_jwt_verify_a(a, 0), 0, "a null token is refused");
+}
+
+fn test_expiry_and_claims_hygiene() {
+    test_group("jwt/expiry");
+
+    _t_jwt_secret();
+    var a = arena_allocator(262144);
+
+    # ⚠ A token with no `exp` must NOT read as "never expires".
+    var hb = agnostic_b64u_encode_a(a, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}", 27);
+    var claims = bayan_json_v_obj_new_a(a);
+    bayan_json_v_obj_set_a(a, claims, str_from("sub"), bayan_json_v_str_new_a(a, str_from("5")));
+    bayan_json_v_obj_set_a(a, claims, str_from("role"), bayan_json_v_int_new_a(a, 0));
+    var pjs = bayan_json_v_build_a(a, claims);
+    var pb = agnostic_b64u_encode_a(a, str_data(pjs), str_len(pjs));
+
+    var si_len = str_len(hb) + 1 + str_len(pb);
+    var si = alloc_via(a, si_len);
+    memcpy(si, str_data(hb), str_len(hb));
+    store8(si + str_len(hb), 46);
+    memcpy(si + str_len(hb) + 1, str_data(pb), str_len(pb));
+    var mac = alloc_via(a, 32);
+    var k = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(k + i, 64 + i); i = i + 1; }
+    hmac_sha256(k, 32, si, si_len, mac);
+    var sb = agnostic_b64u_encode_a(a, mac, 32);
+    var tl = si_len + 1 + str_len(sb);
+    var t = alloc_via(a, tl);
+    memcpy(t, si, si_len);
+    store8(t + si_len, 46);
+    memcpy(t + si_len + 1, str_data(sb), str_len(sb));
+
+    # ⭐ Correctly signed with OUR key, so only the exp rule can reject it.
+    assert_eq(agnostic_jwt_verify_a(a, str_new_a(a, t, tl)), 0,
+      "a validly-signed token with NO exp is refused — absent is not unlimited");
+
+    # An already-expired token, issued through the normal path.
+    var v = agnostic_jwt_issue_a(a, 3, AGNOSTIC_ROLE_VIEWER, 0, 1);
+    assert_neq(v, 0, "a 1s token issues");
+    assert_neq(agnostic_jwt_verify_a(a, v), 0, "and is valid right now");
+
+    assert_eq(agnostic_jwt_claim_role(0), 0 - 1, "no claims object means no role");
+    assert_eq(agnostic_jwt_claim_uid(0), 0, "and no uid");
+}
+
+fn test_secret_hygiene() {
+    test_group("jwt/secret");
+
+    var a = arena_allocator(65536);
+
+    # ⚠ A short key produces perfectly valid tokens that are cheap to brute
+    # force offline — a failure with no symptom until someone forges one.
+    var short = alloc(8);
+    assert_eq(agnostic_jwt_set_secret(short, 8), 0, "a key shorter than 32 bytes is REFUSED");
+    assert_eq(agnostic_jwt_set_secret(0, 32), 0, "and so is a null key");
+
+    _t_jwt_secret();
+    assert_eq(agnostic_jwt_ready(), 1, "a 32-byte key installs");
+    assert_eq(agnostic_jwt_init_random(), 1, "a generated key installs");
+
+    # Rotating the secret invalidates outstanding tokens — the revocation story.
+    var tok = agnostic_jwt_issue_a(a, 11, AGNOSTIC_ROLE_VIEWER, 0, 60);
+    assert_neq(agnostic_jwt_verify_a(a, tok), 0, "valid under the key that signed it");
+    agnostic_jwt_init_random();
+    assert_eq(agnostic_jwt_verify_a(a, tok), 0, "and dead after a rotation");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_b64u_roundtrip();
+    test_issue_and_verify();
+    test_alg_attacks();
+    test_tampering_and_shape();
+    test_expiry_and_claims_hygiene();
+    test_secret_hygiene();
+    return assert_summary();
+}
+
+var _agnostic_jwt_test_exit = main();
+if (_agnostic_jwt_test_exit > 0) { _agnostic_jwt_test_exit = 1; }
+sys_exit_group(_agnostic_jwt_test_exit);

@@ -1,0 +1,232 @@
+# agnostic/auth/tenant — tenants, and the key prefix that separates them.
+#
+# ## ⚠ The separator is only safe because the charset excludes it
+#
+# Scoping is `"<tenant>:<key>"`. That is a **cross-tenant collision primitive**
+# unless the tenant key cannot itself contain the separator: with a free-form
+# charset, tenant `a` holding key `b:c` and tenant `a:b` holding key `c` both
+# produce `a:b:c`, so one tenant reads and overwrites the other's object with no
+# error anywhere.
+#
+# Tenant keys are therefore `[a-z0-9][a-z0-9-]*` — the same restriction
+# `state.md` records for agent keys, and for the same reason: an identifier that
+# cannot contain a separator can never be re-parsed as two. `:` is outside the
+# set, so a scoped key splits at its first colon and only there.
+#
+# Validation runs at **creation and at every scope call**, not only at creation.
+# A key that reached the database before this rule existed, or through a direct
+# SQL path, must not be able to produce an ambiguous scope later.
+#
+# ## Lookup is a bucket, like every other table here
+#
+# `tid` is a 63-bit truncated hash in column 0, auto-indexed by patra. The
+# `WHERE tid = ?` hit is a candidate; the full key compare is what decides. See
+# `src/auth/store.cyr`'s header — the reasoning and the risk are identical.
+
+var AGNOSTIC_TENANT_KEY_MAX = 64;
+
+var AGNOSTIC_TENANTS_TABLE_SQL =
+"CREATE TABLE agnostic_tenants (tid INT, tkey STR, tname STR, created INT)";
+
+# Ensure the tenant table. Mount time only.
+fn agnostic_tenants_ensure(): i64 {
+    return agnostic_store_ensure(AGNOSTIC_TENANTS_TABLE_SQL);
+}
+
+# Whether `k` is a legal tenant key: `[a-z0-9][a-z0-9-]*`, at most
+# `AGNOSTIC_TENANT_KEY_MAX` bytes.
+#
+# ⚠ Lower case only, not case-folded. Folding here would mean `Acme` and `acme`
+# scope to different prefixes unless every caller remembered to fold first —
+# refusing the upper-case form removes the chance to forget.
+fn agnostic_tenant_key_valid(k: Str): i64 {
+    if (k == 0) { return 0; }
+    var n = str_len(k);
+    if (n == 0 || n > AGNOSTIC_TENANT_KEY_MAX) { return 0; }
+    var p = str_data(k);
+    var first = load8(p) & 255;
+    var ok_first = 0;
+    if (first >= 97) { if (first <= 122) { ok_first = 1; } }
+    if (first >= 48) { if (first <= 57) { ok_first = 1; } }
+    if (ok_first == 0) { return 0; }
+
+    var i = 0;
+    while (i < n) {
+        var c = load8(p + i) & 255;
+        var ok = 0;
+        if (c >= 97) { if (c <= 122) { ok = 1; } }
+        if (c >= 48) { if (c <= 57) { ok = 1; } }
+        if (c == 45) { ok = 1; }
+        if (ok == 0) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# The bucket key for a tenant key. 0 when the key is not legal.
+fn agnostic_tenant_tid(key: Str): i64 {
+    if (agnostic_tenant_key_valid(key) == 0) { return 0; }
+    var tid = agnostic_key64(key);
+    if (tid == 0) { return 1; }
+    return tid;
+}
+
+# Create a tenant. Returns its `tid`, or 0.
+fn agnostic_tenant_create_a(a, key: Str, name: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    if (agnostic_tenant_key_valid(key) == 0) { return 0; }
+    if (agnostic_tenant_find_a(a, key) != 0) { return 0; }
+
+    var tid = agnostic_tenant_tid(key);
+    if (tid == 0) { return 0; }
+    var nm = name;
+    if (nm == 0) { nm = key; }
+    if (str_len(nm) > AGNOSTIC_EMAIL_MAX) { return 0; }
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_tenants (tid, tkey, tname, created) VALUES (?, ?, ?, ?)");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, tid);
+    patra_bind_text(st, 1, str_data(key), str_len(key));
+    patra_bind_text(st, 2, str_data(nm), str_len(nm));
+    patra_bind_int(st, 3, clock_epoch_secs());
+    var rc = patra_exec_prepared(db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return 0; }
+    return tid;
+}
+
+# The `tid` for a tenant key, or 0 when there is no such tenant.
+#
+# ⚠ The full-key re-check is the security boundary, exactly as in
+# `agnostic_users_find_a`. A bucket hit alone would let a colliding key address
+# another tenant's rows.
+fn agnostic_tenant_find_a(a, key: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    if (agnostic_tenant_key_valid(key) == 0) { return 0; }
+    var tid = agnostic_tenant_tid(key);
+    if (tid == 0) { return 0; }
+
+    var st = patra_prepare(db, "SELECT tid, tkey FROM agnostic_tenants WHERE tid = ?");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, tid);
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+
+    var n = patra_result_count(rs);
+    var i = 0;
+    var found = 0;
+    while (i < n) {
+        var got = _agnostic_auth_str_a(a, rs, i, 1);
+        if (got != 0) {
+            if (ct_eq_bytes_lens(str_data(got), str_len(got),
+                str_data(key), str_len(key)) == 1) {
+                found = patra_result_get_int(rs, i, 0);
+                i = n;
+            }
+        }
+        i = i + 1;
+    }
+    patra_result_free(rs);
+    return found;
+}
+
+# A tenant's display name, or 0.
+fn agnostic_tenant_name_a(a, tid): i64 {
+    var db = agnostic_store_db();
+    if (db == 0 || tid == 0) { return 0; }
+    var st = patra_prepare(db, "SELECT tname FROM agnostic_tenants WHERE tid = ?");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, tid);
+    var rs = patra_query_prepared(db, st);
+    patra_finalize(st);
+    if (rs == 0) { return 0; }
+    if (patra_result_count(rs) == 0) { patra_result_free(rs); return 0; }
+    var out = _agnostic_auth_str_a(a, rs, 0, 0);
+    patra_result_free(rs);
+    return out;
+}
+
+# Delete a tenant. Returns 1 when one went, 0 otherwise.
+#
+# ⚠ **Deletes the tenant row only.** Objects scoped to it are NOT swept, on
+# purpose: a cascade across every scoped table is a data-loss primitive behind a
+# single call, and the audit trail must outlive the tenant it describes. An
+# operator removing a tenant's data does it deliberately, per table.
+fn agnostic_tenant_delete_a(a, key: Str): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    var tid = agnostic_tenant_find_a(a, key);
+    if (tid == 0) { return 0; }
+    var st = patra_prepare(db, "DELETE FROM agnostic_tenants WHERE tid = ?");
+    if (st == 0) { return 0; }
+    patra_bind_int(st, 0, tid);
+    var rc = patra_exec_prepared(db, st);
+    patra_finalize(st);
+    if (rc != PATRA_OK) { return 0; }
+    return 1;
+}
+
+# How many tenants exist.
+fn agnostic_tenants_count(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    var rs = patra_query(db, "SELECT tid FROM agnostic_tenants");
+    if (rs == 0) { return 0; }
+    var n = patra_result_count(rs);
+    patra_result_free(rs);
+    return n;
+}
+
+# Drop every tenant. For tests.
+fn agnostic_tenants_reset(): i64 {
+    var db = agnostic_store_db();
+    if (db == 0) { return 0; }
+    patra_exec(db, "DELETE FROM agnostic_tenants");
+    return 0;
+}
+
+# --- key prefixing --------------------------------------------------------
+
+# `"<tenant>:<key>"` in arena `a`, or 0 when the tenant key is not legal.
+#
+# ⚠ **Validates the tenant key on every call**, not only at creation. This is the
+# function that makes the separator unambiguous, so it cannot assume an earlier
+# check happened — a key that reached the row through a direct SQL path would
+# otherwise produce a scope that splits two ways.
+#
+# The object key is NOT restricted: it may contain colons freely. Only the
+# tenant half has to be unambiguous for `agnostic_tenant_unscope_a` to split
+# correctly, because the split is at the FIRST colon.
+fn agnostic_tenant_scope_a(a, tenant: Str, key: Str): i64 {
+    if (agnostic_tenant_key_valid(tenant) == 0) { return 0; }
+    if (key == 0) { return 0; }
+    var tn = str_len(tenant);
+    var kn = str_len(key);
+    var buf = alloc_via(a, tn + 1 + kn);
+    if (buf == 0) { return 0; }
+    memcpy(buf, str_data(tenant), tn);
+    store8(buf + tn, 58);
+    if (kn > 0) { memcpy(buf + tn + 1, str_data(key), kn); }
+    return str_new_a(a, buf, tn + 1 + kn);
+}
+
+# The object half of a scoped key, or 0 when `scoped` is not in `tenant`'s scope.
+#
+# ⚠ **Confirms the prefix rather than trusting it.** Splitting at the first colon
+# and returning the tail regardless would let `other:secret` be read as
+# tenant `other`'s object by anyone who asked for it under their own tenant.
+fn agnostic_tenant_unscope_a(a, tenant: Str, scoped: Str): i64 {
+    if (agnostic_tenant_key_valid(tenant) == 0) { return 0; }
+    if (scoped == 0) { return 0; }
+    var tn = str_len(tenant);
+    var sn = str_len(scoped);
+    if (sn < tn + 1) { return 0; }
+    var p = str_data(scoped);
+    if ((load8(p + tn) & 255) != 58) { return 0; }
+    if (ct_eq_bytes_lens(p, tn, str_data(tenant), tn) != 1) { return 0; }
+    return str_new_a(a, p + tn + 1, sn - tn - 1);
+}

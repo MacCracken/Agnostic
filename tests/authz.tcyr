@@ -1,0 +1,220 @@
+# agnostic/auth/{perm,tenant} — who may do what, and which tenant's data it is.
+#
+# Two design claims are held here:
+#
+#   1. Permissions come from an explicit per-role TABLE, never from `role >= N`.
+#      An ordering comparison makes the enum's numeric order load-bearing and
+#      grants everything below an out-of-range value.
+#   2. `"<tenant>:<key>"` is unambiguous ONLY because a tenant key cannot contain
+#      the separator. The last group proves the collision is unreachable rather
+#      than merely unlikely.
+include "src/app.cyr"
+
+var _T_TENDB = "/tmp/agnostic-authz-suite.patra";
+
+fn _t_tenant_open() {
+    agnostic_store_close();
+    sys_unlink(_T_TENDB);
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    agnostic_store_open(str_from(_T_TENDB));
+    agnostic_auth_ensure();
+    agnostic_tenants_ensure();
+    return 0;
+}
+
+fn test_role_table() {
+    test_group("perm/role-table");
+
+    assert_eq(agnostic_role_perms(AGNOSTIC_ROLE_VIEWER), AGNOSTIC_PERM_READ,
+      "a viewer reads and nothing else");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_VIEWER, AGNOSTIC_PERM_WRITE), 0,
+      "and cannot write");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_OPERATOR, AGNOSTIC_PERM_WRITE), 1,
+      "an operator writes");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_OPERATOR, AGNOSTIC_PERM_ADMIN), 0,
+      "but does not administer");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_ADMIN, AGNOSTIC_PERM_ADMIN), 1,
+      "an admin administers");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_ADMIN, AGNOSTIC_PERM_SUPER), 0,
+      "but is not cross-tenant");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_SUPER_ADMIN, AGNOSTIC_PERM_SUPER), 1,
+      "a super_admin is");
+
+    # ⭐ FAIL CLOSED. `agnostic_users_role` and `agnostic_jwt_claim_role` both
+    # answer -1 for "no such identity"; a caller that forgets to check it must
+    # still be refused rather than matched by a `>=` test.
+    assert_eq(agnostic_role_perms(0 - 1), 0, "an unknown role holds NOTHING");
+    assert_eq(agnostic_role_can(0 - 1, AGNOSTIC_PERM_READ), 0, "-1 cannot even read");
+    assert_eq(agnostic_role_can(99, AGNOSTIC_PERM_READ), 0, "nor can an out-of-range role");
+
+    # ⭐ A multi-bit request is refused rather than answered "any of these".
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_SUPER_ADMIN,
+        AGNOSTIC_PERM_READ | AGNOSTIC_PERM_WRITE), 0,
+      "asking for two permissions at once is refused, not treated as 'either'");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_ADMIN, 0), 0, "and zero is not a permission");
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_SUPER_ADMIN, 16), 0,
+      "nor is a bit above the highest defined one");
+}
+
+fn test_route_permissions() {
+    test_group("perm/routes");
+
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_HEALTH), 0, "health needs nothing");
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_READY), 0, "readiness needs nothing");
+
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_CREW_GET), AGNOSTIC_PERM_READ,
+      "reading a crew is READ");
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_CREW_SUBMIT), AGNOSTIC_PERM_WRITE,
+      "submitting one is WRITE");
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_CREW_CANCEL), AGNOSTIC_PERM_WRITE,
+      "so is cancelling");
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_DEF_DELETE), AGNOSTIC_PERM_WRITE,
+      "deleting a definition is WRITE");
+
+    # ⚠ The audit trail spans the deployment, so a viewer holding it would read
+    # activity from tenants they cannot otherwise see.
+    assert_eq(agnostic_perm_for_route(AGNOSTIC_ROUTE_AUDIT), AGNOSTIC_PERM_ADMIN,
+      "the audit trail is ADMIN, not READ");
+
+    # ⭐ An id nobody classified falls through to ADMIN — the same fail-safe
+    # default `agnostic_route_needs_auth` uses.
+    assert_eq(agnostic_perm_for_route(99), AGNOSTIC_PERM_ADMIN,
+      "an unclassified route requires ADMIN rather than being readable");
+
+    # And a viewer really is refused by that default.
+    assert_eq(agnostic_role_can(AGNOSTIC_ROLE_VIEWER, agnostic_perm_for_route(99)), 0,
+      "so a viewer cannot reach an unclassified route");
+}
+
+fn test_tenant_keys() {
+    test_group("tenant/keys");
+
+    assert_eq(agnostic_tenant_key_valid(str_from("acme")), 1, "lowercase is legal");
+    assert_eq(agnostic_tenant_key_valid(str_from("acme-corp-2")), 1, "digits and hyphens too");
+    assert_eq(agnostic_tenant_key_valid(str_from("2acme")), 1, "a leading digit is legal");
+
+    assert_eq(agnostic_tenant_key_valid(str_from("")), 0, "empty is not");
+    assert_eq(agnostic_tenant_key_valid(str_from("-acme")), 0, "nor a leading hyphen");
+    assert_eq(agnostic_tenant_key_valid(str_from("Acme")), 0,
+      "nor upper case — folding here would split one tenant across two prefixes");
+    assert_eq(agnostic_tenant_key_valid(str_from("acme corp")), 0, "nor a space");
+    assert_eq(agnostic_tenant_key_valid(str_from("../etc")), 0, "nor a path fragment");
+    assert_eq(agnostic_tenant_key_valid(0), 0, "nor null");
+
+    # ⭐ THE ONE THAT MATTERS: the separator itself.
+    assert_eq(agnostic_tenant_key_valid(str_from("a:b")), 0,
+      "a colon is REFUSED — this is what makes the scope prefix unambiguous");
+}
+
+fn test_tenant_crud() {
+    test_group("tenant/crud");
+
+    _t_tenant_open();
+    var a = arena_allocator(262144);
+    assert_eq(agnostic_tenants_count(), 0, "starts empty");
+
+    var tid = agnostic_tenant_create_a(a, str_from("acme"), str_from("Acme Corp"));
+    assert_neq(tid, 0, "a tenant is created");
+    assert_eq(agnostic_tenants_count(), 1, "and counted");
+    assert_eq(agnostic_tenant_find_a(a, str_from("acme")), tid, "and found");
+    assert_eq(agnostic_tenant_find_a(a, str_from("other")), 0, "an unknown key is 0");
+
+    var nm = agnostic_tenant_name_a(a, tid);
+    assert_neq(nm, 0, "the name reads back");
+    assert_eq(str_eq_cstr(nm, "Acme Corp"), 1, "verbatim");
+
+    assert_eq(agnostic_tenant_create_a(a, str_from("acme"), str_from("again")), 0,
+      "the same key cannot be created twice");
+    assert_eq(agnostic_tenant_create_a(a, str_from("Bad Key"), 0), 0,
+      "an illegal key is refused");
+    assert_eq(agnostic_tenants_count(), 1, "and nothing extra was written");
+
+    assert_eq(agnostic_tenant_delete_a(a, str_from("acme")), 1, "it deletes");
+    assert_eq(agnostic_tenants_count(), 0, "and is gone");
+    assert_eq(agnostic_tenant_delete_a(a, str_from("acme")), 0, "deleting again does nothing");
+}
+
+fn test_tenant_bucket_is_rechecked() {
+    test_group("tenant/bucket-not-identity");
+
+    _t_tenant_open();
+    var a = arena_allocator(262144);
+    var db = agnostic_store_db();
+
+    var victim = str_from("victim");
+    var tid = agnostic_tenant_tid(victim);
+    assert_neq(tid, 0, "the bucket key computes");
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_tenants (tid, tkey, tname, created) VALUES (?, ?, ?, ?)");
+    patra_bind_int(st, 0, tid);
+    patra_bind_text(st, 1, str_data(str_from("attacker")), 8);
+    patra_bind_text(st, 2, str_data(str_from("x")), 1);
+    patra_bind_int(st, 3, 0);
+    assert_eq(patra_exec_prepared(db, st), PATRA_OK, "a colliding row is written");
+    patra_finalize(st);
+
+    # ⭐ Same boundary as the user and API-key tables: the bucket narrows, the
+    # full compare decides.
+    assert_eq(agnostic_tenant_find_a(a, victim), 0,
+      "a bucket hit whose key does not match resolves to NO tenant");
+}
+
+fn test_scope_prefixing() {
+    test_group("tenant/scope");
+
+    var a = arena_allocator(262144);
+
+    var s = agnostic_tenant_scope_a(a, str_from("acme"), str_from("crew-1"));
+    assert_neq(s, 0, "a key scopes");
+    assert_eq(str_eq_cstr(s, "acme:crew-1"), 1, "as tenant:key");
+
+    var back = agnostic_tenant_unscope_a(a, str_from("acme"), s);
+    assert_neq(back, 0, "and unscopes");
+    assert_eq(str_eq_cstr(back, "crew-1"), 1, "to the original key");
+
+    # The object half may contain colons; only the tenant half must not.
+    var s2 = agnostic_tenant_scope_a(a, str_from("acme"), str_from("a:b:c"));
+    assert_eq(str_eq_cstr(s2, "acme:a:b:c"), 1, "an object key may contain colons");
+    assert_eq(str_eq_cstr(agnostic_tenant_unscope_a(a, str_from("acme"), s2), "a:b:c"), 1,
+      "and survives the round trip — the split is at the FIRST colon");
+
+    # ⭐ THE COLLISION, PROVED UNREACHABLE.
+    #
+    # If a tenant key could contain ':', then tenant "acme" holding key "x:y"
+    # and tenant "acme:x" holding key "y" would both produce "acme:x:y" — one
+    # tenant silently reading and overwriting another's object. The charset is
+    # what removes it, so the ambiguous tenant simply cannot be named.
+    assert_eq(agnostic_tenant_scope_a(a, str_from("acme:x"), str_from("y")), 0,
+      "a tenant key containing the separator cannot scope ANYTHING");
+
+    # ⭐ Cross-tenant reads are refused, not silently split.
+    assert_eq(agnostic_tenant_unscope_a(a, str_from("other"), str_from("acme:secret")), 0,
+      "another tenant's scoped key does not unscope");
+
+    # ⚠ A prefix that merely starts with the tenant name is not in its scope.
+    assert_eq(agnostic_tenant_unscope_a(a, str_from("ac"), str_from("acme:secret")), 0,
+      "'ac' does not own 'acme:secret' — the separator position is checked");
+
+    assert_eq(agnostic_tenant_scope_a(a, str_from("acme"), 0), 0, "a null key does not scope");
+    assert_eq(agnostic_tenant_unscope_a(a, str_from("acme"), str_from("acme")), 0,
+      "a scoped key with no separator is refused");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_role_table();
+    test_route_permissions();
+    test_tenant_keys();
+    test_tenant_crud();
+    test_tenant_bucket_is_rechecked();
+    test_scope_prefixing();
+    return assert_summary();
+}
+
+var _agnostic_authz_test_exit = main();
+if (_agnostic_authz_test_exit > 0) { _agnostic_authz_test_exit = 1; }
+sys_exit_group(_agnostic_authz_test_exit);

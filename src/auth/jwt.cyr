@@ -1,0 +1,352 @@
+# agnostic/auth/jwt — HS256 bearer tokens.
+#
+# Adapted from SecureYeoman's working Cyrius probe
+# (`secureyeoman/yeo-cy-test/src/auth.cyr`), which the roadmap names as the
+# source. Three things are deliberately different here, each because this is a
+# server module rather than a probe.
+#
+# ## ⚠ 1. The token's own `alg` header is NEVER read
+#
+# Verification recomputes HS256 unconditionally and compares. It does not parse
+# the header, does not look for `"alg"`, and has no branch that could select an
+# algorithm a caller named. That closes the whole `alg` family at the design
+# level rather than by validation: `{"alg":"none"}` produces a token whose
+# signature segment cannot match an HS256 MAC, and an RS256 header is simply
+# ignored. A verifier that dispatches on the token's claim is the classic JWT
+# CVE, and the only reliable defence is not to have the branch.
+#
+# ## ⚠ 2. The signature is compared ENCODED, never decoded
+#
+# The 32-byte MAC is re-encoded to base64url and compared against the token's
+# third segment as text, in constant time. The alternative — decode the
+# attacker's segment, then compare 32 bytes — hands attacker-controlled length
+# and content to a decoder before anything has been authenticated. Comparing
+# encoded text means the untrusted segment is only ever read as bytes.
+#
+# ## ⚠ 3. base64url is re-implemented here, on an arena
+#
+# `bayan`'s `base64url_encode` / `base64url_decode` are correct — a claim in the
+# SecureYeoman probe that its decode would not round-trip does **not** reproduce
+# against the folded bayan in `lib/`, and is not carried forward. They allocate
+# with `alloc()`, the process-global no-free bump. Issue and verify run on every
+# authenticated request, so using them would leak a few hundred bytes per
+# request for the life of the process. Everything here takes an arena.
+#
+# ## What is not here
+#
+# No refresh tokens, no revocation list, no `nbf`, no `aud`/`iss`. A short TTL is
+# the revocation story; adding a deny-list would need shared state across pool
+# workers, which is a design decision for whoever needs it, not a default.
+
+# The HS256 secret. 0 until a mount installs one.
+var _agnostic_jwt_secret = 0;
+var _agnostic_jwt_secret_len = 0;
+
+# HS256 needs a key at least as long as its output to get full strength.
+var AGNOSTIC_JWT_SECRET_MIN = 32;
+
+# The signature is always 32 bytes — SHA-256's output.
+var AGNOSTIC_JWT_SIG_BYTES = 32;
+
+# base64url alphabet, index = 6-bit value.
+var AGNOSTIC_B64U_ALPHABET =
+"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+# Install the signing secret. Mount time only, before any worker exists.
+#
+# ⚠ **Refuses a short key rather than stretching it.** HMAC accepts any length,
+# so a 4-byte secret produces perfectly valid tokens that are trivially
+# brute-forced offline — a failure with no symptom until someone forges one.
+# Returns 1 when installed, 0 when refused.
+fn agnostic_jwt_set_secret(ptr, len): i64 {
+    if (ptr == 0) { return 0; }
+    if (len < AGNOSTIC_JWT_SECRET_MIN) { return 0; }
+    _agnostic_jwt_secret = ptr;
+    _agnostic_jwt_secret_len = len;
+    return 1;
+}
+
+# Install a freshly generated 32-byte secret. Returns 1, or 0 if the CSPRNG failed.
+#
+# ⚠ **Ephemeral: every restart invalidates every outstanding token.** That is the
+# right default for a server with no configured secret — the alternative, a
+# built-in constant, is a signing key published in the source. An operator who
+# wants tokens to survive a restart installs their own.
+fn agnostic_jwt_init_random(): i64 {
+    var buf = alloc(AGNOSTIC_JWT_SECRET_MIN);
+    if (buf == 0) { return 0; }
+    if (random_bytes(buf, AGNOSTIC_JWT_SECRET_MIN) != AGNOSTIC_JWT_SECRET_MIN) { return 0; }
+    return agnostic_jwt_set_secret(buf, AGNOSTIC_JWT_SECRET_MIN);
+}
+
+# Whether a secret is installed. Nothing issues or verifies without one.
+fn agnostic_jwt_ready(): i64 {
+    if (_agnostic_jwt_secret == 0) { return 0; }
+    return 1;
+}
+
+# base64url-encode `len` bytes at `ptr` into arena `a`, no padding. 0 on exhaustion.
+fn agnostic_b64u_encode_a(a, ptr, len): i64 {
+    if (ptr == 0 || len < 0) { return 0; }
+    var quads = len / 3;
+    var rem = len - quads * 3;
+    var out_len = quads * 4;
+    if (rem == 1) { out_len = out_len + 2; }
+    if (rem == 2) { out_len = out_len + 3; }
+
+    var out = alloc_via(a, out_len);
+    if (out == 0) { return 0; }
+    var tbl = AGNOSTIC_B64U_ALPHABET;
+
+    var si = 0;
+    var di = 0;
+    while (si + 3 <= len) {
+        var n = ((load8(ptr + si) & 255) << 16)
+        | ((load8(ptr + si + 1) & 255) << 8)
+        | (load8(ptr + si + 2) & 255);
+        store8(out + di, load8(tbl + ((n >> 18) & 63)));
+        store8(out + di + 1, load8(tbl + ((n >> 12) & 63)));
+        store8(out + di + 2, load8(tbl + ((n >> 6) & 63)));
+        store8(out + di + 3, load8(tbl + (n & 63)));
+        si = si + 3;
+        di = di + 4;
+    }
+    if (rem == 1) {
+        var n1 = (load8(ptr + si) & 255) << 16;
+        store8(out + di, load8(tbl + ((n1 >> 18) & 63)));
+        store8(out + di + 1, load8(tbl + ((n1 >> 12) & 63)));
+    }
+    if (rem == 2) {
+        var n2 = ((load8(ptr + si) & 255) << 16) | ((load8(ptr + si + 1) & 255) << 8);
+        store8(out + di, load8(tbl + ((n2 >> 18) & 63)));
+        store8(out + di + 1, load8(tbl + ((n2 >> 12) & 63)));
+        store8(out + di + 2, load8(tbl + ((n2 >> 6) & 63)));
+    }
+    return str_new_a(a, out, out_len);
+}
+
+# One base64url character to its 6-bit value, or -1.
+fn _agnostic_b64u_val(c): i64 {
+    if (c >= 65) { if (c <= 90) { return c - 65; } }
+    if (c >= 97) { if (c <= 122) { return c - 71; } }
+    if (c >= 48) { if (c <= 57) { return c + 4; } }
+    if (c == 45) { return 62; }
+    if (c == 95) { return 63; }
+    return 0 - 1;
+}
+
+# Decoded byte count for `n` base64url characters, no padding.
+fn agnostic_b64u_declen(n): i64 {
+    var full = (n / 4) * 3;
+    var rem = n - (n / 4) * 4;
+    if (rem == 1) { return 0 - 1; }
+    if (rem == 2) { return full + 1; }
+    if (rem == 3) { return full + 2; }
+    return full;
+}
+
+# Decode `elen` base64url characters at `enc` into arena `a`.
+#
+# Returns the buffer, writing its length to `out_len` when that is non-zero.
+# 0 on any invalid character or an impossible length.
+#
+# ⚠ **A remainder of 1 character is refused.** It decodes to nothing but is not
+# an empty string, so accepting it would let two different tokens carry the same
+# payload — a signature-stripping foothold if anything downstream compared
+# payload text rather than the MAC.
+fn agnostic_b64u_decode_a(a, enc, elen, out_len): i64 {
+    if (enc == 0 || elen < 0) { return 0; }
+    var n = agnostic_b64u_declen(elen);
+    if (n < 0) { return 0; }
+    if (out_len != 0) { store64(out_len, n); }
+    if (n == 0) { return alloc_via(a, 1); }
+
+    var out = alloc_via(a, n);
+    if (out == 0) { return 0; }
+    var si = 0;
+    var di = 0;
+    while (si + 4 <= elen) {
+        var v0 = _agnostic_b64u_val(load8(enc + si) & 255);
+        var v1 = _agnostic_b64u_val(load8(enc + si + 1) & 255);
+        var v2 = _agnostic_b64u_val(load8(enc + si + 2) & 255);
+        var v3 = _agnostic_b64u_val(load8(enc + si + 3) & 255);
+        if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0) { return 0; }
+        store8(out + di, ((v0 << 2) | (v1 >> 4)) & 255);
+        store8(out + di + 1, (((v1 & 15) << 4) | (v2 >> 2)) & 255);
+        store8(out + di + 2, (((v2 & 3) << 6) | v3) & 255);
+        si = si + 4;
+        di = di + 3;
+    }
+    var rem = elen - si;
+    if (rem == 2) {
+        var a0 = _agnostic_b64u_val(load8(enc + si) & 255);
+        var a1 = _agnostic_b64u_val(load8(enc + si + 1) & 255);
+        if (a0 < 0 || a1 < 0) { return 0; }
+        store8(out + di, ((a0 << 2) | (a1 >> 4)) & 255);
+    }
+    if (rem == 3) {
+        var b0 = _agnostic_b64u_val(load8(enc + si) & 255);
+        var b1 = _agnostic_b64u_val(load8(enc + si + 1) & 255);
+        var b2 = _agnostic_b64u_val(load8(enc + si + 2) & 255);
+        if (b0 < 0 || b1 < 0 || b2 < 0) { return 0; }
+        store8(out + di, ((b0 << 2) | (b1 >> 4)) & 255);
+        store8(out + di + 1, (((b1 & 15) << 4) | (b2 >> 2)) & 255);
+    }
+    return out;
+}
+
+# Index of byte `ch` within `len` bytes at `ptr`, at or after `start`; -1 if absent.
+fn _agnostic_jwt_find(ptr, len, ch, start): i64 {
+    var i = start;
+    while (i < len) {
+        if ((load8(ptr + i) & 255) == ch) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+# Issue a token for `uid`. Returns the compact serialisation in `a`, or 0.
+#
+# `sub` is the uid as a decimal string — JWT's `sub` is defined as a string, and
+# a numeric one would be re-parsed differently by every other consumer.
+#
+# Returns 0 when no secret is installed, which is a programming error rather
+# than a request error: nothing should be issuing before mount finished.
+fn agnostic_jwt_issue_a(a, uid, role, tenant: Str, ttl_secs): i64 {
+    if (agnostic_jwt_ready() == 0) { return 0; }
+    if (uid == 0 || ttl_secs <= 0) { return 0; }
+    if (agnostic_role_is_valid(role) == 0) { return 0; }
+
+    var now = clock_epoch_secs();
+    var hdr = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    var hb = agnostic_b64u_encode_a(a, hdr, strlen(hdr));
+    if (hb == 0) { return 0; }
+
+    var tn = tenant;
+    if (tn == 0) { tn = str_from(""); }
+
+    var claims = bayan_json_v_obj_new_a(a);
+    if (claims == 0) { return 0; }
+    bayan_json_v_obj_set_a(a, claims, str_from("sub"),
+      bayan_json_v_str_new_a(a, str_from_int_a(a, uid)));
+    bayan_json_v_obj_set_a(a, claims, str_from("role"), bayan_json_v_int_new_a(a, role));
+    bayan_json_v_obj_set_a(a, claims, str_from("tenant"), bayan_json_v_str_new_a(a, tn));
+    bayan_json_v_obj_set_a(a, claims, str_from("iat"), bayan_json_v_int_new_a(a, now));
+    bayan_json_v_obj_set_a(a, claims, str_from("exp"), bayan_json_v_int_new_a(a, now + ttl_secs));
+
+    var pjs = bayan_json_v_build_a(a, claims);
+    if (pjs == 0) { return 0; }
+    var pb = agnostic_b64u_encode_a(a, str_data(pjs), str_len(pjs));
+    if (pb == 0) { return 0; }
+
+    # signing input = header "." payload
+    var si_len = str_len(hb) + 1 + str_len(pb);
+    var si = alloc_via(a, si_len);
+    if (si == 0) { return 0; }
+    memcpy(si, str_data(hb), str_len(hb));
+    store8(si + str_len(hb), 46);
+    memcpy(si + str_len(hb) + 1, str_data(pb), str_len(pb));
+
+    var mac = alloc_via(a, AGNOSTIC_JWT_SIG_BYTES);
+    if (mac == 0) { return 0; }
+    hmac_sha256(_agnostic_jwt_secret, _agnostic_jwt_secret_len, si, si_len, mac);
+    var sb = agnostic_b64u_encode_a(a, mac, AGNOSTIC_JWT_SIG_BYTES);
+    if (sb == 0) { return 0; }
+
+    var tok_len = si_len + 1 + str_len(sb);
+    var tok = alloc_via(a, tok_len);
+    if (tok == 0) { return 0; }
+    memcpy(tok, si, si_len);
+    store8(tok + si_len, 46);
+    memcpy(tok + si_len + 1, str_data(sb), str_len(sb));
+    return str_new_a(a, tok, tok_len);
+}
+
+# Verify a token and return its claims object, or 0.
+#
+# The order is deliberate and is the whole security argument:
+#
+#   1. structure — two dots, three non-empty segments
+#   2. **signature over segments 1-2, constant-time, before anything is parsed**
+#   3. only then decode the payload and enforce `exp`
+#
+# ⚠ **Nothing attacker-supplied is parsed as JSON until the MAC has passed.** A
+# verifier that decodes claims first to "look at the algorithm" or to read `kid`
+# is running a parser on unauthenticated input, and that parser becomes the
+# attack surface.
+fn agnostic_jwt_verify_a(a, token: Str): i64 {
+    if (agnostic_jwt_ready() == 0) { return 0; }
+    if (token == 0) { return 0; }
+    var p = str_data(token);
+    var n = str_len(token);
+    if (n < 5) { return 0; }
+
+    var d1 = _agnostic_jwt_find(p, n, 46, 0);
+    if (d1 <= 0) { return 0; }
+    var d2 = _agnostic_jwt_find(p, n, 46, d1 + 1);
+    if (d2 <= d1 + 1) { return 0; }
+    if (d2 + 1 >= n) { return 0; }
+    # A fourth dot means this is not a compact JWS.
+    if (_agnostic_jwt_find(p, n, 46, d2 + 1) >= 0) { return 0; }
+
+    var mac = alloc_via(a, AGNOSTIC_JWT_SIG_BYTES);
+    if (mac == 0) { return 0; }
+    hmac_sha256(_agnostic_jwt_secret, _agnostic_jwt_secret_len, p, d2, mac);
+    var want = agnostic_b64u_encode_a(a, mac, AGNOSTIC_JWT_SIG_BYTES);
+    if (want == 0) { return 0; }
+
+    # Constant-time over the ENCODED signature. Length first — the length of a
+    # base64url signature is fixed and public; the bytes are not.
+    if (ct_eq_bytes_lens(str_data(want), str_len(want), p + d2 + 1, n - d2 - 1) != 1) {
+        return 0;
+    }
+
+    var plen = d2 - d1 - 1;
+    var rawlen = alloc_via(a, 8);
+    if (rawlen == 0) { return 0; }
+    var raw = agnostic_b64u_decode_a(a, p + d1 + 1, plen, rawlen);
+    if (raw == 0) { return 0; }
+
+    var v = bayan_json_v_parse_buf_a(a, raw, load64(rawlen));
+    if (v == 0) { return 0; }
+
+    # ⚠ A missing or non-integer `exp` is a REJECT, not "no expiry". Treating an
+    # absent claim as unlimited is how a stripped-claims token becomes eternal.
+    var exp = bayan_json_v_obj_get(v, "exp");
+    if (exp == 0) { return 0; }
+    if (bayan_json_v_is_int(exp) != 1) { return 0; }
+    if (bayan_json_v_int(exp) <= clock_epoch_secs()) { return 0; }
+    return v;
+}
+
+# The uid a verified claims object names, or 0.
+#
+# ⚠ Takes the object `agnostic_jwt_verify_a` returned, never a raw token — the
+# separation is what stops a caller reading claims that were never authenticated.
+fn agnostic_jwt_claim_uid(v): i64 {
+    if (v == 0) { return 0; }
+    var sub = bayan_json_v_obj_get(v, "sub");
+    if (sub == 0) { return 0; }
+    if (bayan_json_v_is_str(sub) != 1) { return 0; }
+    return str_to_int(bayan_json_v_str(sub));
+}
+
+# The role a verified claims object carries, or -1 when absent or unknown.
+fn agnostic_jwt_claim_role(v): i64 {
+    if (v == 0) { return 0 - 1; }
+    var r = bayan_json_v_obj_get(v, "role");
+    if (r == 0) { return 0 - 1; }
+    if (bayan_json_v_is_int(r) != 1) { return 0 - 1; }
+    var role = bayan_json_v_int(r);
+    if (agnostic_role_is_valid(role) == 0) { return 0 - 1; }
+    return role;
+}
+
+# The tenant a verified claims object carries, or 0.
+fn agnostic_jwt_claim_tenant(v): i64 {
+    if (v == 0) { return 0; }
+    var t = bayan_json_v_obj_get(v, "tenant");
+    if (t == 0) { return 0; }
+    if (bayan_json_v_is_str(t) != 1) { return 0; }
+    return bayan_json_v_str(t);
+}

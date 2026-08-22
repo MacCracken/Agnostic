@@ -1,0 +1,277 @@
+# agnostic/auth/store — users and API keys.
+#
+# The design claim this suite holds: column 0 is a 63-bit TRUNCATED hash, so a
+# `WHERE uid = ?` hit is a bucket and not an identity. Two tests here forge a
+# bucket collision directly — insert a row under one address's uid carrying a
+# different address — and assert the lookup refuses it. Without the full
+# re-check those two tests fail and the lookup is an authentication bypass.
+include "src/app.cyr"
+
+var _T_AUTHDB = "/tmp/agnostic-authstore-suite.patra";
+
+fn _t_auth_open() {
+    agnostic_store_close();
+    sys_unlink(_T_AUTHDB);
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    agnostic_store_open(str_from(_T_AUTHDB));
+    agnostic_auth_ensure();
+    agnostic_argon_pool_init();
+    return 0;
+}
+
+fn test_roles() {
+    test_group("authstore/roles");
+
+    assert_eq(agnostic_role_is_valid(AGNOSTIC_ROLE_VIEWER), 1, "viewer is valid");
+    assert_eq(agnostic_role_is_valid(AGNOSTIC_ROLE_SUPER_ADMIN), 1, "super_admin is valid");
+    assert_eq(agnostic_role_is_valid(0 - 1), 0, "-1 is not a role");
+    assert_eq(agnostic_role_is_valid(4), 0, "one past the top is not a role");
+
+    assert_eq(agnostic_role_parse(str_from("admin")), AGNOSTIC_ROLE_ADMIN, "admin parses");
+    assert_eq(agnostic_role_parse(str_from("ADMIN")), AGNOSTIC_ROLE_ADMIN, "case-insensitively");
+    assert_eq(agnostic_role_parse(str_from("root")), 0 - 1,
+      "an unknown name is REFUSED, not defaulted to viewer");
+    assert_eq(str_eq_cstr(str_from(agnostic_role_name(AGNOSTIC_ROLE_OPERATOR)), "operator"), 1,
+      "names round-trip");
+}
+
+fn test_create_and_find() {
+    test_group("authstore/create");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+    assert_eq(agnostic_users_count(), 0, "starts empty");
+
+    var uid = agnostic_users_create_a(a, str_from("Ada@Example.COM"), str_from("correct horse"),
+      AGNOSTIC_ROLE_OPERATOR, str_from("acme"));
+    assert_neq(uid, 0, "a user is created");
+    assert_eq(agnostic_users_count(), 1, "and counted");
+
+    # The address is folded once, at creation, and the folded bytes are what both
+    # the bucket and the row hold — so every casing finds the same row.
+    assert_eq(agnostic_users_find_a(a, str_from("ada@example.com")), uid, "found lower-cased");
+    assert_eq(agnostic_users_find_a(a, str_from("ADA@EXAMPLE.COM")), uid, "found upper-cased");
+    assert_eq(agnostic_users_find_a(a, str_from("Ada@Example.COM")), uid, "found as written");
+    assert_eq(agnostic_users_find_a(a, str_from("bob@example.com")), 0, "an unknown address is 0");
+
+    var email = agnostic_users_email_a(a, uid);
+    assert_neq(email, 0, "the stored address reads back");
+    assert_eq(str_eq_cstr(email, "ada@example.com"), 1, "folded, not as supplied");
+
+    var tn = agnostic_users_tenant_a(a, uid);
+    assert_neq(tn, 0, "the tenant reads back");
+    assert_eq(str_eq_cstr(tn, "acme"), 1, "and is what was stored");
+
+    assert_eq(agnostic_users_role(uid), AGNOSTIC_ROLE_OPERATOR, "the role reads back");
+    assert_eq(agnostic_users_role(1234567), 0 - 1,
+      "an unknown uid answers -1, NOT viewer — a deleted account must not authorise");
+}
+
+fn test_refusals() {
+    test_group("authstore/refusals");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+
+    var uid = agnostic_users_create_a(a, str_from("dup@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+    assert_neq(uid, 0, "first registration succeeds");
+    assert_eq(agnostic_users_create_a(a, str_from("dup@example.com"), str_from("pw2"),
+        AGNOSTIC_ROLE_VIEWER, 0), 0, "the same address cannot register twice");
+    assert_eq(agnostic_users_create_a(a, str_from("DUP@EXAMPLE.COM"), str_from("pw2"),
+        AGNOSTIC_ROLE_VIEWER, 0), 0, "nor in a different case");
+    assert_eq(agnostic_users_count(), 1, "and nothing extra was written");
+
+    assert_eq(agnostic_users_create_a(a, str_from("x@example.com"), str_from("pw"), 9, 0), 0,
+      "an unknown role is refused");
+    assert_eq(agnostic_users_create_a(a, str_from(""), str_from("pw"),
+        AGNOSTIC_ROLE_VIEWER, 0), 0, "an empty address is refused");
+
+    # ⭐ A STR column is 256 fixed bytes and truncates. Two addresses sharing
+    # their first 255 bytes would become ONE row, and the first to register would
+    # own the second's login. Refused at the door instead.
+    var long = str_from("");
+    var i = 0;
+    var buf = alloc_via(a, 300);
+    while (i < 300) { store8(buf + i, 97); i = i + 1; }
+    assert_eq(agnostic_users_create_a(a, str_new_a(a, buf, 300), str_from("pw"),
+        AGNOSTIC_ROLE_VIEWER, 0), 0, "an address longer than a STR column is REFUSED, not truncated");
+    assert_eq(agnostic_users_count(), 1, "still just the one user");
+}
+
+fn test_verify() {
+    test_group("authstore/verify");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+    var uid = agnostic_users_create_a(a, str_from("v@example.com"), str_from("s3cret-pass"),
+      AGNOSTIC_ROLE_ADMIN, 0);
+    assert_neq(uid, 0, "user created");
+
+    var shed = alloc_via(a, 8);
+    store64(shed, 0);
+    assert_eq(agnostic_users_verify_a(a, str_from("v@example.com"), str_from("s3cret-pass"), shed),
+      uid, "the right password verifies to the uid");
+    assert_eq(load64(shed), 0, "and nothing was shed");
+
+    assert_eq(agnostic_users_verify_a(a, str_from("v@example.com"), str_from("wrong"), shed), 0,
+      "a wrong password does not");
+    assert_eq(agnostic_users_verify_a(a, str_from("nobody@example.com"), str_from("s3cret-pass"), shed),
+      0, "and neither does an unknown address");
+    assert_eq(agnostic_users_verify_a(a, str_from("V@EXAMPLE.COM"), str_from("s3cret-pass"), shed),
+      uid, "verification folds case like lookup does");
+}
+
+fn test_unknown_user_still_costs_argon2() {
+    test_group("authstore/no-enumeration-oracle");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+    agnostic_users_create_a(a, str_from("real@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+
+    # ⭐ THE PROPERTY: an absent account must not answer faster than a present
+    # one, or login becomes a user-enumeration oracle. The decoy record is what
+    # makes the unknown path do the same Argon2 work.
+    #
+    # Asserted structurally rather than by wall clock — a timing assertion is
+    # flaky under load and would fail against correct code. Holding every pool
+    # slot makes the work OBSERVABLE: if the unknown-address path did no Argon2,
+    # it could not be shed, and the shed counter would not move.
+    var held = vec_new();
+    var i = 0;
+    while (i < AGNOSTIC_ARGON_SLOTS) {
+        var b = agnostic_argon_acquire();
+        if (b != 0) { vec_push(held, b); }
+        i = i + 1;
+    }
+
+    var shed = alloc_via(a, 8);
+    store64(shed, 0);
+    var before = agnostic_argon_shed_count();
+    assert_eq(agnostic_users_verify_a(a, str_from("ghost@example.com"), str_from("pw"), shed), 0,
+      "an unknown address fails");
+    assert_eq(agnostic_argon_shed_count() > before, 1,
+      "and it reached the hasher — the absent path is not a fast path");
+    assert_eq(load64(shed), 1, "the shed signal propagates for unknown addresses too");
+
+    var j = 0;
+    while (j < vec_len(held)) { agnostic_argon_release(vec_get(held, j)); j = j + 1; }
+}
+
+fn test_bucket_hit_is_rechecked() {
+    test_group("authstore/bucket-not-identity");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+    var db = agnostic_store_db();
+
+    # Forge exactly what a 63-bit collision would produce: a row sitting in the
+    # victim's bucket that belongs to somebody else.
+    var victim = str_from("victim@example.com");
+    var uid = agnostic_users_uid_a(a, victim);
+    assert_neq(uid, 0, "the victim's bucket key computes");
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_users (uid, email, pwhash, urole, tenant, created) VALUES (?, ?, ?, ?, ?, ?)");
+    assert_neq(st, 0, "raw insert prepares");
+    patra_bind_int(st, 0, uid);
+    patra_bind_text(st, 1, str_data(str_from("attacker@example.com")), 20);
+    patra_bind_text(st, 2, str_data(str_from("x")), 1);
+    patra_bind_int(st, 3, AGNOSTIC_ROLE_SUPER_ADMIN);
+    patra_bind_text(st, 4, str_data(str_from("")), 0);
+    patra_bind_int(st, 5, 0);
+    assert_eq(patra_exec_prepared(db, st), PATRA_OK, "the colliding row is written");
+    patra_finalize(st);
+
+    # The bucket genuinely hits — otherwise this test proves nothing.
+    var q = patra_prepare(db, "SELECT uid FROM agnostic_users WHERE uid = ?");
+    patra_bind_int(q, 0, uid);
+    var rs = patra_query_prepared(db, q);
+    patra_finalize(q);
+    assert_eq(patra_result_count(rs), 1, "the index DOES return the colliding row");
+    patra_result_free(rs);
+
+    # ⭐ THE SECURITY BOUNDARY. Without the full-address re-check this returns
+    # the attacker's row and the victim's address logs in as a SUPER_ADMIN
+    # nobody created.
+    assert_eq(agnostic_users_find_a(a, victim), 0,
+      "the lookup REFUSES a bucket hit whose address does not match");
+}
+
+fn test_apikeys() {
+    test_group("authstore/apikeys");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+    var uid = agnostic_users_create_a(a, str_from("k@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_OPERATOR, 0);
+    assert_neq(uid, 0, "owner created");
+    assert_eq(agnostic_apikeys_count(), 0, "no keys yet");
+
+    var key = agnostic_apikey_issue_a(a, uid, str_from("ci"));
+    assert_neq(key, 0, "a key is minted");
+    assert_eq(str_len(key), 64, "256 bits, hex — 64 characters");
+    assert_eq(agnostic_apikeys_count(), 1, "and stored");
+
+    assert_eq(agnostic_apikey_resolve_a(a, key), uid, "it resolves to its owner");
+    assert_eq(agnostic_apikey_resolve_a(a, str_from("deadbeef")), 0, "a bogus key does not");
+    assert_eq(agnostic_apikey_resolve_a(a, str_from("")), 0, "nor does an empty one");
+
+    assert_eq(agnostic_apikey_issue_a(a, 999999, str_from("x")), 0,
+      "a key cannot be minted for a uid that does not exist");
+
+    assert_eq(agnostic_apikey_revoke_a(a, key), 1, "the key revokes");
+    assert_eq(agnostic_apikeys_count(), 0, "and is gone");
+    assert_eq(agnostic_apikey_resolve_a(a, key), 0, "and no longer resolves");
+}
+
+fn test_apikey_bucket_is_rechecked() {
+    test_group("authstore/apikey-bucket-not-identity");
+
+    _t_auth_open();
+    var a = arena_allocator(1048576);
+    var db = agnostic_store_db();
+    var uid = agnostic_users_create_a(a, str_from("kc@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+
+    # A row in the presented key's bucket whose stored digest is a DIFFERENT
+    # key's. The `kid` hit alone would authenticate it.
+    var presented = str_from("a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90");
+    var kid = agnostic_key64(presented);
+    var other = agnostic_sha256_hex_a(a, str_from("some other key entirely"));
+
+    var st = patra_prepare(db,
+      "INSERT INTO agnostic_apikeys (kid, khash, kuid, label, created) VALUES (?, ?, ?, ?, ?)");
+    patra_bind_int(st, 0, kid);
+    patra_bind_text(st, 1, str_data(other), str_len(other));
+    patra_bind_int(st, 2, uid);
+    patra_bind_text(st, 3, str_data(str_from("forged")), 6);
+    patra_bind_int(st, 4, 0);
+    assert_eq(patra_exec_prepared(db, st), PATRA_OK, "the colliding key row is written");
+    patra_finalize(st);
+
+    # ⭐ The digest compare, not the bucket, is what decides.
+    assert_eq(agnostic_apikey_resolve_a(a, presented), 0,
+      "a bucket hit with a non-matching digest authenticates NOBODY");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_roles();
+    test_create_and_find();
+    test_refusals();
+    test_verify();
+    test_unknown_user_still_costs_argon2();
+    test_bucket_hit_is_rechecked();
+    test_apikeys();
+    test_apikey_bucket_is_rechecked();
+    return assert_summary();
+}
+
+var _agnostic_authstore_test_exit = main();
+if (_agnostic_authstore_test_exit > 0) { _agnostic_authstore_test_exit = 1; }
+sys_exit_group(_agnostic_authstore_test_exit);

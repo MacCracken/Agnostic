@@ -58,3 +58,28 @@ fn agnostic_str_eq_cstr_ci(a: Str, b): i64 {
     if ((load8(b + n) & 0xFF) != 0) { return 0; }
     return 1;
 }
+
+# A lowered copy of `s`, allocated in `a`. 0 when the arena is exhausted.
+#
+# `lib/string.cyr`'s `str_lower_cstr` allocates on the global bump and takes a
+# cstring; identity code lowers request-supplied text on a per-request arena and
+# holds a `Str`, so neither half of that fits. ASCII-only, like the rest of this
+# module.
+#
+# ⚠ **This is a normalisation, not a comparison.** It exists so an email can be
+# folded ONCE and the folded bytes used both to derive a lookup key and to be
+# stored — deriving a key from unfolded text would put `A@b.com` and `a@b.com` in
+# different buckets and let one address register twice.
+fn agnostic_str_lower_a(a, s: Str): i64 {
+    var n = str_len(s);
+    if (n == 0) { return str_new_a(a, str_data(s), 0); }
+    var buf = alloc_via(a, n);
+    if (buf == 0) { return 0; }
+    var src = str_data(s);
+    var i = 0;
+    while (i < n) {
+        store8(buf + i, _agnostic_fold_ascii(load8(src + i) & 255));
+        i = i + 1;
+    }
+    return str_new_a(a, buf, n);
+}

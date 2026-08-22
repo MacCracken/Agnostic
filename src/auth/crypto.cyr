@@ -1,0 +1,401 @@
+# agnostic/auth/crypto — password hashing, API-key digests, and the cost budget.
+#
+# ## ⚠ The Argon2 buffer pool IS the concurrency cap
+#
+# `sigil`'s convenience form allocates its own scratch and its own comment rules
+# it out here: *"`fl_alloc` is not thread-safe (quirk #7) — concurrent callers
+# want `argon2id_into`."* Agnostic runs handlers on sandhi pool workers, so
+# `argon2id_into` with a caller-supplied buffer is the only correct entry point.
+#
+# At the roadmap's parameters — m=19456 KiB, t=2, p=1 — that buffer is
+# **19.0 MiB per concurrent hash** (`argon2_mem_bytes`, measured). One per worker
+# would be 16 × 19 MiB = 304 MiB of resident memory doing nothing most of the
+# time.
+#
+# So there is a small fixed pool instead, and the pool is load-bearing twice
+# over: it bounds the memory, and **it is the worker-concurrency cap the roadmap
+# asks for**. A login that cannot take a buffer is shed with 429 having done no
+# Argon2 work at all — which is the whole point, because the alternative is the
+# amplification SecureYeoman measured: 8 concurrent attempts pushed `GET /health`
+# from 6 ms to 942 ms, and ~40 wedged a 4-worker pool.
+#
+# One mechanism, two requirements. Do not "simplify" this into a per-worker
+# buffer — that restores the 304 MiB *and* removes the cap.
+#
+# ## The stored form carries its parameters
+#
+# `v1$<t>$<m>$<p>$<salt-hex>$<hash-hex>`
+#
+# Parameters are stored, not assumed. The alternative — a bare salt+hash against
+# compile-time constants — means the day anyone raises `m_cost` every existing
+# password becomes unverifiable, silently, because the recomputation no longer
+# matches. Storing them costs ~20 bytes and makes a parameter change a migration
+# nobody has to run.
+
+# The roadmap's parameters, matching sy-core.
+#
+# `m` is in KiB (RFC 9106), so 19456 KiB = 19 MiB of scratch per hash.
+var AGNOSTIC_ARGON_T = 2;
+var AGNOSTIC_ARGON_M = 19456;
+var AGNOSTIC_ARGON_P = 1;
+
+# 16 bytes of salt, 32 of output — the RFC 9106 recommendation.
+var AGNOSTIC_SALT_BYTES = 16;
+var AGNOSTIC_HASH_BYTES = 32;
+
+# How many passwords may be hashed at once.
+#
+# ⚠ **Raising this raises resident memory by 19 MiB each and widens the
+# amplification window.** Four is a deliberate floor-not-ceiling: enough that a
+# handful of humans logging in do not queue, few enough that a flood cannot turn
+# the process into a KDF farm.
+var AGNOSTIC_ARGON_SLOTS = 4;
+
+var _agnostic_argon_bufs = 0;      # vec of scratch buffers
+var _agnostic_argon_free = 0;      # vec of 1/0, parallel to the above
+var _agnostic_argon_mutex = 0;
+var _agnostic_argon_shed = 0;      # logins refused for want of a buffer
+
+# Allocate the pool. Mount time only, before any worker exists.
+#
+# Returns 1 on success, 0 when the scratch cannot be allocated — which the caller
+# must treat as fatal. A server that cannot hash a password cannot authenticate
+# anyone, and discovering that at the first login is worse than at startup.
+fn agnostic_argon_pool_init(): i64 {
+    if (_agnostic_argon_bufs != 0) { return 1; }
+    var need = argon2_mem_bytes(AGNOSTIC_ARGON_M, AGNOSTIC_ARGON_P);
+    if (need <= 0) { return 0; }
+
+    _agnostic_argon_bufs = vec_new();
+    _agnostic_argon_free = vec_new();
+    var i = 0;
+    while (i < AGNOSTIC_ARGON_SLOTS) {
+        var b = alloc(need);
+        if (b == 0) { return 0; }
+        vec_push(_agnostic_argon_bufs, b);
+        vec_push(_agnostic_argon_free, 1);
+        i = i + 1;
+    }
+    _agnostic_argon_mutex = mutex_new();
+    _agnostic_argon_shed = 0;
+    return 1;
+}
+
+# How many bytes of scratch the pool holds in total. For the mount log — an
+# operator should be told about 76 MiB rather than discover it in RSS.
+fn agnostic_argon_pool_bytes(): i64 {
+    return argon2_mem_bytes(AGNOSTIC_ARGON_M, AGNOSTIC_ARGON_P) * AGNOSTIC_ARGON_SLOTS;
+}
+
+# How many hashes were refused for want of a buffer.
+fn agnostic_argon_shed_count(): i64 {
+    return _agnostic_argon_shed;
+}
+
+# Take a scratch buffer, or 0 when every slot is busy.
+#
+# ⚠ **Non-blocking on purpose.** Waiting would convert the cap into a queue, and
+# a queue of 244 ms operations is the amplification lever with extra steps. The
+# caller answers 429 immediately.
+fn agnostic_argon_acquire(): i64 {
+    if (_agnostic_argon_bufs == 0) { return 0; }
+    mutex_lock(_agnostic_argon_mutex);
+    var n = vec_len(_agnostic_argon_free);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(_agnostic_argon_free, i) == 1) {
+            vec_set(_agnostic_argon_free, i, 0);
+            mutex_unlock(_agnostic_argon_mutex);
+            return vec_get(_agnostic_argon_bufs, i);
+        }
+        i = i + 1;
+    }
+    _agnostic_argon_shed = _agnostic_argon_shed + 1;
+    mutex_unlock(_agnostic_argon_mutex);
+    return 0;
+}
+
+# Return a buffer to the pool.
+#
+# ⚠ **Every acquire needs exactly one release, on every path including the error
+# ones.** A leaked slot is permanent: the pool shrinks by one for the life of the
+# process, and four leaks stop all logins with no diagnostic beyond a rising shed
+# count. Release before returning, not after the last branch.
+fn agnostic_argon_release(buf): i64 {
+    if (_agnostic_argon_bufs == 0 || buf == 0) { return 0; }
+    mutex_lock(_agnostic_argon_mutex);
+    var n = vec_len(_agnostic_argon_bufs);
+    var i = 0;
+    while (i < n) {
+        if (vec_get(_agnostic_argon_bufs, i) == buf) {
+            vec_set(_agnostic_argon_free, i, 1);
+            mutex_unlock(_agnostic_argon_mutex);
+            return 1;
+        }
+        i = i + 1;
+    }
+    mutex_unlock(_agnostic_argon_mutex);
+    return 0;
+}
+
+# --- hex ------------------------------------------------------------------
+
+var AGNOSTIC_HEX_DIGITS = "0123456789abcdef";
+
+# Lowercase hex of `n` bytes at `src`, into arena `a`. 0 on exhaustion.
+fn agnostic_hex_a(a, src, n): i64 {
+    if (n < 0) { return 0; }
+    var out = alloc_via(a, n * 2);
+    if (out == 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        var b = load8(src + i) & 255;
+        store8(out + i * 2, load8(AGNOSTIC_HEX_DIGITS + (b >> 4)) & 255);
+        store8(out + i * 2 + 1, load8(AGNOSTIC_HEX_DIGITS + (b & 15)) & 255);
+        i = i + 1;
+    }
+    return str_new_a(a, out, n * 2);
+}
+
+# One hex digit's value, or -1 when the byte is not a hex digit.
+fn _agnostic_unhex_digit(c): i64 {
+    if (c >= 48 && c <= 57) { return c - 48; }
+    if (c >= 97 && c <= 102) { return c - 87; }
+    if (c >= 65 && c <= 70) { return c - 55; }
+    return 0 - 1;
+}
+
+# Decode `hex` into `out`, which must hold str_len(hex)/2 bytes.
+# Returns the byte count, or -1 when the input is not clean hex.
+fn agnostic_unhex(hex: Str, out): i64 {
+    var n = str_len(hex);
+    if (n == 0) { return 0; }
+    if (n % 2 != 0) { return 0 - 1; }
+    var d = str_data(hex);
+    var i = 0;
+    while (i < n) {
+        var hi = _agnostic_unhex_digit(load8(d + i) & 255);
+        var lo = _agnostic_unhex_digit(load8(d + i + 1) & 255);
+        if (hi < 0 || lo < 0) { return 0 - 1; }
+        store8(out + i / 2, hi * 16 + lo);
+        i = i + 2;
+    }
+    return n / 2;
+}
+
+# --- SHA-256 --------------------------------------------------------------
+
+# SHA-256 of `len` bytes at `data` into `out32`. Returns 1.
+fn agnostic_sha256(data, len, out32): i64 {
+    var ctx = sha256_init();
+    sha256_update(ctx, data, len);
+    sha256_finalize(ctx, out32);
+    return 1;
+}
+
+# Lowercase-hex SHA-256 of a Str, in arena `a`. 64 characters. 0 on exhaustion.
+fn agnostic_sha256_hex_a(a, s: Str): i64 {
+    var dg = alloc_via(a, AGNOSTIC_HASH_BYTES);
+    if (dg == 0) { return 0; }
+    agnostic_sha256(str_data(s), str_len(s), dg);
+    return agnostic_hex_a(a, dg, AGNOSTIC_HASH_BYTES);
+}
+
+# The first 64 bits of a SHA-256, assembled byte-wise, big-endian.
+#
+# ⚠ **Byte-wise, never `load64`.** This value is written to disk as a patra row
+# key, and a database moved between hosts of different endianness must still find
+# its rows. `load64` would make the key host-dependent — a bug that only appears
+# on the day someone copies the file to another machine.
+#
+# ⚠ **A truncated hash is a BUCKET, not an identity.** patra re-checks its own
+# STR index hits, but gives no such re-check for an app-computed INT key: its INT
+# equality is exact on the truncated value. A 64-bit collision without a full
+# compare afterwards is an **authentication bypass**. Every caller of this must
+# re-verify the hit against the full value with `ct_eq_bytes` before it
+# authenticates anything.
+fn agnostic_key64(s: Str): i64 {
+    var dg[32];
+    agnostic_sha256(str_data(s), str_len(s), &dg);
+    var v = 0;
+    var i = 0;
+    while (i < 8) {
+        v = (v << 8) | (load8(&dg + i) & 255);
+        i = i + 1;
+    }
+    # Clear the top bit: patra stores an i64 and a negative key is legal but
+    # makes every log line and every hand-written query harder to read for no
+    # gain. 63 bits is 9.2e18 buckets.
+    return v & 0x7FFFFFFFFFFFFFFF;
+}
+
+# --- passwords ------------------------------------------------------------
+
+# Hash a password into the stored form, in arena `a`.
+#
+# `v1$<t>$<m>$<p>$<salt-hex>$<hash-hex>` — see the module header for why the
+# parameters travel with the record.
+#
+# Returns 0 when no scratch buffer was free (the caller must answer 429, not
+# 500 — nothing is wrong with the request), when the CSPRNG failed, or when the
+# arena is exhausted. ⚠ The caller cannot tell those apart from the return alone;
+# `agnostic_argon_shed_count` moving is what distinguishes a shed from a fault.
+fn agnostic_password_hash_a(a, password: Str): i64 {
+    var salt = alloc_via(a, AGNOSTIC_SALT_BYTES);
+    if (salt == 0) { return 0; }
+    if (random_bytes(salt, AGNOSTIC_SALT_BYTES) != AGNOSTIC_SALT_BYTES) { return 0; }
+
+    var out = alloc_via(a, AGNOSTIC_HASH_BYTES);
+    if (out == 0) { return 0; }
+
+    var mem = agnostic_argon_acquire();
+    if (mem == 0) { return 0; }
+    var rc = argon2id_into(mem, str_data(password), str_len(password),
+      salt, AGNOSTIC_SALT_BYTES, AGNOSTIC_ARGON_T, AGNOSTIC_ARGON_M,
+      AGNOSTIC_ARGON_P, out, AGNOSTIC_HASH_BYTES);
+    # Released before the error branch, not after it — see the release doc.
+    agnostic_argon_release(mem);
+    if (rc != SIGIL_ERR_NONE) { return 0; }
+
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "v1$");
+    str_builder_add_int(sb, AGNOSTIC_ARGON_T);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_int(sb, AGNOSTIC_ARGON_M);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add_int(sb, AGNOSTIC_ARGON_P);
+    str_builder_add_cstr(sb, "$");
+    str_builder_add(sb, agnostic_hex_a(a, salt, AGNOSTIC_SALT_BYTES));
+    str_builder_add_cstr(sb, "$");
+    str_builder_add(sb, agnostic_hex_a(a, out, AGNOSTIC_HASH_BYTES));
+    return str_builder_build(sb);
+}
+
+# The `i`th `$`-separated field of a stored record, or 0.
+fn _agnostic_pw_field(stored: Str, want): i64 {
+    var n = str_len(stored);
+    var d = str_data(stored);
+    var field = 0;
+    var start = 0;
+    var i = 0;
+    while (i <= n) {
+        var at_end = 0;
+        if (i == n) { at_end = 1; }
+        else { if ((load8(d + i) & 255) == 36) { at_end = 1; } }
+        if (at_end == 1) {
+            if (field == want) { return str_sub(stored, start, i - start); }
+            field = field + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Verify a password against a stored record. 1 on match, 0 otherwise.
+#
+# ⚠ **Constant-time on the comparison, and only on the comparison.** The record's
+# shape, its version and its parameters are all public — branching on those leaks
+# nothing. The digest compare is the secret one, and it goes through
+# `ct_eq_bytes`, never `str_eq` or a byte loop with an early exit.
+#
+# ⚠ **Returns 0 for "no scratch was free" as well as for "wrong password", and
+# the caller must not conflate them.** A shed login answers 429 and a wrong one
+# answers 401; `agnostic_password_verify_a`'s `out_shed` is how they are told
+# apart, because a 401 for a request that was never evaluated is a lie.
+fn agnostic_password_verify_a(a, password: Str, stored: Str, out_shed): i64 {
+    if (out_shed != 0) { store64(out_shed, 0); }
+    if (stored == 0 || str_len(stored) == 0) { return 0; }
+
+    var ver = _agnostic_pw_field(stored, 0);
+    if (ver == 0) { return 0; }
+    if (str_eq_cstr(ver, "v1") == 0) { return 0; }
+
+    # ⚠ **Every field is checked for 0 BEFORE it is used.** `_agnostic_pw_field`
+    # answers 0 for a field a truncated record does not have, and
+    # `agnostic_config_parse_bounded` would `str_len(0)` — a read through a null
+    # `Str` header, i.e. a segfault on the authentication path, reachable from a
+    # tampered or half-written database row. Found by
+    # `tests/crypto.tcyr` → `crypto/password-malformed` feeding the record `v1`.
+    var tf = _agnostic_pw_field(stored, 1);
+    var mf = _agnostic_pw_field(stored, 2);
+    var pf = _agnostic_pw_field(stored, 3);
+    if (tf == 0 || mf == 0 || pf == 0) { return 0; }
+
+    var t = agnostic_config_parse_bounded(tf, 64);
+    var m = agnostic_config_parse_bounded(mf, 4194304);
+    var p = agnostic_config_parse_bounded(pf, 64);
+    if (t <= 0 || m <= 0 || p <= 0) { return 0; }
+
+    var salt_hex = _agnostic_pw_field(stored, 4);
+    var hash_hex = _agnostic_pw_field(stored, 5);
+    if (salt_hex == 0 || hash_hex == 0) { return 0; }
+
+    var slen = str_len(salt_hex) / 2;
+    var hlen = str_len(hash_hex) / 2;
+    # RFC 9106's own floors, which `argon2_hash_into` also enforces
+    # (`saltlen < 8` / `outlen < 4` -> SIGIL_ERR_INVALID_INPUT). Checked here too
+    # so a malformed record is refused by this module's own rule rather than
+    # relying on a dependency's validation to be the last line.
+    if (slen < 8 || hlen < 4) { return 0; }
+
+    var salt = alloc_via(a, slen);
+    var want = alloc_via(a, hlen);
+    var got = alloc_via(a, hlen);
+    if (salt == 0 || want == 0 || got == 0) { return 0; }
+    if (agnostic_unhex(salt_hex, salt) != slen) { return 0; }
+    if (agnostic_unhex(hash_hex, want) != hlen) { return 0; }
+
+    # ⚠ The stored record's parameters are used, NOT the module's constants —
+    # that is the whole reason they are stored. A record written before a
+    # parameter change still verifies.
+    #
+    # But the scratch buffer is sized for the CURRENT parameters, so a record
+    # demanding more memory than the pool provides cannot be verified here.
+    # Refusing is correct: computing with a smaller arena would silently produce
+    # a different digest and reject a valid password.
+    if (m > AGNOSTIC_ARGON_M || p > AGNOSTIC_ARGON_P) { return 0; }
+
+    var mem = agnostic_argon_acquire();
+    if (mem == 0) {
+        if (out_shed != 0) { store64(out_shed, 1); }
+        return 0;
+    }
+    var rc = argon2id_into(mem, str_data(password), str_len(password),
+      salt, slen, t, m, p, got, hlen);
+    agnostic_argon_release(mem);
+    if (rc != SIGIL_ERR_NONE) { return 0; }
+
+    return ct_eq_bytes(got, want, hlen);
+}
+
+# --- API keys -------------------------------------------------------------
+
+# How many random bytes an API key carries. 32 bytes = 256 bits, hex-encoded to
+# 64 characters — comfortably beyond guessing, and it fits a patra `COL_STR`.
+var AGNOSTIC_APIKEY_BYTES = 32;
+
+# Mint a new API key as lowercase hex, in arena `a`. 0 when the CSPRNG failed.
+#
+# ⚠ **Returned once and never stored.** Only `agnostic_sha256_hex_a` of it goes
+# to the database, so a stolen table yields no usable key. A caller that loses it
+# mints another.
+fn agnostic_apikey_generate_a(a): i64 {
+    var raw = alloc_via(a, AGNOSTIC_APIKEY_BYTES);
+    if (raw == 0) { return 0; }
+    if (random_bytes(raw, AGNOSTIC_APIKEY_BYTES) != AGNOSTIC_APIKEY_BYTES) { return 0; }
+    return agnostic_hex_a(a, raw, AGNOSTIC_APIKEY_BYTES);
+}
+
+# Whether a presented key matches a stored digest, in constant time.
+#
+# ⚠ `ct_eq_bytes_lens` rather than `ct_eq_bytes`, because the presented value is
+# attacker-controlled and may be any length. The length-aware form compares
+# without branching on the mismatch position.
+fn agnostic_apikey_matches_a(a, presented: Str, stored_hex: Str): i64 {
+    if (presented == 0 || stored_hex == 0) { return 0; }
+    var got = agnostic_sha256_hex_a(a, presented);
+    if (got == 0) { return 0; }
+    return ct_eq_bytes_lens(str_data(got), str_len(got),
+      str_data(stored_hex), str_len(stored_hex));
+}

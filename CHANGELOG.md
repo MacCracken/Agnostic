@@ -4,6 +4,88 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — agnosai 2.0.4 → 2.0.5, Cyrius pin 6.5.32 → 6.5.34, and `[deps.agnosai]` loses its `path`
+
+**These are one change, not three.** agnosai 2.0.5 carries bote 3.3.3 → libro 2.8.10,
+which declares `[deps.patra] = 1.13.10`, and `cyrius deps` overlays a declared dep's
+copy on top of the `lib sync --full` snapshot on every resolve. Only a Cyrius that
+folds 1.13.10 — **6.5.34** — leaves `lib/` matching the pin, and
+`scripts/check-clean.sh`'s lib-snapshot rule allows **no** file to differ.
+
+⚠ Bumping either half alone leaves this repo red, in opposite directions: 2.0.4 pulls
+libro 2.8.8 (patra 1.13.9), which would **downgrade** `lib/patra.cyr` against a 6.5.34
+snapshot exactly as surely as 2.0.5 **upgraded** it against a 6.5.32 one. agnosai's
+`main` was red for precisely this reason before 2.0.5.
+
+**`path = "../agnosai"` is deleted, and that is the durable fix.** `path` beats `tag`
+when a checkout is present, so every previous resolve here vendored whatever the
+sibling working tree happened to hold — content corresponding to no tag, which CI
+cannot fetch. The effect is measurable: **the lock went from 1 commit pin to 9.**
+Every dependency now resolves from `git` + `tag` and carries a commit pin —
+`agnosai` 2.0.5, `sigil` 3.12.9, `bote` 3.3.3, `majra` 2.6.7, `kavach` 3.12.2,
+`ai-hwaccel` 2.3.18, `tyche` 1.0.1, `libro` 2.8.10, `patra` 1.13.10. Verified:
+`lib/agnosai.cyr` is byte-identical to `git show 2.0.5:dist/agnosai.cyr`.
+
+**What the chain actually delivers here.** libro 2.8.9 fixes `PatraStore` faulting when
+read off the opening thread — **the defect this repo reported**, and the reason its audit
+verification currently runs only once at open. patra 1.13.10 stops `patra_init` clobbering
+the host's log level — the other work-around, in `src/engine/store.cyr`. ⚠ **Both
+work-arounds are still in place and are now removable**; they are left for a separate
+change rather than folded into a dependency bump.
+
+Also arrives: kavach 3.12.2 (`config_env`, `config_workdir`, and a command-blocklist fix
+that let a rootfs'd sandbox run a shell). Nothing here calls that surface yet.
+
+### Added — a `lib/`↔`lib/` symbol gate, because nothing in the ecosystem had one
+
+`scripts/check-lib-symbols.py`, wired in as **Rule 4** of `check-symbols.sh`.
+
+Rules 1–3 all take `src/` as one side of the comparison, so none of them can see a
+collision **between two dependencies** — and neither can the compiler, which warns on a
+duplicate `fn` and is **silent** for `var` and for enum members. That blind spot is how
+kavach's `var BACKEND_COUNT = 10` and ai-hwaccel's `= 18` both reached a binary through
+agnosai, with the 18 winning: it admitted ids 0–17 into a 10-slot function-pointer table
+and called whatever sat 224 bytes past its end. It was found by hand.
+
+`lib/` here is ~1.6 MB of vendored dependency, most of it arriving **transitively**
+through agnosai — kavach, ai-hwaccel, libro, bote-core, majra, tyche — so this repo
+carries the exposure without declaring most of the deps that create it.
+
+The check resolves the real compile set from `cyrius.cyml` (`[deps].stdlib`, each dist's
+`.deps` sidecar, every dep dist in `lib/`), skips the per-platform stdlib variants that
+define the same names on purpose, **fails** on any constant defined twice with differing
+values, and reports the rest. **Validated against the historical defect**: with kavach
+3.11.14 and ai-hwaccel 2.3.17 restored it reports `BACKEND_COUNT` 18-vs-10 and fails.
+
+⚠ **One live divergence is allow-listed, not fixed:** `STDIN` is `var STDIN = 0` in
+`lib/io.cyr` and `InjectionMethod.STDIN = 2` in `lib/kavach.cyr`. Under this repo's
+ordering io.cyr wins, so kavach's member collapses onto `ENV_VAR` (both 0) and its two
+credential guards alias — a secret requested on stdin would be injected into the
+environment instead. **Unreachable here**: across the whole 52-module compile set `STDIN`
+occurs exactly four times — io.cyr's definition and kavach's own three — and nothing reads
+it as a file descriptor. Filed upstream with a repro; a consumer-side rename cannot fix it
+because both definitions live in `lib/`.
+
+### Added — M5 (part 1), credential primitives on sigil
+
+**54 assertions** in `tests/crypto.tcyr` across six groups (hex, digest, password,
+malformed-record, pool, api-key); 825 total across 17 suites, 0 failed.
+
+`src/auth/crypto.cyr` — Argon2id password hashing at the roadmap's parameters
+(m=19456 KiB, t=2, p=1), API-key digests, and the cost budget.
+
+- **The Argon2 buffer pool IS the concurrency cap.** sigil's convenience form allocates
+  its own scratch and rules itself out (`fl_alloc` is not thread-safe), so
+  `argon2id_into` with a caller-supplied buffer is the only correct entry point here —
+  handlers run on sandhi pool workers. At 19.0 MiB per concurrent hash, one buffer per
+  worker would be 304 MiB resident. A small fixed pool bounds the memory *and* sheds
+  excess logins with 429 having done no Argon2 work — the amplification SecureYeoman
+  measured was 8 concurrent attempts pushing `GET /health` from 6 ms to 942 ms.
+- **The stored form carries its parameters** — `v1$<t>$<m>$<p>$<salt-hex>$<hash-hex>` —
+  so raising `m_cost` later does not silently invalidate every existing password.
+- Malformed records are **refused, not partially decoded**; the API-key path parses
+  attacker-supplied hex.
+
 ### Added — M4 (part 2), a durable tamper-evident audit chain on libro
 
 **35 assertions** in `tests/audit.tcyr`; 746 total across 15 suites, 0 failed.

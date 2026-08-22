@@ -1,0 +1,210 @@
+# agnostic/auth/crypto — credentials. Security code, so the tests are the point.
+#
+# What this holds: a password verifies only against itself, the comparison is
+# constant-time, the Argon2 pool bounds concurrency rather than queueing, and a
+# truncated hash is never treated as an identity.
+include "src/app.cyr"
+
+fn test_hex_roundtrip() {
+    test_group("crypto/hex");
+
+    var a = arena_allocator(65536);
+    var buf[4];
+    store8(&buf, 0x00); store8(&buf + 1, 0x0f); store8(&buf + 2, 0xa5); store8(&buf + 3, 0xff);
+
+    var h = agnostic_hex_a(a, &buf, 4);
+    assert_eq(str_eq_cstr(h, "000fa5ff"), 1, "hex is lowercase and zero-padded");
+
+    var back[4];
+    assert_eq(agnostic_unhex(h, &back), 4, "decodes to four bytes");
+    assert_eq(load8(&back + 1) & 255, 0x0f, "byte 1 survives");
+    assert_eq(load8(&back + 3) & 255, 0xff, "byte 3 survives");
+
+    # ⚠ Malformed input is refused, not silently partially decoded — this parses
+    # attacker-supplied hex on the API-key path.
+    var junk[4];
+    assert_eq(agnostic_unhex(str_from("abc"), &junk), 0 - 1, "an odd length is refused");
+    assert_eq(agnostic_unhex(str_from("zz"), &junk), 0 - 1, "a non-hex digit is refused");
+    assert_eq(agnostic_unhex(str_from("00ff"), &junk), 2, "clean hex decodes");
+}
+
+fn test_sha256_and_key64() {
+    test_group("crypto/digest");
+
+    var a = arena_allocator(65536);
+
+    # NIST vector: SHA-256("abc").
+    assert_eq(str_eq_cstr(agnostic_sha256_hex_a(a, str_from("abc")),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), 1,
+      "SHA-256(\"abc\") matches the published vector");
+    assert_eq(str_eq_cstr(agnostic_sha256_hex_a(a, str_from("")),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), 1,
+      "and the empty-string vector");
+
+    # The row key is derived from the value, which is what lets ONE patra index
+    # serve both a by-id and a by-email lookup.
+    var k1 = agnostic_key64(str_from("alice@example.com"));
+    var k2 = agnostic_key64(str_from("alice@example.com"));
+    var k3 = agnostic_key64(str_from("bob@example.com"));
+    assert_eq(k1, k2, "the key is deterministic");
+    assert_neq(k1, k3, "and distinguishes distinct inputs");
+    assert_eq(k1 > 0, 1, "and is non-negative, so it reads cleanly in a query");
+
+    # ⚠ Byte-wise assembly, not `load64` — the key is written to disk and must
+    # survive the database being copied to a host of different endianness. The
+    # first byte of SHA-256("abc") is 0xba, so the top byte of the key is 0xba
+    # with the sign bit cleared: 0x3a.
+    assert_eq(agnostic_key64(str_from("abc")) >> 56, 0x3a,
+      "the high byte is the digest's FIRST byte, big-endian, sign bit cleared");
+}
+
+fn test_password_roundtrip() {
+    test_group("crypto/password");
+
+    assert_eq(agnostic_argon_pool_init(), 1, "the scratch pool allocates");
+    var a = arena_allocator(1048576);
+
+    var stored = agnostic_password_hash_a(a, str_from("correct horse battery staple"));
+    assert_neq(stored, 0, "a password hashes");
+
+    # The record carries its parameters — see the module header for why.
+    assert_eq(str_eq_cstr(_agnostic_pw_field(stored, 0), "v1"), 1, "versioned");
+    assert_eq(str_eq_cstr(_agnostic_pw_field(stored, 1), "2"), 1, "t_cost stored");
+    assert_eq(str_eq_cstr(_agnostic_pw_field(stored, 2), "19456"), 1, "m_cost stored");
+    assert_eq(str_len(_agnostic_pw_field(stored, 4)), 32, "16-byte salt, hex");
+    assert_eq(str_len(_agnostic_pw_field(stored, 5)), 64, "32-byte hash, hex");
+
+    var shed: i64[1];
+    assert_eq(agnostic_password_verify_a(a, str_from("correct horse battery staple"),
+        stored, &shed), 1, "the right password verifies");
+    assert_eq(load64(&shed), 0, "and was not shed");
+
+    assert_eq(agnostic_password_verify_a(a, str_from("Correct horse battery staple"),
+        stored, &shed), 0, "one changed character does not");
+    assert_eq(agnostic_password_verify_a(a, str_from(""), stored, &shed), 0, "nor does empty");
+    assert_eq(agnostic_password_verify_a(a, str_from("correct horse battery stapl"),
+        stored, &shed), 0, "nor a prefix");
+
+    # ⚠ A distinct salt per record: the same password twice must not produce the
+    # same stored bytes, or the table leaks which users share a password.
+    var again = agnostic_password_hash_a(a, str_from("correct horse battery staple"));
+    assert_eq(str_eq(stored, again), 0, "the same password hashes differently each time");
+    assert_eq(agnostic_password_verify_a(a, str_from("correct horse battery staple"),
+        again, &shed), 1, "and both records still verify");
+}
+
+fn test_malformed_records_are_refused() {
+    test_group("crypto/password-malformed");
+
+    agnostic_argon_pool_init();
+    var a = arena_allocator(1048576);
+    var shed: i64[1];
+    var pw = str_from("hunter2");
+
+    # ⚠ Every one of these must answer 0 rather than fault or accept. A stored
+    # record is data the process read back off disk — if the file was tampered
+    # with, this is the code that meets it first.
+    assert_eq(agnostic_password_verify_a(a, pw, 0, &shed), 0, "a null record");
+    assert_eq(agnostic_password_verify_a(a, pw, str_from(""), &shed), 0, "an empty record");
+    assert_eq(agnostic_password_verify_a(a, pw, str_from("v9$2$19456$1$00$00"), &shed), 0,
+      "an unknown version");
+    assert_eq(agnostic_password_verify_a(a, pw, str_from("v1"), &shed), 0, "a truncated record");
+    assert_eq(agnostic_password_verify_a(a, pw, str_from("v1$0$0$0$00$00"), &shed), 0,
+      "zero parameters");
+    assert_eq(agnostic_password_verify_a(a, pw, str_from("v1$2$19456$1$zz$00"), &shed), 0,
+      "non-hex salt");
+
+    # ⚠ A record demanding MORE memory than the pool provides is refused rather
+    # than computed with a smaller arena — which would silently produce a
+    # different digest and reject a valid password.
+    assert_eq(agnostic_password_verify_a(a, pw, str_from("v1$2$4194304$1$00$00"), &shed), 0,
+      "a record needing more scratch than the pool has");
+}
+
+fn test_pool_caps_concurrency_rather_than_queueing() {
+    test_group("crypto/pool");
+
+    agnostic_argon_pool_init();
+    assert_eq(agnostic_argon_pool_bytes(),
+      argon2_mem_bytes(AGNOSTIC_ARGON_M, AGNOSTIC_ARGON_P) * AGNOSTIC_ARGON_SLOTS,
+      "the pool reports its real footprint");
+
+    # ⭐ THE CAP. Drain every slot, then confirm the next acquire FAILS rather
+    # than blocking. A queue of 244 ms operations is the amplification lever
+    # with extra steps; a refusal is a 429 that costs nothing.
+    var held = vec_new();
+    var i = 0;
+    while (i < AGNOSTIC_ARGON_SLOTS) {
+        var b = agnostic_argon_acquire();
+        assert_neq(b, 0, "a slot is available while the pool has room");
+        vec_push(held, b);
+        i = i + 1;
+    }
+
+    var before = agnostic_argon_shed_count();
+    assert_eq(agnostic_argon_acquire(), 0, "the pool refuses once every slot is taken");
+    assert_eq(agnostic_argon_shed_count(), before + 1, "and counts the refusal");
+
+    # And a hash attempted with no slot free reports the shed distinctly from a
+    # wrong password — a 401 for a request never evaluated would be a lie.
+    var a = arena_allocator(1048576);
+    var shed: i64[1];
+    # ⚠ The record must be otherwise VALID, or it is refused before the acquire
+    # and the shed path is never reached — which is what this assertion is for.
+    # 16-byte salt, 32-byte hash, both full length.
+    assert_eq(agnostic_password_verify_a(a, str_from("x"),
+        str_from("v1$2$19456$1$000102030405060708090a0b0c0d0e0f$00000000000000000000000000000000000000000000000000000000000000ff"),
+        &shed), 0, "verification fails with no scratch");
+    assert_eq(load64(&shed), 1, "and says it was SHED, not that the password was wrong");
+
+    # Release restores capacity exactly.
+    var j = 0;
+    while (j < vec_len(held)) { agnostic_argon_release(vec_get(held, j)); j = j + 1; }
+    var b2 = agnostic_argon_acquire();
+    assert_neq(b2, 0, "releasing restores the slot");
+    agnostic_argon_release(b2);
+}
+
+fn test_api_keys() {
+    test_group("crypto/apikey");
+
+    var a = arena_allocator(65536);
+    var k1 = agnostic_apikey_generate_a(a);
+    var k2 = agnostic_apikey_generate_a(a);
+    assert_eq(str_len(k1), 64, "32 random bytes as 64 hex characters");
+    assert_eq(str_eq(k1, k2), 0, "two keys differ");
+
+    # ⚠ Only the DIGEST is stored, so a stolen table yields no usable key.
+    var digest = agnostic_sha256_hex_a(a, k1);
+    assert_eq(str_len(digest), 64, "the stored digest is a SHA-256");
+    assert_eq(str_eq(digest, k1), 0, "and is not the key itself");
+
+    assert_eq(agnostic_apikey_matches_a(a, k1, digest), 1, "the key matches its digest");
+    assert_eq(agnostic_apikey_matches_a(a, k2, digest), 0, "another key does not");
+    assert_eq(agnostic_apikey_matches_a(a, str_from(""), digest), 0, "nor does empty");
+    assert_eq(agnostic_apikey_matches_a(a, 0, digest), 0, "nor a null, and it does not fault");
+
+    # ⚠ Length-aware constant-time compare: the presented value is
+    # attacker-controlled and may be any length.
+    assert_eq(agnostic_apikey_matches_a(a, str_from("ab"), digest), 0, "a short presentation");
+    var long = str_builder_new();
+    var i = 0;
+    while (i < 200) { str_builder_add_cstr(long, "f"); i = i + 1; }
+    assert_eq(agnostic_apikey_matches_a(a, str_builder_build(long), digest), 0, "a long one");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_hex_roundtrip();
+    test_sha256_and_key64();
+    test_password_roundtrip();
+    test_malformed_records_are_refused();
+    test_pool_caps_concurrency_rather_than_queueing();
+    test_api_keys();
+    return assert_summary();
+}
+
+var _agnostic_crypto_test_exit = main();
+if (_agnostic_crypto_test_exit > 0) { _agnostic_crypto_test_exit = 1; }
+sys_exit_group(_agnostic_crypto_test_exit);

@@ -1,0 +1,113 @@
+# agnostic/auth/perm — the static role→permission table.
+#
+# ## Why a table and not a comparison
+#
+# The tempting shape is `if (role >= AGNOSTIC_ROLE_ADMIN)`. It reads well and it
+# is a latent privilege escalation: it makes the *numeric order* of the role enum
+# load-bearing, so inserting a role in the middle silently re-grants everything
+# above it, and a role that arrives as an out-of-range integer passes every
+# `>=` test for the roles below it. `ORACLE-AUDIT.md` records the Python tier
+# shipping with everyone a VIEWER and no role assignment at all, which is the
+# same class of accident from the other direction.
+#
+# An explicit bitmask per role has neither property. Adding a role means adding a
+# row and deciding what it may do; a value with no row grants **nothing**.
+#
+# ## ⚠ Fail closed, and prove it
+#
+# `agnostic_role_can` returns 0 for any role it does not recognise, including
+# negative ones — which matters because `agnostic_users_role` and
+# `agnostic_jwt_claim_role` both answer **-1** for "no such identity". A caller
+# that forgets to check for -1 still gets a refusal rather than a grant.
+
+# ## ⚠ This module is included BEFORE `src/http/router.cyr`, and that is safe
+#
+# It reads `AGNOSTIC_ROUTE_*`, which `router.cyr` defines further down
+# `src/app.cyr`. That is fine — and the reason is worth knowing, because the
+# neighbouring comments in `app.cyr` warn about exactly the opposite case.
+#
+# **enum members are compile-time constants** and resolve across the whole unit
+# regardless of include order. **`var` globals are not**: they are initialised in
+# include order, so a `var` read from a module included earlier is 0. The audit
+# chain's placement note in `app.cyr` is about that second case.
+#
+# Verified rather than assumed: a probe asserting `AGNOSTIC_ROUTE_CREW_GET == 4`
+# and the route mapping from this position passes. If a future refactor turns any
+# `AGNOSTIC_ROUTE_*` into a `var`, this module has to move below `router.cyr`.
+
+# What a caller may do. Bit values, so a role is one mask.
+enum AgnosticPerm {
+    AGNOSTIC_PERM_READ  = 1;
+    AGNOSTIC_PERM_WRITE = 2;
+    AGNOSTIC_PERM_ADMIN = 4;
+    AGNOSTIC_PERM_SUPER = 8;
+}
+
+# The mask for a role, or 0 for anything unrecognised.
+#
+# ⚠ The masks are written out in full rather than accumulated (`VIEWER | WRITE`)
+# so that reading one row tells you the whole grant. A reader should never have
+# to compose two rows in their head to answer "can an operator do X".
+fn agnostic_role_perms(role): i64 {
+    if (role == AGNOSTIC_ROLE_VIEWER) {
+        return AGNOSTIC_PERM_READ;
+    }
+    if (role == AGNOSTIC_ROLE_OPERATOR) {
+        return AGNOSTIC_PERM_READ | AGNOSTIC_PERM_WRITE;
+    }
+    if (role == AGNOSTIC_ROLE_ADMIN) {
+        return AGNOSTIC_PERM_READ | AGNOSTIC_PERM_WRITE | AGNOSTIC_PERM_ADMIN;
+    }
+    if (role == AGNOSTIC_ROLE_SUPER_ADMIN) {
+        return AGNOSTIC_PERM_READ | AGNOSTIC_PERM_WRITE | AGNOSTIC_PERM_ADMIN
+        | AGNOSTIC_PERM_SUPER;
+    }
+    return 0;
+}
+
+# Whether `role` holds `perm`. 0 for an unknown role, an unknown permission, or
+# a request for more than one bit at a time.
+#
+# ⚠ **A multi-bit `perm` is refused rather than treated as "any of these".** An
+# `&` test against a mask would answer 1 when the caller holds *one* of several
+# asked-for rights, which is the opposite of what a permission check means.
+fn agnostic_role_can(role, perm): i64 {
+    if (perm <= 0) { return 0; }
+    if ((perm & (perm - 1)) != 0) { return 0; }
+    if (perm > AGNOSTIC_PERM_SUPER) { return 0; }
+    if ((agnostic_role_perms(role) & perm) == perm) { return 1; }
+    return 0;
+}
+
+# The permission a route id requires, or 0 when the route needs no auth.
+#
+# ⚠ **Anything unclassified falls through to ADMIN**, mirroring
+# `agnostic_route_needs_auth`'s reasoning at `src/http/router.cyr:323`: the
+# default is what protects a route someone forgets to classify. A new route
+# nobody listed here is refused to everyone below an admin rather than served
+# on a READ check.
+#
+# ⚠ The audit trail is **ADMIN**, not READ. It records who did what across the
+# whole deployment, so a viewer holding it would read activity they cannot
+# otherwise see — including in other tenants.
+fn agnostic_perm_for_route(id): i64 {
+    if (agnostic_route_needs_auth(id) == 0) { return 0; }
+
+    if (id == AGNOSTIC_ROUTE_CREW_SUBMIT) { return AGNOSTIC_PERM_WRITE; }
+    if (id == AGNOSTIC_ROUTE_CREW_CANCEL) { return AGNOSTIC_PERM_WRITE; }
+    if (id == AGNOSTIC_ROUTE_CREW_GET) { return AGNOSTIC_PERM_READ; }
+    if (id == AGNOSTIC_ROUTE_CREW_EVENTS) { return AGNOSTIC_PERM_READ; }
+
+    if (id == AGNOSTIC_ROUTE_PRESET_LIST) { return AGNOSTIC_PERM_READ; }
+    if (id == AGNOSTIC_ROUTE_PRESET_GET) { return AGNOSTIC_PERM_READ; }
+
+    if (id == AGNOSTIC_ROUTE_DEF_LIST) { return AGNOSTIC_PERM_READ; }
+    if (id == AGNOSTIC_ROUTE_DEF_GET) { return AGNOSTIC_PERM_READ; }
+    if (id == AGNOSTIC_ROUTE_DEF_CREATE) { return AGNOSTIC_PERM_WRITE; }
+    if (id == AGNOSTIC_ROUTE_DEF_REPLACE) { return AGNOSTIC_PERM_WRITE; }
+    if (id == AGNOSTIC_ROUTE_DEF_DELETE) { return AGNOSTIC_PERM_WRITE; }
+
+    if (id == AGNOSTIC_ROUTE_AUDIT) { return AGNOSTIC_PERM_ADMIN; }
+
+    return AGNOSTIC_PERM_ADMIN;
+}

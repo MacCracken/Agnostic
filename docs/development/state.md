@@ -2,10 +2,10 @@
 
 > Refreshed every release. CLAUDE.md is preferences/process/procedures
 > (durable); this file is **state** (volatile).
-> Last refreshed: 2026-08-21, after M3.
+> Last refreshed: 2026-08-22, after M4 + agnosai 2.0.5 uptake + M5 part 1.
 >
 > **Picking this port up?** Start at [`handoff.md`](handoff.md) — orientation,
-> the build procedure that avoids an unreproducible lock, and what M4 must do.
+> the build procedure that avoids an unreproducible lock, and what M5 must do.
 > This file is the numbers.
 
 ## Version
@@ -16,22 +16,62 @@ Python line was CalVer (`2026.3.18`).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.32` (`cyrius.cyml [package].cyrius`).
-- ⚠ **The installed wrapper is currently `6.5.33` — drift.** CI treats drift as
-  fatal, and CI installs the pin, so CI is unaffected. Locally it means
-  `cyrius build`, `lib sync` and `deps` must be run through
-  `~/.cyrius/versions/6.5.32/bin/cyrius`, **not** the PATH wrapper: all three
-  provision from the *installed* toolchain rather than the manifest pin, and
-  syncing under drift is exactly how a lock CI cannot reproduce gets written.
-- For the record, `6.5.32/lib` and `6.5.33/lib` are byte-identical — only
-  `cycc` differs — so this particular drift cannot change `lib/`. That is luck,
-  not a reason to skip the precaution.
+- **Cyrius pin**: `6.5.34` (`cyrius.cyml [package].cyrius`). Installed wrapper
+  matches — **no drift**.
+- ⚠ **The pin and `[deps.agnosai]` move TOGETHER.** agnosai 2.0.5 carries
+  bote 3.3.3 → libro 2.8.10, which declares `[deps.patra] = 1.13.10`, and
+  `cyrius deps` overlays a declared dep's copy on top of the `lib sync --full`
+  snapshot on every resolve. Only a Cyrius folding 1.13.10 (**6.5.34**) leaves
+  `lib/` matching the pin, and `check-clean.sh` allows no file to differ. Bumping
+  one alone goes red in either direction — this is what kept agnosai's `main` red
+  before 2.0.5. ⛔ The wrong fixes, both tried and rejected: a `[deps.patra]` hold
+  in this manifest, and a `check-clean` allowance.
+- ⚠ **An earlier version of this section claimed `6.5.32/lib` and `6.5.33/lib`
+  were byte-identical. That was wrong** — they differ in `lib/vani.cyr`. Check
+  what a release folds with `git show <tag>:lib/<mod>` in `~/Repos/cyrius`.
+- ⚠ **`~/.cyrius/versions/<pin>/bin/cyrius` does NOT pin `cycc`.** It resolves the
+  compiler through `$CYRIUS_HOME/bin` → `~/.cyrius/current`, not relative to
+  itself and not via `PATH`. To certify against a pin the wrapper does not match,
+  build a `CYRIUS_HOME` shim (`bin`, `lib`, `versions`, `deps` symlinks plus a
+  `current` file) and confirm the drift line is absent. Filed:
+  `cyrius/docs/development/issues/2026-08-22-versioned-wrapper-does-not-pin-cycc.md`.
+- ⚠ **Never read `~/.cyrius/versions/<V>/lib/` as ground truth.** A concurrent
+  session working on cyrius rewrites those files in place; that produced a wrong
+  diagnosis on 2026-08-22 ("6.5.33 folds patra 1.13.10" — it does not).
+
+## Dependencies
+
+`[deps.agnosai]` is **tag-only — no `path`**. `path` beats `tag` when a checkout is
+present, so a local resolve silently vendors the sibling's work-in-progress into
+`lib/` and the lock: content matching no tag, which CI cannot fetch. Deleting it
+took the lock from **1 commit pin to 9**.
+
+| dep | pin | how it arrives |
+|---|---|---|
+| `agnosai` | **2.0.5** | direct, `git` + `tag` |
+| `sigil` | 3.12.9 | transitive via agnosai; also declared in `[deps].stdlib` |
+| `bote` | 3.3.3 | transitive |
+| `libro` | **2.8.10** | transitive via bote — the audit chain |
+| `patra` | **1.13.10** | folded into the 6.5.34 stdlib |
+| `kavach` | **3.12.2** | transitive |
+| `majra` / `ai-hwaccel` / `tyche` | 2.6.7 / 2.3.18 / 1.0.1 | transitive |
+
+⚠ **Two work-arounds in `src/engine/store.cyr` are now removable and still present.**
+libro 2.8.9 fixed `PatraStore` faulting off the opening thread (so audit verification
+need no longer run only at open) and patra 1.13.10 stopped `patra_init` clobbering the
+host log level. Both fixes have landed here; removing the work-arounds is deliberately
+left as its own change.
 
 ## Source
 
-**M3 complete** — 25 files, 6,502 lines, 396 top-level definitions, all
-`agnostic_*`-prefixed. 837 of those lines are the generated
+**M4 complete; M5 part 1 landed** — 29 files, 7,709 lines, 479 top-level
+definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
 `src/presets_data.cyr`.
+
+**Tests: 17 suites, 825 assertions, 0 failed** (`cyrius test`), of which
+`tests/crypto.tcyr` contributes 54 across six groups. Gates green:
+`check-symbols.sh` (**now 4 rules** — Rule 4 is the new `lib/`↔`lib/` constant
+check), `check-clean.sh`, `deps --verify` 115/0.
 
 | module | role |
 |---|---|
@@ -285,10 +325,25 @@ work-arounds carry a pointer to the filing and can be removed when they land.
 See [`roadmap.md`](roadmap.md). **M5 — identity and tenancy.** Two things it
 inherits:
 
-⚠ **patra's single index per table will bind here.** M5 needs users by id *and*
-by email; the roadmap already plans two tables or a scan. This is the concrete
-case for improving patra rather than working around it — decide it against that
-requirement.
+✅ **patra's single index per table does NOT bind here — corrected 2026-08-21.**
+The earlier note said M5 needs users by id *and* by email and would therefore
+need two tables, a scan, or a patra change. It needs none of them.
+
+`tbl_create` (`lib/patra.cyr:3437`) **auto-indexes column 0 when its type is
+`COL_INT`**, so deriving the key from the value — `uid = trunc64(sha256(lower(email)))`
+— makes one index serve both lookups, and M5 issues **zero `CREATE INDEX`**
+statements. The same trick keys API keys by `trunc64(sha256(raw_key))` and
+tenants by `trunc64(sha256(tenant_id))`.
+
+⚠ **A truncated hash is a bucket, not an identity.** patra re-checks *STR* index
+hits itself but gives no such re-check for an app-computed INT key — its INT
+equality is exact on the truncated value stored. A 64-bit collision without an
+app-side full compare is an **authentication bypass**, so every hit must be
+re-verified against the full value with `ct_eq_bytes` before it authenticates
+anything.
+
+The limit may still be worth fixing upstream on its own merits, but M5 is not
+the forcing case it was thought to be.
 
 ⚠ **Agent keys are `[a-z0-9][a-z0-9-]*`** so an identifier can never become a
 path component. Audit point 6 is answered for M4 (no filesystem call in `src/`

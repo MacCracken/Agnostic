@@ -43,7 +43,19 @@ include "src/presets_data.cyr"
 # The engine tier. `outcome` defines the status vocabulary `ledger` latches,
 # `request` decodes what `crew` submits, `presets` is self-contained data, and
 # `crew` is the only one that touches the orchestrator.
+include "src/auth/crypto.cyr"
 include "src/engine/store.cyr"
+# Identity storage sits directly on `engine/store`'s handle and on
+# `auth/crypto`'s primitives, so it follows both. It defines the role vocabulary
+# everything above it authorises against.
+include "src/auth/store.cyr"
+# Bearer tokens. Depends on `auth/store` for the role vocabulary it stamps into
+# a claim, so it follows it.
+include "src/auth/jwt.cyr"
+# Tenancy and the role->permission table. `perm` reads route ids, so it follows
+# `http/router.cyr`; `tenant` reads `_agnostic_auth_str_a` from `auth/store`.
+include "src/auth/tenant.cyr"
+include "src/auth/perm.cyr"
 include "src/engine/outcome.cyr"
 include "src/engine/crewstore.cyr"
 include "src/engine/ledger.cyr"

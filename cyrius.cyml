@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "agnostic — TODO"
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.32"
+cyrius = "6.5.34"
 
 [build]
 entry = "src/main.cyr"
@@ -26,6 +26,17 @@ stdlib = [
     # ⚠ `libro`, the audit chain, is NOT in the toolchain snapshot: it reaches
     # `lib/` only transitively through agnosai. See `[deps.libro]` below.
     "patra",
+    # M5 — identity. `sigil` is the crypto tier: Argon2id, SHA-256, HMAC-SHA256.
+    # (Constant-time compare is `ct_eq_bytes`, which lives in `ct` above.)
+    #
+    # ⚠ **Declaring it changes nothing today, and that is the point.** sigil
+    # already reaches the compile unit transitively — agnosai declares
+    # `[deps.sigil]` at 3.12.9 — and the duplicate-fn warning count is identical
+    # with and without this line, measured. It is here so that a future agnosai
+    # which stops depending on sigil cannot silently take the crypto tier away
+    # from the identity surface. Same defensive reasoning the `sakshi` note in
+    # `scripts/check-clean.sh` records.
+    "sigil",
 ]
 
 # Release artifacts. `bins` is the native build; `cross_bins` is what the
@@ -35,10 +46,23 @@ stdlib = [
 # AgnosAI — the engine tier, linked in-process rather than called over HTTP.
 # Agnostic owns the product tier; everything crew/task/agent/scheduling-shaped
 # lives here. See CYRIUS-PORT-BRIEF.md §3.
+# ⚠ **No `path = "../agnosai"`, deliberately.** `path` beats `tag` when a checkout
+# is present, so a local resolve silently vendors the sibling's work-in-progress
+# into `lib/` and the lock — content that corresponds to no tag and that CI cannot
+# fetch. agnosai removed the same `path` from its own `[deps.kavach]` for exactly
+# this reason. Resolve from the tag only.
+#
+# ⚠ **This tag and `[package].cyrius` above move TOGETHER.** agnosai 2.0.5 carries
+# bote 3.3.3 -> libro 2.8.10, which declares `[deps.patra] = 1.13.10`, and
+# `cyrius deps` overlays a declared dep's copy on top of the stdlib snapshot on
+# every resolve. Only a Cyrius that folds 1.13.10 (**6.5.34**) makes `lib/` match
+# the pin, and `scripts/check-clean.sh` allows no file to differ. Bumping either
+# one alone leaves this repo red: 2.0.4 pulls libro 2.8.8 (patra 1.13.9), which
+# would downgrade against a 6.5.34 snapshot just as surely as 2.0.5 upgraded
+# against a 6.5.32 one.
 [deps.agnosai]
 git = "https://github.com/MacCracken/agnosai.git"
-path = "../agnosai"
-tag = "2.0.4"
+tag = "2.0.5"
 modules = ["dist/agnosai.cyr"]
 
 [release]
