@@ -74,6 +74,9 @@ include "src/engine/reject.cyr"
 include "src/engine/agentdef.cyr"
 include "src/engine/request.cyr"
 include "src/engine/presets.cyr"
+# The QA tool vocabulary, resolved against the engine's registry. Reads
+# `presets`' tool union, so it follows it.
+include "src/engine/tools.cyr"
 include "src/engine/crew.cyr"
 include "src/engine/definitions.cyr"
 

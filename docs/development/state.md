@@ -67,11 +67,11 @@ a process kill with no diagnostic).
 
 ## Source
 
-**M4 complete; M5 complete** — 37 files, 9880 lines, 589 top-level
+**M4 complete; M5 complete; M6 started** — 38 files, 10045 lines, 600 top-level
 definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
 `src/presets_data.cyr`.
 
-**Tests: 23 suites, 1,144 assertions, 0 failed** (`cyrius test`). Gates green:
+**Tests: 24 suites, 1,175 assertions, 0 failed** (`cyrius test`). Gates green:
 `check-symbols.sh` (**now 4 rules** — Rule 4 is the new `lib/`↔`lib/` constant
 check), `check-clean.sh`, `deps --verify` 115/0.
 
@@ -88,6 +88,25 @@ issues the tokens it checks.
 everything is `i64` — and **crashes at run time with no output**, which is how it
 presents in a suite run. `agnostic_serve_handler`'s first parameter is already
 named `ctx`; do not shadow it.
+
+### M6 — the tool gate, and the number that has to reach 0
+
+`src/engine/tools.cyr` resolves the preset tool vocabulary against the engine's
+registry. **2 of 38 resolve; 36 do not**, both pinned by `tests/tools.tcyr`. M6 is
+finished when the unresolved count is 0.
+
+⚠ **Do not "fix" the gap with a case transform.** `LoadTestingTool` →
+`load_testing` works and `RiskScoringTool` → `risk_scoring` resolves to nothing;
+a transform makes them indistinguishable and books coverage for 36 tools that
+cannot run. The alias table is explicit on purpose, and an entry is a claim that
+the backend does the job — which is why `ComprehensiveSecurityAssessmentTool` is
+NOT aliased onto `security_audit`.
+
+⚠ **NEXT DECISION, and it gates everything else: who owns the tool registry.**
+`agnostic_engine_init` exposes no registry handle — the orchestrator owns one
+internally — so the gate is not wired into mount and agnostic's QA tools have
+nowhere to register that the orchestrator's agents would read. Settle that before
+implementing tools, or they will be written against the wrong seam.
 
 ⚠ **`agnostic_response_json_a` takes the bayan OBJECT, not an encoded `Str`.**
 `_agnostic_serve_send` serialises it. Handing it a `Str` double-encodes the

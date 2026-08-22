@@ -1,0 +1,162 @@
+# agnostic/engine/tools — resolving the preset tool vocabulary to executables.
+#
+# ## What M6 owns, and why this file is mostly a gate right now
+#
+# The 18 presets name **38 distinct tools**. In the Python oracle **none of them
+# ever ran**: the registry was never populated, so `_resolve_tools` logged a
+# warning and built every agent with `tools=[]` (`ORACLE-AUDIT.md` §3.15). The
+# arrays are a *specification of intent*, not a port target — there is no working
+# implementation to translate, for any of the 38.
+#
+# So M6 cannot start by porting. It starts by making the gap **countable**:
+# `agnostic_qa_unresolved_count` says exactly how many of the 38 have no
+# executable behind them, and `tests/tools.tcyr` pins the number. Progress is a
+# number going down, and a preset that adds a name it cannot back fails a test
+# rather than shipping an agent that silently has fewer tools than it asked for.
+#
+# ## ⚠ Two vocabularies, and the mapping is deliberate
+#
+# Presets name tools in the oracle's Python class form — `LoadTestingTool`. The
+# engine registers them in AgnosAI's form — `load_testing`. **Zero of the 38
+# resolve by name**, and that is not a bug to paper over with a case transform:
+# `LoadTestingTool` → `load_testing` happens to work, `RiskScoringTool` →
+# `risk_scoring` resolves to nothing at all, and a transform would make the two
+# indistinguishable. An explicit table is the only honest shape — an entry
+# exists when something can actually run.
+#
+# ## ⚠ Resolution returns the ENGINE's tool, it does not wrap it
+#
+# An earlier sketch built an agnostic tool per QA name whose `execute` forwarded
+# to the engine's. That is worse for two reasons: every call would record two
+# GenAI spans (`agnosai_tool_execute` instruments the vtable chokepoint), and the
+# wrapper would have to reproduce the backend's schema callback, whose allocator
+# convention is AgnosAI's to change. Resolving the name to the engine's own tool
+# object has neither problem.
+#
+# ## ⚠ A miss is an ERROR, never a smaller agent
+#
+# That is the roadmap's requirement for M6 and the direct answer to §3.15 — the
+# oracle's defect was precisely that a miss degraded silently. Callers get 0 and
+# must refuse; there is no "best effort with the tools we found" path here, and
+# none should be added.
+
+# One row of the alias table: the preset's name, and the engine tool that backs
+# it. Kept as a flat pair vec rather than a hashmap — 38 entries, read at mount
+# and on crew build, and a vec keeps the table readable in source order.
+var _agnostic_qa_alias = 0;
+
+# Declare that `preset_name` is served by the engine tool `backend_name`.
+fn _agnostic_qa_alias_add(preset_name, backend_name): i64 {
+    vec_push(_agnostic_qa_alias, str_from(preset_name));
+    vec_push(_agnostic_qa_alias, str_from(backend_name));
+    return 0;
+}
+
+# Build the alias table. Idempotent; mount time.
+#
+# ⚠ **An entry here is a claim that the backend actually does the job the preset
+# asked for.** It is not a naming convenience. `ComprehensiveSecurityAssessmentTool`
+# is deliberately ABSENT even though `security_audit` is right there and the name
+# is similar: "comprehensive" is a stronger claim than the backend makes, and
+# mapping it would report coverage this tree does not have. When in doubt, leave
+# it unresolved — an honest 0 is worth more than a flattering alias.
+fn agnostic_qa_tools_init(): i64 {
+    if (_agnostic_qa_alias != 0) { return agnostic_qa_alias_count(); }
+    _agnostic_qa_alias = vec_new();
+
+    # Direct, and verified against the engine's own description:
+    #
+    #   load_testing  — "Generate HTTP load against a target URL with concurrent
+    #                    users and measure performance metrics."
+    #   security_audit — the engine's security scan surface.
+    _agnostic_qa_alias_add("LoadTestingTool", "load_testing");
+    _agnostic_qa_alias_add("SecurityAssessmentTool", "security_audit");
+
+    return agnostic_qa_alias_count();
+}
+
+# Drop the table. For tests.
+fn agnostic_qa_tools_reset(): i64 {
+    _agnostic_qa_alias = 0;
+    return 0;
+}
+
+# How many preset names have a declared backend.
+fn agnostic_qa_alias_count(): i64 {
+    if (_agnostic_qa_alias == 0) { return 0; }
+    return vec_len(_agnostic_qa_alias) / 2;
+}
+
+# The engine tool name backing `preset_name`, or 0 when nothing does.
+fn agnostic_qa_backend_name(preset_name: Str): i64 {
+    if (_agnostic_qa_alias == 0 || preset_name == 0) { return 0; }
+    var n = vec_len(_agnostic_qa_alias);
+    var i = 0;
+    while (i < n) {
+        if (str_eq(vec_get(_agnostic_qa_alias, i), preset_name) == 1) {
+            return vec_get(_agnostic_qa_alias, i + 1);
+        }
+        i = i + 2;
+    }
+    return 0;
+}
+
+# Resolve a preset tool name to the engine's tool object, or 0.
+#
+# ⚠ **0 is a hard failure for the caller.** Returning it means the preset asked
+# for something this deployment cannot do; the caller refuses the request. Do not
+# add a fallback that builds the agent anyway — that is §3.15 exactly.
+fn agnostic_qa_tool_resolve(registry, preset_name: Str): i64 {
+    if (registry == 0 || preset_name == 0) { return 0; }
+    var backend = agnostic_qa_backend_name(preset_name);
+    if (backend == 0) { return 0; }
+    return agnosai_tool_registry_get(registry, backend);
+}
+
+# Whether `preset_name` resolves to a tool the given registry actually holds.
+#
+# ⚠ Checks the REGISTRY, not just the table. An alias naming a backend the engine
+# does not register is worse than no alias: it reports coverage and then fails at
+# call time.
+fn agnostic_qa_tool_is_resolvable(registry, preset_name: Str): i64 {
+    if (agnostic_qa_tool_resolve(registry, preset_name) == 0) { return 0; }
+    return 1;
+}
+
+# How many of the preset vocabulary resolve against `registry`.
+fn agnostic_qa_resolved_count(registry): i64 {
+    var total = agnostic_preset_tool_count();
+    var i = 0;
+    var hits = 0;
+    while (i < total) {
+        if (agnostic_qa_tool_is_resolvable(registry, agnostic_preset_tool_at(i)) == 1) {
+            hits = hits + 1;
+        }
+        i = i + 1;
+    }
+    return hits;
+}
+
+# How many do NOT. This is the gate: M6 is done when it reaches 0.
+fn agnostic_qa_unresolved_count(registry): i64 {
+    return agnostic_preset_tool_count() - agnostic_qa_resolved_count(registry);
+}
+
+# The `i`th unresolved preset tool name, or 0 when out of range.
+#
+# Ordered by the preset vocabulary, so the list is stable between runs and a
+# diff of it is meaningful.
+fn agnostic_qa_unresolved_at(registry, idx): i64 {
+    var total = agnostic_preset_tool_count();
+    var i = 0;
+    var seen = 0;
+    while (i < total) {
+        var nm = agnostic_preset_tool_at(i);
+        if (agnostic_qa_tool_is_resolvable(registry, nm) == 0) {
+            if (seen == idx) { return nm; }
+            seen = seen + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}

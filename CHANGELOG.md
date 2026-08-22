@@ -66,6 +66,54 @@ occurs exactly four times — io.cyr's definition and kavach's own three — and
 it as a file descriptor. Filed upstream with a repro; a consumer-side rename cannot fix it
 because both definitions live in `lib/`.
 
+### Added — M6 (part 1), the tool viability gate: 2 of 38 resolve
+
+**31 assertions** in `tests/tools.tcyr`; 1,175 total across 24 suites, 0 failed.
+`src/engine/tools.cyr` turns the preset tool vocabulary from a comment into a
+**checkable contract**, which is the thing the roadmap assigns M6 to own.
+
+**The measured position, not an estimate.** The 18 presets name **38 distinct
+tools**; the engine registers **14 builtins**; **zero of the 38 resolve by name**,
+because the two vocabularies are in different forms — `LoadTestingTool` versus
+`load_testing`. After this change **2 resolve and 36 do not**, and both numbers
+are pinned by the suite so they can only move deliberately.
+
+⚠ **A case transform was rejected, not overlooked.** `LoadTestingTool` →
+`load_testing` happens to work; `RiskScoringTool` → `risk_scoring` resolves to
+nothing at all. A transform makes those two indistinguishable — it reports
+coverage for 38 names and fails at call time for 36 of them. An explicit alias
+table is the only shape where an entry means something can actually run.
+
+⚠ **`ComprehensiveSecurityAssessmentTool` is deliberately NOT aliased to
+`security_audit`**, even though the backend is sitting right there and the names
+are close. "Comprehensive" is a stronger claim than the backend makes, and
+mapping it would book coverage this tree does not have. The suite asserts the
+absence, so a later contributor has to argue for it rather than add it quietly.
+
+⚠ **A miss returns 0, and callers must refuse.** That is the direct answer to
+`ORACLE-AUDIT.md` §3.15 — the oracle's registry was never populated, so
+`_resolve_tools` warned and built every agent with `tools=[]`. The defect was not
+the empty registry; it was that a miss degraded silently. There is no
+best-effort path in this module and none should be added.
+
+⚠ **Resolution returns the ENGINE's tool object rather than wrapping it.** A
+wrapper per QA name would record two GenAI spans per call — `agnosai_tool_execute`
+instruments the vtable chokepoint — and would have to reproduce the backend's
+schema callback, whose allocator convention is AgnosAI's to change.
+
+**`ArtifactManagementTool` and `CIPipelineIntegrationTool`** are still named by
+`quality-large.json` and still have no implementation anywhere — unlike the other
+36, which at least had a class in the oracle. The roadmap requires them written
+or struck; `tools/nonexistent` exists so that decision cannot be forgotten.
+
+⚠ **What M6 part 2 has to decide first: who owns the tool registry.**
+`agnostic_engine_init` exposes no registry handle — the orchestrator owns one
+internally — so nothing here is wired into mount yet, and coverage is a library
+question rather than a served one. Registering agnostic's QA tools somewhere the
+orchestrator's agents actually read is the next decision, and guessing at it
+would be the kind of narrow fix that has to be redone. The gate is deliberately
+useful without it: the number is real, and it is the number that has to reach 0.
+
 ### Added — M5 (part 3), the login route and the first-administrator bootstrap
 
 **35 assertions** in `tests/loginroute.tcyr`; 1,144 total across 23 suites, 0 failed.
