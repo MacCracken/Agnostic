@@ -145,16 +145,16 @@ fn test_dispatch() {
     var empty = str_from("");
     agnostic_ready_reset();
 
-    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/health"), empty, 1048576);
+    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/health"), empty, 1048576, 0);
     assert_eq(agnostic_response_status(r), HTTP_OK, "GET /health dispatches to 200");
 
-    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/ready"), empty, 1048576);
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/ready"), empty, 1048576, 0);
     assert_eq(agnostic_response_status(r), HTTP_OK, "GET /ready dispatches to 200");
 
-    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"), empty, 1048576);
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"), empty, 1048576, 0);
     assert_eq(agnostic_response_status(r), HTTP_NOT_FOUND, "unknown path is 404");
 
-    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/health"), empty, 1048576);
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST, str_from("/health"), empty, 1048576, 0);
     assert_eq(agnostic_response_status(r), HTTP_METHOD_NOT_ALLOWED, "wrong method is 405, not 404");
 }
 
@@ -166,11 +166,11 @@ fn test_body_limit() {
 
     # ⭐ The size check runs BEFORE routing. A 20 MB body aimed at a bad path
     # should be rejected on size, not parsed to discover it has nowhere to go.
-    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"), big, 5);
+    var r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/nope"), big, 5, 0);
     assert_eq(agnostic_response_status(r), HTTP_PAYLOAD_TOO_LARGE,
       "oversize body is 413 even for a path that would 404");
 
-    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/health"), big, 10);
+    r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/health"), big, 10, 0);
     assert_eq(agnostic_response_status(r), HTTP_OK, "a body exactly at the limit is accepted");
 }
 
@@ -210,24 +210,24 @@ fn test_preset_dispatch() {
     var a = arena_allocator(262144);
 
     var list = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET, str_from("/api/v1/presets"),
-      str_from(""), 1048576);
+      str_from(""), 1048576, 0);
     assert_eq(agnostic_response_status(list), HTTP_OK, "the listing answers 200");
     var body = agnostic_response_body(list);
     assert_eq(bayan_json_v_int(bayan_json_v_obj_get_by_str(body, AGNOSTIC_JK_TOTAL)), 18,
       "with all eighteen");
 
     var one = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-      str_from("/api/v1/presets/devops-lean"), str_from(""), 1048576);
+      str_from("/api/v1/presets/devops-lean"), str_from(""), 1048576, 0);
     assert_eq(agnostic_response_status(one), HTTP_OK, "a known preset answers 200");
     assert_eq(str_eq_cstr(agnostic_req_str(agnostic_response_body(one), AGNOSTIC_JK_NAME),
         "devops-lean"), 1, "with the document it names");
 
     var miss = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-      str_from("/api/v1/presets/no-such-thing"), str_from(""), 1048576);
+      str_from("/api/v1/presets/no-such-thing"), str_from(""), 1048576, 0);
     assert_eq(agnostic_response_status(miss), HTTP_NOT_FOUND, "an unknown name is 404");
 
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
-          str_from("/api/v1/presets"), str_from(""), 1048576)), HTTP_METHOD_NOT_ALLOWED,
+          str_from("/api/v1/presets"), str_from(""), 1048576, 0)), HTTP_METHOD_NOT_ALLOWED,
       "and a write is 405");
 }
 
@@ -276,7 +276,7 @@ fn test_definition_dispatch() {
     var body = "{\"key\":\"qa-1\",\"role\":\"tester\",\"goal\":\"find bugs\",\"focus\":\"orchestration\"}";
 
     var created = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
-      str_from("/api/v1/agents/definitions"), str_from(body), 1048576);
+      str_from("/api/v1/agents/definitions"), str_from(body), 1048576, 0);
     assert_eq(agnostic_response_status(created), AGNOSTIC_HTTP_CREATED,
       "creating a definition is 201, not 202 — it is complete when the call returns");
 
@@ -288,39 +288,39 @@ fn test_definition_dispatch() {
 
     # 409, not an upsert.
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
-          str_from("/api/v1/agents/definitions"), str_from(body), 1048576)), AGNOSTIC_HTTP_CONFLICT,
+          str_from("/api/v1/agents/definitions"), str_from(body), 1048576, 0)), AGNOSTIC_HTTP_CONFLICT,
       "creating the same key twice is 409");
 
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576)), HTTP_OK, "GET one is 200");
+          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576, 0)), HTTP_OK, "GET one is 200");
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-          str_from("/api/v1/agents/definitions/absent"), str_from(""), 1048576)), HTTP_NOT_FOUND,
+          str_from("/api/v1/agents/definitions/absent"), str_from(""), 1048576, 0)), HTTP_NOT_FOUND,
       "an absent key is 404");
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-          str_from("/api/v1/agents/definitions/NOT_A_KEY"), str_from(""), 1048576)),
+          str_from("/api/v1/agents/definitions/NOT_A_KEY"), str_from(""), 1048576, 0)),
       AGNOSTIC_HTTP_UNPROCESSABLE, "a malformed key is 422, not 404");
 
     # PUT to an absent key never creates.
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_PUT,
           str_from("/api/v1/agents/definitions/absent"),
-          str_from("{\"key\":\"absent\",\"role\":\"r\",\"goal\":\"g\"}"), 1048576)),
+          str_from("{\"key\":\"absent\",\"role\":\"r\",\"goal\":\"g\"}"), 1048576, 0)),
       HTTP_NOT_FOUND, "PUT to an absent key is 404, never a quiet create");
 
     # A body whose key disagrees with the path is a 400, not a silent preference.
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_PUT,
           str_from("/api/v1/agents/definitions/qa-1"),
-          str_from("{\"key\":\"other\",\"role\":\"r\",\"goal\":\"g\"}"), 1048576)),
+          str_from("{\"key\":\"other\",\"role\":\"r\",\"goal\":\"g\"}"), 1048576, 0)),
       HTTP_BAD_REQUEST, "a body key that disagrees with the path is 400");
 
     var listed = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-      str_from("/api/v1/agents/definitions"), str_from(""), 1048576);
+      str_from("/api/v1/agents/definitions"), str_from(""), 1048576, 0);
     assert_eq(bayan_json_v_int(bayan_json_v_obj_get_by_str(
           agnostic_response_body(listed), AGNOSTIC_JK_TOTAL)), 1, "the listing counts what it returned");
 
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_DELETE,
-          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576)), HTTP_OK, "DELETE is 200");
+          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576, 0)), HTTP_OK, "DELETE is 200");
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_DELETE,
-          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576)), HTTP_NOT_FOUND,
+          str_from("/api/v1/agents/definitions/qa-1"), str_from(""), 1048576, 0)), HTTP_NOT_FOUND,
       "and deleting twice is 404");
 }
 

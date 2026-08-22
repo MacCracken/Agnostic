@@ -66,6 +66,96 @@ occurs exactly four times — io.cyr's definition and kavach's own three — and
 it as a file descriptor. Filed upstream with a repro; a consumer-side rename cannot fix it
 because both definitions live in `lib/`.
 
+### Added — M5 (part 2), identity end to end: the auth rung is no longer a comment
+
+**478 assertions across five new suites**; 1,103 total across 22 suites, 0 failed.
+Every security claim below is backed by a **killed mutant**, not by a passing
+assertion — the mutation is named with each one.
+
+**`src/auth/store.cyr` — users and API keys.** patra auto-indexes column 0 when
+it is `COL_INT`, so both tables put a 63-bit truncated SHA-256 there and issue
+**zero `CREATE INDEX`**. ⚠ That makes a hit a *bucket*, not an identity: patra
+re-checks its own STR index hits and gives no such re-check for an app-computed
+INT key. Every lookup re-verifies the full value, the API-key path in constant
+time. *Mutants: dropping either re-check returns an attacker's row — the user one
+resolved a forged collision to somebody else's uid.* An over-long email is
+**refused**, because a `COL_STR` is 256 fixed bytes and truncation would merge two
+addresses into one row. An unknown address still costs a full Argon2 against a
+decoy record, so login is not a user-enumeration oracle.
+
+**`src/auth/jwt.cyr` — HS256 bearer tokens**, adapted from the SecureYeoman
+probe the roadmap names. ⚠ **The token's own `alg` header is never read.**
+Verification recomputes HS256 and compares; there is no branch that could select
+an algorithm the caller named, so `{"alg":"none"}` and an RS256 swap both die at
+the MAC. The signature is compared **encoded**, so attacker-controlled base64 is
+never decoded before authentication. A missing `exp` is a reject, not "no
+expiry". *Mutants: removing the compare breaks six assertions; treating an absent
+`exp` as unlimited breaks one.*
+
+⚠ **Correction to the reference:** its note that bayan's `base64url_decode` "did
+not round-trip" does **not** reproduce against the folded bayan in `lib/`. Ours
+exists for a different reason — bayan's encode/decode allocate on the
+process-global no-free bump, and issue/verify run per request. The encoder is
+cross-checked byte-for-byte against bayan's on every remainder class.
+
+**`src/auth/perm.cyr` — a static role→permission table**, not `role >= N`. ⚠ An
+ordering comparison makes the enum's numeric order load-bearing and grants
+everything below an out-of-range value. *Mutant: the `>=` form grants READ to role
+**-1** — which is exactly what `agnostic_users_role` and `agnostic_jwt_claim_role`
+return for "no such identity".* A route nobody classified requires ADMIN.
+
+**`src/auth/tenant.cyr` — tenancy.** Scoping is `"<tenant>:<key>"`, which is a
+cross-tenant collision primitive unless the tenant key cannot contain the
+separator: `acme` + `x:y` and `acme:x` + `y` would both produce `acme:x:y`.
+Tenant keys are `[a-z0-9][a-z0-9-]*`, so the ambiguous tenant cannot be named —
+asserted directly. *Mutant: letting `unscope` trust the first colon lets one
+tenant read another's object.*
+
+**`src/auth/authn.cyr` + the dispatch ladder — the rung itself.** Two schemes,
+named explicitly (`Bearer`, `ApiKey`) and never sniffed from the credential's
+shape. ⚠ **A verified JWT proves *who*, not *what*: the role and tenant are
+re-read from the user row on every request.** That costs one indexed lookup and
+buys instant revocation. *Mutant: trusting the role claim leaves a demoted user a
+SUPER_ADMIN and lets a deleted account keep authenticating.*
+
+⚠ **401 and 403 are kept distinct.** 401 is "I do not know who you are"; 403 is
+"I know, and you may not". Collapsing them — a common hardening reflex — tells a
+valid user with the wrong role to re-authenticate, which cannot help them.
+*Mutant: disabling the rung turns a 401 into a 200 and a 403 into a 422, the
+latter proving the handler had parsed a body it should never have seen.*
+
+**Auth is off by default, and that is bounded rather than fail-open.** Nothing can
+authenticate before an operator has provisioned a user and there is no bootstrap
+route yet. What stops it being a hole: `agnostic_serve_mount` **refuses to start**
+with `AGNOSTIC_AUTH` off on any bind but loopback, and says so on loopback.
+`state.md` recorded loopback as the only thing standing in front of the crew
+routes; that is now structural rather than incidental.
+
+**`src/auth/ratelimit.cyr` — login-abuse controls.** Argon2id at ~244 ms makes
+login a request-amplification lever. Two independent controls: the pool slot count
+caps *concurrent* hashes, and a per-IP token bucket caps the *rate*. ⚠ **The
+bucket is checked before any Argon2 work** — a limiter that sheds after hashing
+has already paid the cost it exists to avoid. *Mutant: moving the check after the
+verify is caught by asserting the Argon2 shed counter does not move, which a test
+on the returned 429 alone would have missed.* The table is fixed-size, so memory
+is bounded; the honest cost — an attacker rotating addresses evicts legitimate
+entries — is stated in the module rather than glossed.
+
+**`src/auth/webhook.cyr` — HMAC-SHA256 callbacks.** The signature covers
+`"<ts>.<body>"`, not the body alone, because a bare body signature is replayable
+forever. The timestamp is **inside** the MAC, so an old signature cannot be
+re-stamped with a fresh one. *Mutant: signing the body alone lets exactly that
+forgery through.* Freshness is checked before the MAC is computed.
+
+**External IdP verification is additive, and enforced to be.** The validator runs
+**only after local verification fails**, returns a **uid rather than a principal**
+(so it cannot grant a role this deployment did not assign), and a uid with no
+local row authenticates nobody. All three are asserted.
+
+⚠ **A Cyrius note worth keeping:** `secret` is a **reserved keyword** and cannot
+be a parameter name. The diagnostic attributes it to the previously-included
+file, which sent the first search to the wrong module.
+
 ### Added — M5 (part 1), credential primitives on sigil
 
 **54 assertions** in `tests/crypto.tcyr` across six groups (hex, digest, password,

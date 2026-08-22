@@ -339,10 +339,22 @@ fn agnostic_route_needs_auth(id): i64 {
 #      on size, not parsed to discover it has nowhere to go.
 #   2. Route resolution; 405 when the path matched but the method did not,
 #      404 otherwise.
-#   3. [M5: authentication lands here, after routing so the 401 does not leak
-#      which paths exist, and before the handler.]
+#   3. Authentication and authorisation — after routing so a 401 does not leak
+#      which paths exist, and before the handler so no privileged work runs for
+#      an unidentified caller.
 #   4. Dispatch.
-fn agnostic_route_dispatch_a(a, method, path: Str, body: Str, max_body): i64 {
+#
+# `authz` is the raw `Authorization` header value, or 0 when the request carried
+# none. It is a parameter rather than a global because the ladder is called
+# directly by `tests/router.tcyr`, and a global would let a test pass while the
+# server path was unauthenticated.
+#
+# ⚠ **401 and 403 are different answers and both are deliberate.** 401 means "I
+# do not know who you are" — no credential, or one that did not verify. 403 means
+# "I know who you are and you may not do this". Collapsing them into one status
+# is a common hardening reflex and it is wrong here: it would tell a valid user
+# with the wrong role to go and re-authenticate, which they cannot fix.
+fn agnostic_route_dispatch_a(a, method, path: Str, body: Str, max_body, authz): i64 {
     if (str_len(body) > max_body) {
         return agnostic_response_error_a(a, HTTP_PAYLOAD_TOO_LARGE, str_from("request body too large"));
     }
@@ -355,6 +367,26 @@ fn agnostic_route_dispatch_a(a, method, path: Str, body: Str, max_body): i64 {
             return agnostic_response_error_a(a, HTTP_METHOD_NOT_ALLOWED, str_from("method not allowed"));
         }
         return agnostic_response_error_a(a, HTTP_NOT_FOUND, str_from("not found"));
+    }
+
+    # --- the auth rung -----------------------------------------------------
+    #
+    # `agnostic_perm_for_route` answers 0 for the routes that need nothing, so
+    # health and readiness fall straight through without a special case here.
+    # A route nobody classified answers ADMIN, so forgetting one fails closed.
+    if (agnostic_authn_required() == 1) {
+        var need = agnostic_perm_for_route(id);
+        if (need != 0) {
+            var principal = agnostic_authn_resolve_a(a, authz);
+            if (principal == 0) {
+                return agnostic_response_error_a(a, HTTP_UNAUTHORIZED,
+                  str_from("authentication required"));
+            }
+            if (agnostic_role_can(agnostic_principal_role(principal), need) == 0) {
+                return agnostic_response_error_a(a, HTTP_FORBIDDEN,
+                  str_from("insufficient permissions"));
+            }
+        }
     }
 
     if (id == AGNOSTIC_ROUTE_HEALTH) { return agnostic_route_health_a(a); }

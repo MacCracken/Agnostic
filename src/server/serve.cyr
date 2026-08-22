@@ -184,7 +184,15 @@ fn agnostic_serve_handler(ctx, cfd, buf, blen): i64 {
     var max_body = agnostic_config_max_body(_agnostic_serve_cfg);
     if (max_body <= 0) { max_body = AGNOSTIC_DEFAULT_MAX_BODY; }
 
-    var resp = agnostic_route_dispatch_a(a, method, path, body, max_body);
+    # The credential, read from the raw request rather than reconstructed — the
+    # same accessor `agnostic_trace_begin_a` uses for `traceparent`. 0 when the
+    # request carried no Authorization header, which the ladder treats as "no
+    # credential" rather than as an error.
+    var authz = 0;
+    var raw_authz = sandhi_server_find_header_a(a, buf, blen, "authorization");
+    if (raw_authz != 0) { authz = str_from_a(a, raw_authz); }
+
+    var resp = agnostic_route_dispatch_a(a, method, path, body, max_body, authz);
     _agnostic_serve_send(a, cfd, resp);
 
     # Clear the trace id so a worker cannot leak the previous request's id onto
@@ -241,6 +249,49 @@ fn agnostic_serve_mount(cfg): i64 {
     # and silently serving 17 presets when 18 were embedded is exactly the
     # "smaller result set reported as success" shape this port refuses. The
     # count is the generator's, so the two cannot drift without the gate noticing.
+    # --- identity, before anything can serve a request ---------------------
+    #
+    # ⚠ **Auth off on a non-loopback bind REFUSES TO START.** The default mode is
+    # `off` because nothing can authenticate before an operator has provisioned a
+    # user and there is no bootstrap route yet — but "unauthenticated" and
+    # "reachable from the network" together is not a configuration this binary
+    # will run. `state.md` recorded loopback as the only thing standing in front
+    # of the crew routes; this makes that structural rather than incidental.
+    var auth_mode = agnostic_config_auth_mode(cfg);
+    agnostic_authn_set_mode(auth_mode);
+    if (auth_mode != AGNOSTIC_AUTH_REQUIRED) {
+        if (agnostic_config_addr(cfg) != INADDR_LOOPBACK()) {
+            sakshi_error(
+              "AGNOSTIC_AUTH is off and the bind is not loopback; refusing to start", 68);
+            return 0;
+        }
+        # Loopback and unauthenticated is allowed, and said out loud. Disclosure
+        # is the same mechanism placeholder LLM mode uses — the operator is told
+        # what this process is rather than left to infer it.
+        sakshi_warn("authentication is OFF; every route is open on loopback", 54);
+    }
+
+    # The identity tables share the definition store's handle, so they are
+    # created after it opens — see below. The signing secret does not, and a
+    # server that cannot sign cannot issue a token, so it is fatal here.
+    if (auth_mode == AGNOSTIC_AUTH_REQUIRED) {
+        if (agnostic_argon_pool_init() == 0) {
+            sakshi_error("could not allocate the Argon2 pool; refusing to start", 53);
+            return 0;
+        }
+        agnostic_log_kv_int(SK_INFO, "argon2 scratch pool", 19,
+          "bytes", 5, agnostic_argon_pool_bytes());
+        if (agnostic_jwt_ready() == 0) {
+            if (agnostic_jwt_init_random() == 0) {
+                sakshi_error("could not generate a JWT secret; refusing to start", 50);
+                return 0;
+            }
+            # ⚠ Ephemeral: every restart invalidates every outstanding token.
+            # Said plainly rather than discovered when clients start getting 401s.
+            sakshi_warn("JWT secret generated; tokens do not survive a restart", 53);
+        }
+    }
+
     var presets = agnostic_presets_init();
     if (presets != AGNOSTIC_PRESET_JSON_COUNT) {
         agnostic_log_kv_int(SK_ERROR,
@@ -275,6 +326,15 @@ fn agnostic_serve_mount(cfg): i64 {
     }
     if (agnostic_crews_ensure() == 0) {
         sakshi_error("could not create the crew table; refusing to start", 50);
+        return 0;
+    }
+    # Identity shares this handle — one database, one backup surface.
+    if (agnostic_auth_ensure() == 0) {
+        sakshi_error("could not create the identity tables; refusing to start", 55);
+        return 0;
+    }
+    if (agnostic_tenants_ensure() == 0) {
+        sakshi_error("could not create the tenant table; refusing to start", 52);
         return 0;
     }
     agnostic_log_kv_str(SK_INFO, "database open", 13, "path", 4, db_path);

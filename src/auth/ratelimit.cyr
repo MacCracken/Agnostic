@@ -1,0 +1,192 @@
+# agnostic/auth/ratelimit — the per-IP token bucket in front of Argon2.
+#
+# ## Why this is load-bearing and not polish
+#
+# Argon2id at the roadmap's parameters costs ~244 ms of CPU. That makes a login
+# endpoint a **request-amplification lever**: SecureYeoman measured 8 concurrent
+# attempts pushing `GET /health` from 6 ms to 942 ms, and ~40 wedging a 4-worker
+# pool. The attacker spends one cheap HTTP request per 244 ms of server CPU.
+#
+# Two independent controls answer it, and both are needed:
+#
+#   1. `agnostic_argon_pool_init`'s slot count caps CONCURRENT hashes. It bounds
+#      CPU regardless of who is asking, and survives everything below.
+#   2. This bucket caps the RATE per source, so one address cannot consume the
+#      pool that legitimate logins share.
+#
+# ⚠ **The bucket is checked BEFORE any Argon2 work.** A limiter that sheds after
+# hashing has already paid the cost it exists to avoid.
+#
+# ## ⚠ A fixed table, and what that costs
+#
+# `AGNOSTIC_RL_SLOTS` entries, allocated once. Memory is therefore bounded no
+# matter how many distinct sources appear — which is the point: a table that
+# grows per source is itself the amplification vector, one 24-byte allocation
+# per attacker packet.
+#
+# The cost is honest and worth stating: **an attacker rotating source addresses
+# evicts legitimate entries**, so the bucket alone does not protect a specific
+# user under a distributed attack. Control 1 is what holds in that case — the
+# pool cap sheds with 429 having done no Argon2 work, whoever is asking. This
+# module narrows the cheap single-source attack; it does not claim to solve the
+# distributed one.
+
+var AGNOSTIC_RL_SLOTS = 64;
+var AGNOSTIC_RL_BURST = 5;
+var AGNOSTIC_RL_REFILL_MS = 12000;
+
+enum AgnosticRlOff {
+    AGNOSTIC_RL_IP     = 0;
+    AGNOSTIC_RL_TOKENS = 8;
+    AGNOSTIC_RL_SEEN   = 16;
+    AGNOSTIC_RL_SIZE   = 24;
+}
+
+var _agnostic_rl_table = 0;
+var _agnostic_rl_lock = 0;
+var _agnostic_rl_shed = 0;
+
+# Milliseconds since the epoch.
+fn _agnostic_rl_now_ms(): i64 {
+    return clock_epoch_ns() / 1000000;
+}
+
+# Allocate the table. Mount time only, before any worker exists.
+fn agnostic_rl_init(): i64 {
+    if (_agnostic_rl_table != 0) { return 1; }
+    var bytes = AGNOSTIC_RL_SLOTS * AGNOSTIC_RL_SIZE;
+    var t = alloc(bytes);
+    if (t == 0) { return 0; }
+    memset(t, 0, bytes);
+    _agnostic_rl_table = t;
+    _agnostic_rl_lock = mutex_new();
+    _agnostic_rl_shed = 0;
+    return 1;
+}
+
+# How many attempts the bucket has refused.
+fn agnostic_rl_shed_count(): i64 {
+    return _agnostic_rl_shed;
+}
+
+# Clear every bucket. For tests.
+fn agnostic_rl_reset(): i64 {
+    if (_agnostic_rl_table == 0) { return 0; }
+    memset(_agnostic_rl_table, 0, AGNOSTIC_RL_SLOTS * AGNOSTIC_RL_SIZE);
+    _agnostic_rl_shed = 0;
+    return 0;
+}
+
+# Whether `ip` may make an attempt now, spending a token if so.
+#
+# Returns 1 to allow, 0 to shed. An uninitialised table **allows** — the caller
+# is then protected only by the Argon2 pool cap, which is the correct failure
+# direction for a limiter: it must not be able to lock everyone out by failing.
+#
+# ⚠ Tokens are tracked in THOUSANDTHS so that a refill shorter than one whole
+# token still accrues. Integer-dividing the elapsed time by the refill interval
+# would round every sub-interval gap to zero, and a caller arriving every 11.9 s
+# would never regain anything.
+fn agnostic_rl_allow(ip): i64 {
+    if (_agnostic_rl_table == 0) { return 1; }
+    var now = _agnostic_rl_now_ms();
+    var cap = AGNOSTIC_RL_BURST * 1000;
+
+    mutex_lock(_agnostic_rl_lock);
+
+    var slot = 0 - 1;
+    var free_slot = 0 - 1;
+    var oldest = 0 - 1;
+    var oldest_seen = 0;
+    var i = 0;
+    while (i < AGNOSTIC_RL_SLOTS) {
+        var e = _agnostic_rl_table + i * AGNOSTIC_RL_SIZE;
+        var eip = load64(e + AGNOSTIC_RL_IP);
+        if (eip == ip) { slot = i; i = AGNOSTIC_RL_SLOTS; }
+        else {
+            if (eip == 0) { if (free_slot < 0) { free_slot = i; } }
+            else {
+                var seen = load64(e + AGNOSTIC_RL_SEEN);
+                if (oldest < 0) { oldest = i; oldest_seen = seen; }
+                else { if (seen < oldest_seen) { oldest = i; oldest_seen = seen; } }
+            }
+        }
+        i = i + 1;
+    }
+
+    if (slot < 0) {
+        # A new source: take a free slot, else evict the least recently seen.
+        if (free_slot >= 0) { slot = free_slot; }
+        else { slot = oldest; }
+        if (slot < 0) { slot = 0; }
+        var ne = _agnostic_rl_table + slot * AGNOSTIC_RL_SIZE;
+        store64(ne + AGNOSTIC_RL_IP, ip);
+        store64(ne + AGNOSTIC_RL_TOKENS, cap);
+        store64(ne + AGNOSTIC_RL_SEEN, now);
+    }
+
+    var ent = _agnostic_rl_table + slot * AGNOSTIC_RL_SIZE;
+    var tokens = load64(ent + AGNOSTIC_RL_TOKENS);
+    var last = load64(ent + AGNOSTIC_RL_SEEN);
+
+    var elapsed = now - last;
+    if (elapsed < 0) { elapsed = 0; }
+    tokens = tokens + (elapsed * 1000) / AGNOSTIC_RL_REFILL_MS;
+    if (tokens > cap) { tokens = cap; }
+
+    var allowed = 0;
+    if (tokens >= 1000) {
+        tokens = tokens - 1000;
+        allowed = 1;
+    } else {
+        _agnostic_rl_shed = _agnostic_rl_shed + 1;
+    }
+
+    store64(ent + AGNOSTIC_RL_TOKENS, tokens);
+    store64(ent + AGNOSTIC_RL_SEEN, now);
+    mutex_unlock(_agnostic_rl_lock);
+    return allowed;
+}
+
+# The outcome of a login attempt, as the HTTP status the caller should answer.
+enum AgnosticLoginStatus {
+    AGNOSTIC_LOGIN_OK        = 200;
+    AGNOSTIC_LOGIN_DENIED    = 401;
+    AGNOSTIC_LOGIN_THROTTLED = 429;
+}
+
+# A complete login attempt: rate limit, then verify. Returns the `uid`, or 0.
+#
+# `out_status`, when non-zero, receives the status to answer with.
+#
+# ⚠ **429 is returned for BOTH the bucket and a full Argon2 pool**, and that is
+# deliberate: they are the same answer to the client ("come back later") and
+# distinguishing them would tell an attacker whether their own rate or the
+# server's total load caused the refusal.
+#
+# ⚠ **A throttled attempt does NO Argon2 work.** That is the entire point; if
+# this function is ever restructured so the hash happens first, the control is
+# gone while every test still passes on the returned status alone. The suite
+# asserts on `agnostic_argon_shed_count` not moving, which only holds if the
+# hasher was genuinely never reached.
+fn agnostic_login_a(a, ip, email: Str, password: Str, out_status): i64 {
+    if (out_status != 0) { store64(out_status, AGNOSTIC_LOGIN_DENIED); }
+
+    if (agnostic_rl_allow(ip) == 0) {
+        if (out_status != 0) { store64(out_status, AGNOSTIC_LOGIN_THROTTLED); }
+        return 0;
+    }
+
+    var shed = alloc_via(a, 8);
+    if (shed == 0) { return 0; }
+    store64(shed, 0);
+
+    var uid = agnostic_users_verify_a(a, email, password, shed);
+    if (load64(shed) == 1) {
+        if (out_status != 0) { store64(out_status, AGNOSTIC_LOGIN_THROTTLED); }
+        return 0;
+    }
+    if (uid == 0) { return 0; }
+    if (out_status != 0) { store64(out_status, AGNOSTIC_LOGIN_OK); }
+    return uid;
+}

@@ -1,0 +1,210 @@
+# agnostic/auth/authn + the dispatch ladder's auth rung.
+#
+# Two design claims are held here:
+#
+#   1. A verified JWT proves WHO, not WHAT. The role is re-read from the user
+#      row on every request, so a demotion or a deletion takes effect on the
+#      next call rather than whenever the token happens to expire.
+#   2. 401 and 403 are different answers. Collapsing them would tell a valid
+#      user with the wrong role to re-authenticate, which cannot help them.
+include "src/app.cyr"
+
+var _T_AUTHNDB = "/tmp/agnostic-authn-suite.patra";
+
+fn _t_authn_open() {
+    agnostic_store_close();
+    sys_unlink(_T_AUTHNDB);
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    agnostic_store_open(str_from(_T_AUTHNDB));
+    agnostic_auth_ensure();
+    agnostic_argon_pool_init();
+    agnostic_presets_init();
+    var k = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(k + i, 200 - i); i = i + 1; }
+    agnostic_jwt_set_secret(k, 32);
+    return 0;
+}
+
+fn test_scheme_parsing() {
+    test_group("authn/scheme");
+
+    _t_authn_open();
+    var a = arena_allocator(262144);
+
+    assert_eq(agnostic_authn_resolve_a(a, 0), 0, "no header is no principal");
+    assert_eq(agnostic_authn_resolve_a(a, str_from("")), 0, "an empty header is not either");
+    assert_eq(agnostic_authn_resolve_a(a, str_from("Bearer")), 0, "a scheme with no credential");
+    assert_eq(agnostic_authn_resolve_a(a, str_from("Bearer ")), 0, "nor an empty credential");
+    assert_eq(agnostic_authn_resolve_a(a, str_from("Basic abc")), 0, "an unsupported scheme");
+    assert_eq(agnostic_authn_resolve_a(a, str_from("Bearerabc")), 0,
+      "the scheme must be followed by a space, not run into the credential");
+
+    # ⚠ RFC 7235 makes the scheme case-insensitive, so we fold it — but the
+    # credential is compared byte-exactly.
+    var uid = agnostic_users_create_a(a, str_from("s@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+    var key = agnostic_apikey_issue_a(a, uid, str_from("k"));
+    assert_neq(key, 0, "a key is minted");
+
+    var hdr = alloc_via(a, 7 + str_len(key));
+    memcpy(hdr, str_data(str_from("apikey ")), 7);
+    memcpy(hdr + 7, str_data(key), str_len(key));
+    var p = agnostic_authn_resolve_a(a, str_new_a(a, hdr, 7 + str_len(key)));
+    assert_neq(p, 0, "a lower-case scheme name is accepted");
+    assert_eq(agnostic_principal_uid(p), uid, "and resolves the right principal");
+}
+
+fn test_role_comes_from_the_row_not_the_token() {
+    test_group("authn/role-is-not-a-claim");
+
+    _t_authn_open();
+    var a = arena_allocator(262144);
+
+    var uid = agnostic_users_create_a(a, str_from("boss@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_SUPER_ADMIN, str_from("acme"));
+    assert_neq(uid, 0, "a super_admin exists");
+
+    var tok = agnostic_jwt_issue_a(a, uid, AGNOSTIC_ROLE_SUPER_ADMIN, str_from("acme"), 600);
+    assert_neq(tok, 0, "and holds a token stamped super_admin");
+
+    var hdr = alloc_via(a, 7 + str_len(tok));
+    memcpy(hdr, str_data(str_from("Bearer ")), 7);
+    memcpy(hdr + 7, str_data(tok), str_len(tok));
+    var header = str_new_a(a, hdr, 7 + str_len(tok));
+
+    var p1 = agnostic_authn_resolve_a(a, header);
+    assert_neq(p1, 0, "the token resolves");
+    assert_eq(agnostic_principal_role(p1), AGNOSTIC_ROLE_SUPER_ADMIN, "as a super_admin");
+
+    # ⭐ THE DESIGN. Demote in the store; the token still SAYS super_admin.
+    var db = agnostic_store_db();
+    var st = patra_prepare(db, "UPDATE agnostic_users SET urole = ? WHERE uid = ?");
+    patra_bind_int(st, 0, AGNOSTIC_ROLE_VIEWER);
+    patra_bind_int(st, 1, uid);
+    assert_eq(patra_exec_prepared(db, st), PATRA_OK, "the user is demoted");
+    patra_finalize(st);
+
+    var claims = agnostic_jwt_verify_a(a, tok);
+    assert_eq(agnostic_jwt_claim_role(claims), AGNOSTIC_ROLE_SUPER_ADMIN,
+      "the CLAIM still says super_admin — the token was not reissued");
+
+    var p2 = agnostic_authn_resolve_a(a, header);
+    assert_neq(p2, 0, "the token still authenticates");
+    assert_eq(agnostic_principal_role(p2), AGNOSTIC_ROLE_VIEWER,
+      "but the PRINCIPAL is a viewer — the row wins, so a demotion is immediate");
+
+    # ⭐ And a deleted account cannot ride an unexpired token.
+    agnostic_users_reset();
+    assert_eq(agnostic_authn_resolve_a(a, header), 0,
+      "a token for a deleted user resolves to NOBODY");
+}
+
+fn _t_hdr_a(a, scheme, cred) {
+    var n = strlen(scheme);
+    var h = alloc_via(a, n + 1 + str_len(cred));
+    memcpy(h, scheme, n);
+    store8(h + n, 32);
+    memcpy(h + n + 1, str_data(cred), str_len(cred));
+    return str_new_a(a, h, n + 1 + str_len(cred));
+}
+
+fn test_ladder_enforcement() {
+    test_group("ladder/enforcement");
+
+    _t_authn_open();
+    var a = arena_allocator(262144);
+    var empty = str_from("");
+
+    var viewer = agnostic_users_create_a(a, str_from("v@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+    var vtok = agnostic_jwt_issue_a(a, viewer, AGNOSTIC_ROLE_VIEWER, 0, 600);
+    var vhdr = _t_hdr_a(a, "Bearer", vtok);
+
+    # --- mode OFF: the ladder does not ask -------------------------------
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_OFF);
+    var open_r = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+      str_from("/api/v1/presets"), empty, 1048576, 0);
+    assert_neq(agnostic_response_status(open_r), HTTP_UNAUTHORIZED,
+      "with auth off a protected route is not challenged");
+
+    # --- mode REQUIRED ----------------------------------------------------
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_REQUIRED);
+
+    # ⭐ Health and readiness stay open even under enforcement. An orchestrator
+    # cannot present a credential, and a readiness probe behind auth is a
+    # readiness probe that reports "unhealthy" for the wrong reason.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/health"), empty, 1048576, 0)), HTTP_OK, "health needs no credential");
+    assert_neq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/ready"), empty, 1048576, 0)), HTTP_UNAUTHORIZED,
+      "and neither does readiness");
+
+    # ⭐ 401 — no credential at all.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/presets"), empty, 1048576, 0)), HTTP_UNAUTHORIZED,
+      "a protected route with no credential is 401");
+
+    # ⭐ 401 — a credential that does not verify. NOT 403: we do not know who
+    # this is, so telling them their permissions are wrong would be a lie.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/presets"), empty, 1048576,
+          _t_hdr_a(a, "Bearer", str_from("not.a.token")))), HTTP_UNAUTHORIZED,
+      "a bad token is 401, not 403");
+
+    # ⭐ 200 — a viewer holds READ.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/presets"), empty, 1048576, vhdr)), HTTP_OK,
+      "a viewer may read the preset library");
+
+    # ⭐ 403 — the same viewer lacks WRITE. The handler must never run, so the
+    # body is deliberately garbage: a 400 here would mean auth let it through.
+    var forbidden = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
+      str_from("/api/v1/crews"), str_from("{\"not\":\"valid\"}"), 1048576, vhdr);
+    assert_eq(agnostic_response_status(forbidden), HTTP_FORBIDDEN,
+      "a viewer submitting a crew is 403 — identified, and refused");
+
+    # ⭐ And the refusal happens BEFORE the handler: an unparseable body would
+    # be a 400 if the request had reached it.
+    assert_neq(agnostic_response_status(forbidden), HTTP_BAD_REQUEST,
+      "the body was never parsed — auth ran first");
+
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_OFF);
+}
+
+fn test_unclassified_route_fails_closed() {
+    test_group("ladder/fail-closed");
+
+    _t_authn_open();
+    var a = arena_allocator(262144);
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_REQUIRED);
+
+    var viewer = agnostic_users_create_a(a, str_from("fc@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+
+    # An id nobody classified requires ADMIN, so a viewer cannot reach it. This
+    # is asserted at the permission layer because the ladder cannot be handed an
+    # unroutable id — but it is the property that protects a route someone adds
+    # and forgets to classify.
+    assert_eq(agnostic_perm_for_route(99), AGNOSTIC_PERM_ADMIN, "unclassified means ADMIN");
+    assert_eq(agnostic_role_can(agnostic_users_role(viewer), agnostic_perm_for_route(99)), 0,
+      "so a viewer is refused it");
+
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_OFF);
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_scheme_parsing();
+    test_role_comes_from_the_row_not_the_token();
+    test_ladder_enforcement();
+    test_unclassified_route_fails_closed();
+    return assert_summary();
+}
+
+var _agnostic_authn_test_exit = main();
+if (_agnostic_authn_test_exit > 0) { _agnostic_authn_test_exit = 1; }
+sys_exit_group(_agnostic_authn_test_exit);

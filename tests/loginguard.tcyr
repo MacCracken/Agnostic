@@ -1,0 +1,240 @@
+# agnostic/auth/{ratelimit,webhook} + the external-IdP hook.
+#
+# Three design claims are held here:
+#
+#   1. A throttled login does NO Argon2 work. Asserting on the returned 429
+#      alone would still pass if the hash ran first, so the decisive assertion
+#      is that the Argon2 shed counter does not move.
+#   2. A webhook signature covers the TIMESTAMP, so a captured request cannot be
+#      replayed with a fresh one.
+#   3. The external IdP hook is additive: it runs only after local verification
+#      fails, and it yields a uid, never a role.
+include "src/app.cyr"
+
+var _T_LGDB = "/tmp/agnostic-loginguard-suite.patra";
+
+fn _t_lg_open() {
+    agnostic_store_close();
+    sys_unlink(_T_LGDB);
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    agnostic_store_open(str_from(_T_LGDB));
+    agnostic_auth_ensure();
+    agnostic_argon_pool_init();
+    agnostic_rl_init();
+    agnostic_rl_reset();
+    return 0;
+}
+
+fn test_bucket() {
+    test_group("ratelimit/bucket");
+
+    _t_lg_open();
+    assert_eq(agnostic_rl_init(), 1, "the table allocates");
+
+    var ip = 167772161;
+    var i = 0;
+    var allowed = 0;
+    while (i < AGNOSTIC_RL_BURST) {
+        allowed = allowed + agnostic_rl_allow(ip);
+        i = i + 1;
+    }
+    assert_eq(allowed, AGNOSTIC_RL_BURST, "a full burst is allowed");
+
+    var before = agnostic_rl_shed_count();
+    assert_eq(agnostic_rl_allow(ip), 0, "and the next attempt is shed");
+    assert_eq(agnostic_rl_shed_count(), before + 1, "and counted");
+
+    # ⚠ Buckets are per source. One noisy address must not lock everyone out.
+    assert_eq(agnostic_rl_allow(167772162), 1, "a different source has its own bucket");
+
+    agnostic_rl_reset();
+    assert_eq(agnostic_rl_allow(ip), 1, "a reset restores the bucket");
+    assert_eq(agnostic_rl_shed_count(), 0, "and clears the counter");
+}
+
+fn test_throttled_login_does_no_argon2() {
+    test_group("login/no-hash-when-throttled");
+
+    _t_lg_open();
+    var a = arena_allocator(1048576);
+    var uid = agnostic_users_create_a(a, str_from("lg@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+    assert_neq(uid, 0, "a user exists");
+
+    var st = alloc_via(a, 8);
+    assert_eq(agnostic_login_a(a, 10, str_from("lg@example.com"), str_from("pw"), st), uid,
+      "a good login succeeds");
+    assert_eq(load64(st), AGNOSTIC_LOGIN_OK, "with 200");
+    assert_eq(agnostic_login_a(a, 10, str_from("lg@example.com"), str_from("nope"), st), 0,
+      "a wrong password fails");
+    assert_eq(load64(st), AGNOSTIC_LOGIN_DENIED, "with 401");
+
+    # Drain the bucket for this source.
+    var i = 0;
+    while (i < AGNOSTIC_RL_BURST + 2) { agnostic_rl_allow(10); i = i + 1; }
+
+    # ⭐ THE PROPERTY. Hold every Argon2 slot, so ANY hash attempt would be shed
+    # and visibly increment the counter. A throttled login must not move it.
+    var held = vec_new();
+    var j = 0;
+    while (j < AGNOSTIC_ARGON_SLOTS) {
+        var b = agnostic_argon_acquire();
+        if (b != 0) { vec_push(held, b); }
+        j = j + 1;
+    }
+
+    var argon_before = agnostic_argon_shed_count();
+    assert_eq(agnostic_login_a(a, 10, str_from("lg@example.com"), str_from("pw"), st), 0,
+      "a throttled login fails");
+    assert_eq(load64(st), AGNOSTIC_LOGIN_THROTTLED, "with 429");
+    assert_eq(agnostic_argon_shed_count(), argon_before,
+      "and the hasher was NEVER REACHED — the bucket ran first");
+
+    # ⭐ The contrast: an allowed attempt against a full pool DOES reach the
+    # hasher, so the counter moves. Same 429 to the client, different cause.
+    var fresh_ip = 20;
+    var argon_before2 = agnostic_argon_shed_count();
+    assert_eq(agnostic_login_a(a, fresh_ip, str_from("lg@example.com"), str_from("pw"), st), 0,
+      "an un-throttled login against a full pool also fails");
+    assert_eq(load64(st), AGNOSTIC_LOGIN_THROTTLED, "with the same 429 — the cause is not leaked");
+    assert_eq(agnostic_argon_shed_count(), argon_before2 + 1,
+      "but this one DID reach the hasher, proving the previous one did not");
+
+    var k = 0;
+    while (k < vec_len(held)) { agnostic_argon_release(vec_get(held, k)); k = k + 1; }
+}
+
+fn test_webhook_signatures() {
+    test_group("webhook/sign");
+
+    var a = arena_allocator(262144);
+    var key = str_from("a-shared-webhook-secret");
+    var body = str_from("{\"event\":\"crew.completed\",\"id\":\"abc\"}");
+    var now = 1700000000;
+
+    var hdr = agnostic_webhook_header_a(a, key, now, body);
+    assert_neq(hdr, 0, "a header is produced");
+    assert_eq(agnostic_webhook_verify_a(a, key, body, hdr, now, AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 1,
+      "and verifies at the signing time");
+    assert_eq(agnostic_webhook_verify_a(a, key, body, hdr, now + 60,
+        AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 1, "and inside the window");
+
+    assert_eq(agnostic_webhook_verify_a(a, str_from("wrong"), body, hdr, now,
+        AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 0, "a wrong secret does not verify");
+    assert_eq(agnostic_webhook_verify_a(a, key, str_from("{\"event\":\"tampered\"}"), hdr, now,
+        AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 0, "a tampered body does not verify");
+
+    # ⭐ REPLAY. The captured header is intact and its MAC is still correct — it
+    # is refused purely because the signed timestamp is outside the window.
+    assert_eq(agnostic_webhook_verify_a(a, key, body, hdr, now + 3600,
+        AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 0,
+      "a valid signature replayed an hour later is REFUSED");
+    assert_eq(agnostic_webhook_verify_a(a, key, body, hdr, now - 3600,
+        AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 0, "and so is one from the future");
+
+    # ⭐ The timestamp is INSIDE the MAC, so swapping in a fresh `t` breaks it.
+    var forged = agnostic_webhook_header_a(a, key, now, body);
+    var sig_only = _agnostic_webhook_field_a(a, forged, "v1=");
+    var fresh = str_from_int_a(a, now + 3600);
+    var n = 2 + str_len(fresh) + 4 + str_len(sig_only);
+    var buf = alloc_via(a, n);
+    memcpy(buf, str_data(str_from("t=")), 2);
+    memcpy(buf + 2, str_data(fresh), str_len(fresh));
+    memcpy(buf + 2 + str_len(fresh), str_data(str_from(",v1=")), 4);
+    memcpy(buf + 2 + str_len(fresh) + 4, str_data(sig_only), str_len(sig_only));
+    assert_eq(agnostic_webhook_verify_a(a, key, body, str_new_a(a, buf, n), now + 3600,
+        AGNOSTIC_WEBHOOK_TOLERANCE_SECS), 0,
+      "re-stamping an old signature with a fresh timestamp does NOT verify");
+
+    assert_eq(agnostic_webhook_verify_a(a, key, body, str_from("garbage"), now, 300), 0,
+      "a malformed header is refused");
+    assert_eq(agnostic_webhook_verify_a(a, key, body, str_from("t=1700000000"), now, 300), 0,
+      "a header with no signature field is refused");
+    assert_eq(agnostic_webhook_verify_a(a, key, body, str_from("v1=deadbeef"), now, 300), 0,
+      "and one with no timestamp is refused");
+    assert_eq(agnostic_webhook_sign_a(a, str_from(""), now, body), 0,
+      "an empty secret cannot sign");
+}
+
+# A stand-in external IdP: accepts one magic token and maps it to the uid it
+# was told about. Real ones would call out; the contract under test is what
+# agnostic does with the answer, not how the answer is obtained.
+var _t_ext_uid = 0;
+fn _t_ext_validator(a, tok): i64 {
+    if (str_eq_cstr(tok, "external-good-token") == 1) { return _t_ext_uid; }
+    if (str_eq_cstr(tok, "external-ghost-token") == 1) { return 987654321; }
+    return 0;
+}
+
+fn test_external_idp_is_additive() {
+    test_group("authn/external-idp");
+
+    _t_lg_open();
+    var a = arena_allocator(262144);
+    var k = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(k + i, 7 + i); i = i + 1; }
+    agnostic_jwt_set_secret(k, 32);
+
+    var uid = agnostic_users_create_a(a, str_from("ext@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_OPERATOR, str_from("acme"));
+    _t_ext_uid = uid;
+
+    var ext_hdr = _t_hdr2_a(a, "Bearer", str_from("external-good-token"));
+
+    # Not installed: an unverifiable token is simply refused.
+    agnostic_authn_set_external(0);
+    assert_eq(agnostic_authn_resolve_a(a, ext_hdr), 0,
+      "with no external validator an unknown token is refused");
+
+    agnostic_authn_set_external(&_t_ext_validator);
+    var p = agnostic_authn_resolve_a(a, ext_hdr);
+    assert_neq(p, 0, "with one installed the token resolves");
+    assert_eq(agnostic_principal_uid(p), uid, "to the uid the IdP named");
+
+    # ⭐ ADDITIVE, PROPERTY 2: the role comes from the ROW, not the IdP. The
+    # validator returned only a uid; it has no way to ask for a role at all.
+    assert_eq(agnostic_principal_role(p), AGNOSTIC_ROLE_OPERATOR,
+      "and the role is the one this deployment assigned");
+
+    # ⭐ ADDITIVE, PROPERTY 3: an IdP cannot invent a user.
+    assert_eq(agnostic_authn_resolve_a(a, _t_hdr2_a(a, "Bearer",
+          str_from("external-ghost-token"))), 0,
+      "a uid with no row here authenticates NOBODY");
+
+    # ⭐ ADDITIVE, PROPERTY 1: it cannot override a local result. A genuine
+    # local token still resolves locally, and a locally-INVALID token is not
+    # rescued into a different identity than the IdP named.
+    var good = agnostic_jwt_issue_a(a, uid, AGNOSTIC_ROLE_OPERATOR, str_from("acme"), 600);
+    var gp = agnostic_authn_resolve_a(a, _t_hdr2_a(a, "Bearer", good));
+    assert_neq(gp, 0, "a locally-issued token still verifies locally");
+    assert_eq(agnostic_principal_uid(gp), uid, "as the same principal");
+
+    agnostic_authn_set_external(0);
+    assert_eq(agnostic_authn_external(), 0, "the validator can be removed");
+}
+
+fn _t_hdr2_a(a, scheme, cred) {
+    var n = strlen(scheme);
+    var h = alloc_via(a, n + 1 + str_len(cred));
+    memcpy(h, scheme, n);
+    store8(h + n, 32);
+    memcpy(h + n + 1, str_data(cred), str_len(cred));
+    return str_new_a(a, h, n + 1 + str_len(cred));
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_bucket();
+    test_throttled_login_does_no_argon2();
+    test_webhook_signatures();
+    test_external_idp_is_additive();
+    return assert_summary();
+}
+
+var _agnostic_loginguard_test_exit = main();
+if (_agnostic_loginguard_test_exit > 0) { _agnostic_loginguard_test_exit = 1; }
+sys_exit_group(_agnostic_loginguard_test_exit);

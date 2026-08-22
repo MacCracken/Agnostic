@@ -64,14 +64,32 @@ left as its own change.
 
 ## Source
 
-**M4 complete; M5 part 1 landed** — 29 files, 7,709 lines, 479 top-level
+**M4 complete; M5 complete** — 36 files, 9530 lines, 578 top-level
 definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
 `src/presets_data.cyr`.
 
-**Tests: 17 suites, 825 assertions, 0 failed** (`cyrius test`), of which
-`tests/crypto.tcyr` contributes 54 across six groups. Gates green:
+**Tests: 22 suites, 1,103 assertions, 0 failed** (`cyrius test`). Gates green:
 `check-symbols.sh` (**now 4 rules** — Rule 4 is the new `lib/`↔`lib/` constant
 check), `check-clean.sh`, `deps --verify` 115/0.
+
+**M5 — identity and tenancy — is done.** `src/auth/` holds credential primitives
+(`crypto`), users and API keys (`store`), HS256 tokens (`jwt`), the static
+role→permission table (`perm`), tenancy and key-prefixing (`tenant`), the
+credential→principal path (`authn`), login-abuse controls (`ratelimit`) and
+callback signatures (`webhook`). The dispatch ladder's auth rung at
+`src/http/router.cyr` is **wired**, not a comment.
+
+⚠ **`AGNOSTIC_AUTH` defaults to `off`, and `agnostic_serve_mount` REFUSES TO
+START with it off on any bind but loopback.** There is no bootstrap route yet, so
+nothing could authenticate on a fresh deployment — the refusal is what keeps that
+from being fail-open rather than a promise that it is not.
+
+⚠ **Every security property in `src/auth/` is mutation-verified.** The suites are
+written so that removing a guard breaks a named assertion: the bucket re-checks,
+the JWT signature compare and `exp` rule, the permission table, tenant unscoping,
+the role-from-row rule, the rate limiter's position before Argon2, and the
+webhook timestamp being inside the MAC. Re-run those mutations before trusting a
+refactor of any of it.
 
 | module | role |
 |---|---|

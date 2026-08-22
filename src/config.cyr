@@ -14,6 +14,18 @@
 # A plain `alloc()`ed block with an enum offset table, not a struct. That is the
 # house idiom — AgnosAI declares zero structs and 182 enums for exactly this.
 
+# Whether the dispatch ladder enforces identity.
+#
+# ⚠ Defined HERE rather than beside the rest of the auth surface in
+# `src/auth/authn.cyr`, deliberately: `agnostic_config_from_env` reads it, and
+# several suites compile a narrow unit that includes `src/config.cyr` WITHOUT
+# the auth modules. Declaring it there made nine of them fail to compile. The
+# mode is configuration; its enforcement is not.
+enum AgnosticAuthMode {
+    AGNOSTIC_AUTH_OFF      = 0;
+    AGNOSTIC_AUTH_REQUIRED = 1;
+}
+
 enum AgnosticConfigOff {
     AGNOSTIC_CFG_PORT      = 0;
     AGNOSTIC_CFG_ADDR      = 8;
@@ -29,7 +41,8 @@ enum AgnosticConfigOff {
     AGNOSTIC_CFG_LLM_KEY   = 88;
     AGNOSTIC_CFG_DB_PATH   = 96;
     AGNOSTIC_CFG_AUDIT_PATH = 104;
-    AGNOSTIC_CFG_SIZE      = 112;
+    AGNOSTIC_CFG_AUTH_MODE = 112;
+    AGNOSTIC_CFG_SIZE      = 120;
 }
 
 # Defaults. The port matches the oracle's uvicorn default so an existing
@@ -277,6 +290,24 @@ fn agnostic_config_from_env(): i64 {
     }
     store64(c + AGNOSTIC_CFG_AUDIT_PATH, audit);
 
+    # AGNOSTIC_AUTH selects whether the dispatch ladder enforces identity.
+    #
+    # ⚠ **The default is `off`, and that is a deliberate, bounded exception.**
+    # Nothing can be authenticated before an operator has provisioned a user,
+    # and there is no bootstrap route yet — so defaulting to `required` would
+    # ship a server nobody can use or provision. What stops that being a
+    # fail-open hole is `agnostic_serve_mount`: with auth off it REFUSES TO
+    # START on any bind but loopback. Unauthenticated and reachable is not a
+    # configuration this binary will run.
+    var auth = AGNOSTIC_AUTH_OFF;
+    var raw_auth = getenv("AGNOSTIC_AUTH");
+    if (raw_auth != 0) {
+        if (agnostic_str_eq_cstr_ci(str_from(raw_auth), "required") == 1) {
+            auth = AGNOSTIC_AUTH_REQUIRED;
+        }
+    }
+    store64(c + AGNOSTIC_CFG_AUTH_MODE, auth);
+
     return c;
 }
 
@@ -285,6 +316,18 @@ fn agnostic_config_from_env(): i64 {
 
 # The TCP port to bind. 0 is legal and means "let the kernel choose".
 fn agnostic_config_port(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_PORT); }
+
+# Whether the dispatch ladder enforces identity: AGNOSTIC_AUTH_OFF or
+# AGNOSTIC_AUTH_REQUIRED.
+#
+# ⚠ 0 for a null block is `AGNOSTIC_AUTH_OFF`, which is the LESS safe value —
+# unusual for this file, where every other accessor's zero is benign. It is safe
+# here only because a null config never reaches a bound listener: mount refuses
+# a non-loopback bind with auth off, and a null config cannot bind at all.
+fn agnostic_config_auth_mode(c): i64 {
+    if (c == 0) { return AGNOSTIC_AUTH_OFF; }
+    return load64(c + AGNOSTIC_CFG_AUTH_MODE);
+}
 
 # The bind address as a network-order packed IPv4 word, not a string.
 fn agnostic_config_addr(c): i64 { if (c == 0) { return 0; } return load64(c + AGNOSTIC_CFG_ADDR); }

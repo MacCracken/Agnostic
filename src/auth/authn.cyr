@@ -1,0 +1,182 @@
+# agnostic/auth/authn — turning an Authorization header into a principal.
+#
+# ## Two schemes, named explicitly, never guessed
+#
+#   Authorization: Bearer <jwt>
+#   Authorization: ApiKey <hex>
+#
+# The scheme selects the verification path. Sniffing the credential's shape
+# instead — "64 hex characters, must be an API key" — would let an attacker pick
+# which verifier runs by formatting their input, and the cheaper verifier is
+# always the one they would pick.
+#
+# ## ⚠ The token's role claim is NOT trusted
+#
+# A verified JWT proves *who* the caller is. The role and tenant are then read
+# **from the user row**, not from the claim. That costs one indexed lookup per
+# request and buys instant revocation: deleting a user or demoting them takes
+# effect on the next request rather than whenever their token happens to expire.
+#
+# So `agnostic_jwt_claim_role` exists and is deliberately not used here. A token
+# whose subject no longer resolves to a user is refused outright — a live token
+# for a deleted account is exactly the case a claims-only verifier gets wrong.
+#
+# ## What a failure does and does not say
+#
+# Every failure returns 0 and the ladder answers a bare 401. No distinction
+# between "no header", "bad scheme", "bad signature", "expired", and "user
+# deleted" reaches the client, because each of those is a probe an attacker can
+# run cheaply and the differences are all information.
+
+enum AgnosticPrincipalOff {
+    AGNOSTIC_PR_UID    = 0;
+    AGNOSTIC_PR_ROLE   = 8;
+    AGNOSTIC_PR_TENANT = 16;
+    AGNOSTIC_PR_SIZE   = 24;
+}
+
+# Whether the ladder enforces identity. Set once at mount from config.
+var _agnostic_authn_mode = 0;
+
+# An optional external validator: `fn(a, token) -> uid`. 0 when unset.
+var _agnostic_authn_external = 0;
+
+# Install the mode. Mount time only.
+fn agnostic_authn_set_mode(m): i64 {
+    if (m == AGNOSTIC_AUTH_REQUIRED) { _agnostic_authn_mode = AGNOSTIC_AUTH_REQUIRED; }
+    else { _agnostic_authn_mode = AGNOSTIC_AUTH_OFF; }
+    return _agnostic_authn_mode;
+}
+
+# The current mode.
+fn agnostic_authn_mode(): i64 {
+    return _agnostic_authn_mode;
+}
+
+# Whether identity is enforced right now.
+fn agnostic_authn_required(): i64 {
+    if (_agnostic_authn_mode == AGNOSTIC_AUTH_REQUIRED) { return 1; }
+    return 0;
+}
+
+# Install an external token validator, or 0 to remove one. Mount time only.
+#
+# The validator is `fn(a, token: Str) -> uid` and is the roadmap's external-IdP
+# mode. Three properties make it **additive** rather than a second front door,
+# and all three are enforced here rather than left to the validator:
+#
+#   1. It runs **only after local verification has already failed**, so it can
+#      never override or weaken an HS256 result.
+#   2. Its answer is a **uid, not a principal**. The role and tenant still come
+#      from the user row, so an external IdP cannot grant a role this deployment
+#      did not assign.
+#   3. A uid that does not resolve to a row is refused. An IdP that authenticates
+#      somebody unknown here authenticates nobody.
+fn agnostic_authn_set_external(fp): i64 {
+    _agnostic_authn_external = fp;
+    return 1;
+}
+
+# The installed external validator, or 0.
+fn agnostic_authn_external(): i64 {
+    return _agnostic_authn_external;
+}
+
+# Build a principal in `a`. 0 on exhaustion.
+fn agnostic_principal_new_a(a, uid, role, tenant): i64 {
+    var p = alloc_via(a, AGNOSTIC_PR_SIZE);
+    if (p == 0) { return 0; }
+    store64(p + AGNOSTIC_PR_UID, uid);
+    store64(p + AGNOSTIC_PR_ROLE, role);
+    store64(p + AGNOSTIC_PR_TENANT, tenant);
+    return p;
+}
+
+# The authenticated uid, or 0.
+fn agnostic_principal_uid(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PR_UID);
+}
+
+# The authenticated role, or -1.
+#
+# ⚠ -1 for a null principal, matching `agnostic_users_role`. The permission
+# table holds nothing for -1, so an unchecked null still cannot act.
+fn agnostic_principal_role(p): i64 {
+    if (p == 0) { return 0 - 1; }
+    return load64(p + AGNOSTIC_PR_ROLE);
+}
+
+# The principal's tenant, or 0.
+fn agnostic_principal_tenant(p): i64 {
+    if (p == 0) { return 0; }
+    return load64(p + AGNOSTIC_PR_TENANT);
+}
+
+# Whether `header` begins with `scheme` followed by exactly one space.
+fn _agnostic_authn_scheme_is(header: Str, scheme): i64 {
+    var n = strlen(scheme);
+    if (str_len(header) < n + 1) { return 0; }
+    var p = str_data(header);
+    var i = 0;
+    while (i < n) {
+        if (_agnostic_fold_ascii(load8(p + i) & 255) != _agnostic_fold_ascii(load8(scheme + i) & 255)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if ((load8(p + n) & 255) != 32) { return 0; }
+    return 1;
+}
+
+# The credential after `scheme `, as a Str in `a`. 0 when empty.
+fn _agnostic_authn_credential_a(a, header: Str, scheme): i64 {
+    var n = strlen(scheme) + 1;
+    var len = str_len(header) - n;
+    if (len <= 0) { return 0; }
+    return str_new_a(a, str_data(header) + n, len);
+}
+
+# Build a principal for `uid` by reading the CURRENT role and tenant from the
+# user row. 0 when the uid no longer resolves.
+fn _agnostic_authn_principal_for_a(a, uid): i64 {
+    if (uid == 0) { return 0; }
+    var role = agnostic_users_role(uid);
+    if (role < 0) { return 0; }
+    var tenant = agnostic_users_tenant_a(a, uid);
+    if (tenant == 0) { tenant = str_from(""); }
+    return agnostic_principal_new_a(a, uid, role, tenant);
+}
+
+# Resolve an Authorization header to a principal, or 0.
+#
+# ⚠ Returns 0 for every failure without distinguishing them — see the module
+# header. The caller answers 401 and says nothing more.
+fn agnostic_authn_resolve_a(a, header: Str): i64 {
+    if (header == 0) { return 0; }
+    if (str_len(header) == 0) { return 0; }
+
+    if (_agnostic_authn_scheme_is(header, "Bearer") == 1) {
+        var tok = _agnostic_authn_credential_a(a, header, "Bearer");
+        if (tok == 0) { return 0; }
+        var claims = agnostic_jwt_verify_a(a, tok);
+        if (claims == 0) {
+            # Local verification failed. Only now may an external IdP be asked,
+            # and only for a uid — see `agnostic_authn_set_external`.
+            if (_agnostic_authn_external == 0) { return 0; }
+            return _agnostic_authn_principal_for_a(a,
+              fncall2(_agnostic_authn_external, a, tok));
+        }
+        # The subject is trusted because the MAC covered it. The ROLE is not —
+        # it is re-read from the row below.
+        return _agnostic_authn_principal_for_a(a, agnostic_jwt_claim_uid(claims));
+    }
+
+    if (_agnostic_authn_scheme_is(header, "ApiKey") == 1) {
+        var key = _agnostic_authn_credential_a(a, header, "ApiKey");
+        if (key == 0) { return 0; }
+        return _agnostic_authn_principal_for_a(a, agnostic_apikey_resolve_a(a, key));
+    }
+
+    return 0;
+}

@@ -56,6 +56,13 @@ include "src/auth/jwt.cyr"
 # `http/router.cyr`; `tenant` reads `_agnostic_auth_str_a` from `auth/store`.
 include "src/auth/tenant.cyr"
 include "src/auth/perm.cyr"
+# Credential -> principal. Reads `auth/jwt` and `auth/store`, and is read by the
+# dispatch ladder in `http/router.cyr`.
+include "src/auth/authn.cyr"
+# Login-abuse controls. Reads `auth/store`'s verify path.
+include "src/auth/ratelimit.cyr"
+# Outbound callback signatures. Uses `auth/crypto`'s hex helper.
+include "src/auth/webhook.cyr"
 include "src/engine/outcome.cyr"
 include "src/engine/crewstore.cyr"
 include "src/engine/ledger.cyr"
