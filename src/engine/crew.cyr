@@ -241,6 +241,8 @@ fn agnostic_crew_submit(r, out_entry): i64 {
     }
 
     agnostic_log_kv_str(SK_INFO, "crew submitted", 14, "crew_id", 7, crew_id);
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("crew.submit"),
+      agnostic_audit_detail("crew_id", crew_id));
     return AGNOSTIC_SUBMIT_OK;
 }
 
@@ -331,5 +333,7 @@ fn agnostic_crew_cancel(crew_id: Str): i64 {
 
     agnostic_ledger_latch(entry, AGNOSTIC_CREW_CANCELLED, 0, 0);
     agnostic_log_kv_str(SK_INFO, "crew cancelled", 14, "crew_id", 7, crew_id);
+    agnostic_audit_record(SEV_WARNING, AGNOSTIC_AUDIT_SRC, str_from("crew.cancel"),
+      agnostic_audit_detail("crew_id", crew_id));
     return AGNOSTIC_CANCEL_OK;
 }

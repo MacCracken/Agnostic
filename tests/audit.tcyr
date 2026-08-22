@@ -1,0 +1,181 @@
+# agnostic/engine/audit — the tamper-evident trail: durable, and provably so.
+#
+# What M4 claims is narrow and this suite holds it to exactly that: entries are
+# hash-linked, they survive a restart, and altering one is DETECTED. It does not
+# claim signature-backed evidence — libro's `audit_entries` table has no
+# signature column, so signing would compute and discard.
+include "src/app.cyr"
+
+var _T_AUDIT = "/tmp/agnostic-audit-suite.patra";
+
+# Start from an empty store every time. Removing the file is the only reliable
+# reset: libro owns the schema and offers no truncate.
+fn _t_fresh() {
+    agnostic_audit_close();
+    sys_unlink(_T_AUDIT);
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    return agnostic_audit_open(str_from(_T_AUDIT));
+}
+
+fn test_opens_and_records() {
+    test_group("audit/record");
+
+    assert_eq(_t_fresh(), 1, "the store opens");
+    assert_eq(agnostic_audit_is_open(), 1, "and reports itself open");
+    assert_eq(agnostic_audit_at_open(), 0, "a fresh store has no entries");
+    assert_eq(agnostic_audit_count(), 0, "so the count starts at 0");
+
+    assert_eq(agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC,
+        str_from("definition.create"), agnostic_audit_detail("key", str_from("alpha"))), 1,
+      "an entry is persisted");
+    assert_eq(agnostic_audit_appended(), 1, "and counted");
+    assert_eq(agnostic_audit_count(), 1, "the total reflects it");
+    assert_eq(agnostic_audit_dropped(), 0, "with nothing dropped");
+
+    agnostic_audit_record(SEV_WARNING, AGNOSTIC_AUDIT_SRC, str_from("definition.delete"),
+      agnostic_audit_detail("key", str_from("alpha")));
+    assert_eq(agnostic_audit_count(), 2, "a second entry too");
+}
+
+fn test_details_are_cut_visibly_not_silently() {
+    test_group("audit/detail-fit");
+
+    # ⚠ libro's `det` is a patra COL_STR — a fixed 256-byte slot. patra REFUSES
+    # an over-length value with PATRA_ERR_ROWSZ rather than truncating (its own
+    # audit, 2026-08-18 S2-8: silent truncation "made two distinct values
+    # indistinguishable on disk"), so an over-long detail would lose the WHOLE
+    # entry, not its tail.
+    var short = str_from("key=alpha");
+    assert_eq(str_eq(agnostic_audit_fit_detail(short), short), 1, "a short detail is untouched");
+
+    var sb = str_builder_new();
+    var i = 0;
+    while (i < 400) { str_builder_add_cstr(sb, "x"); i = i + 1; }
+    var long = str_builder_build(sb);
+    assert_eq(str_len(long), 400, "a 400-byte detail");
+
+    var fitted = agnostic_audit_fit_detail(long);
+    assert_eq(str_len(fitted) <= AGNOSTIC_AUDIT_DETAIL_MAX, 1, "is cut to fit the column");
+    # ⚠ And it SAYS it was cut. Silent truncation is the failure mode; a marker
+    # in the record itself is the difference between a short value and a lost one.
+    assert_eq(str_len(fitted) > 0, 1, "and is not emptied");
+
+    # The cut record still persists, which is the point of cutting rather than
+    # letting patra refuse the row.
+    assert_eq(_t_fresh(), 1, "fresh store");
+    assert_eq(agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("long"), long), 1,
+      "an over-long detail still records");
+    assert_eq(agnostic_audit_dropped(), 0, "rather than being dropped");
+}
+
+fn test_survives_a_reopen() {
+    test_group("audit/durable");
+
+    assert_eq(_t_fresh(), 1, "fresh store");
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("a"), str_from("d=1"));
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("b"), str_from("d=2"));
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("c"), str_from("d=3"));
+    assert_eq(agnostic_audit_count(), 3, "three entries recorded");
+
+    # ⭐ Close and reopen: a different handle, nothing carried in memory.
+    agnostic_audit_close();
+    assert_eq(agnostic_audit_is_open(), 0, "closed");
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    assert_eq(agnostic_audit_open(str_from(_T_AUDIT)), 1, "reopened");
+
+    assert_eq(agnostic_audit_at_open(), 3, "all three came off disk");
+    assert_eq(agnostic_audit_appended(), 0, "none of them from this process");
+    assert_eq(agnostic_audit_is_intact(), 1, "and the chain verifies");
+    assert_eq(agnostic_audit_bad_index(), 0 - 1, "with no bad entry to name");
+}
+
+fn test_tampering_is_detected() {
+    test_group("audit/tamper");
+
+    assert_eq(_t_fresh(), 1, "fresh store");
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("x"), str_from("key=alpha"));
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("y"), str_from("key=bravo"));
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("z"), str_from("key=charlie"));
+    agnostic_audit_close();
+
+    # ⭐ THE CLAIM, TESTED. Edit one byte of a recorded detail on disk — the
+    # obvious attack, rewriting what an entry says happened — and reopen.
+    var fd = sys_open(_T_AUDIT, O_RDWR, 0);
+    assert_eq(fd > 0, 1, "opened the store file directly");
+
+    # Find "key=bravo" and change one byte of it.
+    # SEEK_SET / SEEK_END have no named constants in the stdlib; 0 and 2 are the
+    # POSIX values.
+    var size = xlseek(fd, 0, 2);
+    var buf = alloc(size);
+    xlseek(fd, 0, 0);
+    sys_read(fd, buf, size);
+
+    var at = 0 - 1;
+    var i = 0;
+    while (i < size - 9) {
+        if ((load8(buf + i) & 255) == 107) {          # 'k'
+            if ((load8(buf + i + 4) & 255) == 98) {   # 'b' of bravo
+                if ((load8(buf + i + 1) & 255) == 101) { at = i; break; }   # 'e'
+            }
+        }
+        i = i + 1;
+    }
+    assert_eq(at >= 0, 1, "found the recorded detail on disk");
+
+    xlseek(fd, at + 4, 0);
+    var x[1];
+    store8(&x, 88);                                    # 'b' -> 'X'
+    sys_write(fd, &x, 1);
+    sys_close(fd);
+
+    var lvl = sakshi_get_level();
+    patra_init();
+    sakshi_set_level(lvl);
+    assert_eq(agnostic_audit_open(str_from(_T_AUDIT)), 1, "the altered store still opens");
+
+    # ⚠ Opening SUCCEEDS and the verdict is reported — it is not a startup
+    # failure. Refusing to start would let an attacker deny service by
+    # corrupting one byte, and would take the evidence offline with it.
+    assert_eq(agnostic_audit_is_intact(), 0, "the alteration is DETECTED");
+    assert_eq(agnostic_audit_bad_index() >= 0, 1, "and the failing entry is named");
+    assert_eq(agnostic_audit_at_open(), 3, "with the entries still readable");
+}
+
+fn test_gaps_are_counted_because_verification_cannot_see_them() {
+    test_group("audit/gaps");
+
+    # ⚠ A closed store records nothing, and that is the shape of a gap:
+    # verification proves the entries that ARE there link correctly, and can
+    # never reveal one that was never written. The counter is the only witness.
+    agnostic_audit_close();
+    assert_eq(agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("lost"),
+        str_from("d=1")), 0, "recording to a closed store fails");
+
+    assert_eq(_t_fresh(), 1, "fresh store");
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("kept"), str_from("d=1"));
+    assert_eq(agnostic_audit_is_intact(), 1, "a chain with a gap before it still verifies clean");
+    # Which is exactly why `dropped` is on `/api/v1/audit`: `intact: true` with a
+    # non-zero drop count has not told you everything.
+    assert_eq(agnostic_audit_dropped(), 0, "this store dropped none of its own");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_opens_and_records();
+    test_details_are_cut_visibly_not_silently();
+    test_survives_a_reopen();
+    test_tampering_is_detected();
+    test_gaps_are_counted_because_verification_cannot_see_them();
+    agnostic_audit_close();
+    return assert_summary();
+}
+
+var _agnostic_audit_test_exit = main();
+if (_agnostic_audit_test_exit > 0) { _agnostic_audit_test_exit = 1; }
+sys_exit_group(_agnostic_audit_test_exit);

@@ -45,6 +45,10 @@ include "src/presets_data.cyr"
 # `crew` is the only one that touches the orchestrator.
 include "src/engine/outcome.cyr"
 include "src/engine/ledger.cyr"
+# The audit trail sits above `log` and below everything that records to it —
+# `crew.cyr` and the definition routes both do, and a `var` referenced from a
+# module included earlier resolves to 0.
+include "src/engine/audit.cyr"
 include "src/engine/reject.cyr"
 include "src/engine/agentdef.cyr"
 include "src/engine/request.cyr"

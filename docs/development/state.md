@@ -47,6 +47,7 @@ Python line was CalVer (`2026.3.18`).
 | `src/engine/reject.cyr` | how a request says no; the typed-field readers |
 | `src/engine/agentdef.cyr` | **one** agent model — forwarded, retained, or refused |
 | `src/engine/definitions.cyr` | the definition store — **patra-backed** since M4 |
+| `src/engine/audit.cyr` | the tamper-evident trail, libro over patra |
 | `src/engine/presets.cyr` | the canonical preset library, parsed once at mount |
 | `src/presets_data.cyr` | **generated** — the 18 documents as Cyrius literals |
 | `src/routes/health.cyr` | `/health` and `/ready` |
@@ -95,7 +96,7 @@ It is never built or shipped, and it is **not** a specification —
 
 ## Tests
 
-**14 suites, 711 assertions, 0 failed** (`cyrius test`, run under the pin).
+**15 suites, 746 assertions, 0 failed** (`cyrius test`, run under the pin).
 
 ⚠ Counts here are assertion-suite lines only. `cyrius test`'s final
 `N passed, 0 failed` line is the **suite** tally, not a suite — earlier figures
@@ -112,7 +113,9 @@ in this repo (`222`) and in agnosai (`8,038`) double-counted it.
   required, there is no fallback, and a cyclic graph is refused before submission
 - `tests/crews_route.tcyr` — **59 assertions**, the surface end to end, including
   the §3.2 barrier: an id we never submitted is a 404 that relabels nothing
-- `tests/agentdef.tcyr` — **97 assertions**, the one agent model: every field
+- `tests/audit.tcyr` — **35 assertions**, the trail: durable across a reopen, and
+  a byte edited on disk is **detected** with the failing entry named
+- `tests/agentdef.tcyr` — **106 assertions**, the one agent model: every field
   forwarded, retained or refused by name, plus the store's no-upsert and
   never-evict policies
 - `tests/presets.tcyr` — **71 assertions**, the canonical library: all 18 parse,

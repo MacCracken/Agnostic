@@ -84,7 +84,20 @@ var AGNOSTIC_DEF_INDEX_SQL = "CREATE INDEX ON agnostic_definitions (dkey)";
 # empty-looking store.
 fn agnostic_definitions_open(path: Str): i64 {
     if (_agnostic_db != 0) { return 1; }
+
+    # ⚠ **`patra_init` stomps the application's log level.** Its last line is an
+    # unconditional `sakshi_set_level(SK_WARN)` (`lib/patra.cyr:4472`), so an
+    # operator who set `AGNOSTIC_LOG_LEVEL=info` silently loses every INFO line
+    # in the process — including `listening`, which is how you know the server
+    # came up. agnosai hit this and avoided patra entirely, leaving a note for
+    # "whoever does reach for patra later" (`lib/agnosai.cyr:29933`).
+    #
+    # Saved and restored here rather than in the caller, so the wart stays in the
+    # one module that triggers it and no future caller has to remember. Worth
+    # fixing upstream: a library has no business setting the host's log level.
+    var level = sakshi_get_level();
     patra_init();
+    sakshi_set_level(level);
 
     var db = patra_open(str_data(path));
     if (db == 0) { return 0; }

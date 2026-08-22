@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — M4 (part 2), a durable tamper-evident audit chain on libro
+
+**35 assertions** in `tests/audit.tcyr`; 746 total across 15 suites, 0 failed.
+Proven live: three events recorded, the process restarted, one byte of a recorded
+detail edited on disk, and the restart reported `"intact": false, "bad_index": 1`
+with an ERROR naming the entry.
+
+`GET /api/v1/audit` reports the trail's state. Crew submit/cancel and definition
+create/replace/delete each record an entry.
+
+- **A streaming chain, not a retaining one.** libro's own comment is the reason:
+  for a write-through consumer the retaining chain's entry vec "is pure
+  accumulation ... A long-lived writer grew forever." Linkage is byte-identical,
+  so the durable chain verifies the same.
+- **Hash-linked, and not signature-backed — stated rather than implied.** libro's
+  `audit_entries` table is `(id, ts, sev, src, act, det, aid, phash, hash, halg)`:
+  there is **no signature column**, so `sign_entry` would compute a signature and
+  `patrastore_append` would discard it. Computing security theatre is worse than
+  not computing it. What that leaves undetected is named in the module header: an
+  attacker who can write the file *and* recompute every hash forward.
+- Still strictly better than the engine's own trail, which mints its key with
+  `random_bytes` per start and keeps entries in memory — unverifiable across a
+  restart, and gone when the process is.
+- **Gaps are counted, because verification cannot see them.** A failed append
+  leaves no hole to find, so `dropped` is on the endpoint beside `intact`. A
+  chain reporting `intact: true` with a non-zero drop count has not told you
+  everything.
+- **A broken chain is loud, not fatal.** Refusing to start would let an attacker
+  deny service by corrupting one byte and would take the evidence offline with it.
+
+### Fixed — `patra_init` was silently resetting the log level
+
+`patra_init`'s last line is an unconditional `sakshi_set_level(SK_WARN)`
+(`lib/patra.cyr:4472`), so opening the database threw away whatever
+`AGNOSTIC_LOG_LEVEL` had set — every INFO line in the process, including
+`listening`. agnosai hit this, avoided patra entirely, and left a note for
+"whoever does reach for patra later" (`lib/agnosai.cyr:29933`).
+
+Saved and restored around the call in `agnostic_definitions_open`, so the wart
+stays in the one module that triggers it. ⚠ **Worth fixing upstream** — a library
+has no business setting its host's log level.
+
+### Changed — audit verification runs at open, not per request
+
+⚠ **A libro thread-safety limitation, found by it crashing the server.**
+`patrastore_open` prepares its `SELECT` and `COUNT` statements once and caches
+them in the store struct, and patra's SQL parse scratch is **per-thread**
+(`patra_init`: "Install this (main/foreign) thread's TLS block so the per-thread
+SQL parse scratch resolves"). Using those cached statements from a sandhi pool
+worker kills the process — reproduced directly: `agnostic_audit_count()` succeeds
+on the main thread and takes the worker down.
+
+`src/engine/definitions.cyr` is unaffected because it calls `patra_prepare` on
+the calling thread every time; libro's store does not.
+
+So verification happens once, at open, on the main thread — which is also simply
+the right moment, since the question a tamper-evident chain answers is "was this
+altered while I was not running". Entry counts are maintained in-process rather
+than queried. `GET /api/v1/audit` reports `"verified": "open"` so a client reading
+`intact` knows *when* it was true. A live re-verify needs libro to stop sharing
+prepared statements across threads.
+
 ### Added — M4 (part 1), agent definitions are durable in patra
 
 **106 assertions** in `tests/agentdef.tcyr`; 711 total across 14 suites, 0 failed.

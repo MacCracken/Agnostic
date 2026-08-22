@@ -275,6 +275,17 @@ fn agnostic_serve_mount(cfg): i64 {
     }
     agnostic_log_kv_str(SK_INFO, "database open", 13, "path", 4, db_path);
 
+    # ⚠ Also fatal. A trail that silently stops recording is worse than a
+    # startup that refuses — the whole value of a tamper-evident chain is that
+    # its absence is noticed.
+    var audit_path = agnostic_config_audit_path(cfg);
+    if (agnostic_audit_open(audit_path) == 0) {
+        agnostic_log_kv_str(SK_ERROR, "could not open the audit store; refusing to start", 49,
+          "path", 4, audit_path);
+        return 0;
+    }
+    agnostic_log_kv_str(SK_INFO, "audit chain open", 16, "path", 4, audit_path);
+
     agnostic_ready_register(str_from("engine"), &agnostic_engine_is_ready);
 
     # ⚠ **The two size ceilings interact, and the interaction leaks.** A request

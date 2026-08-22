@@ -28,7 +28,8 @@ enum AgnosticConfigOff {
     AGNOSTIC_CFG_LLM_URL   = 80;
     AGNOSTIC_CFG_LLM_KEY   = 88;
     AGNOSTIC_CFG_DB_PATH   = 96;
-    AGNOSTIC_CFG_SIZE      = 104;
+    AGNOSTIC_CFG_AUDIT_PATH = 104;
+    AGNOSTIC_CFG_SIZE      = 112;
 }
 
 # Defaults. The port matches the oracle's uvicorn default so an existing
@@ -66,6 +67,14 @@ var AGNOSTIC_DEFAULT_CREW_SECS = 3600;
 # surprising in the others; a relative default is obviously the operator's to
 # set, and mount logs the resolved path so it is never a guess.
 var AGNOSTIC_DEFAULT_DB_PATH = "agnostic.patra";
+
+# The audit chain's own database.
+#
+# ⚠ **A SEPARATE file from AGNOSTIC_DB_PATH, and it has to be.** `patrastore_open`
+# calls `patra_open` itself, so pointing both at one path would put two handles
+# on one flock-arbitrated file from inside the same process. Two files, two
+# handles, no contention.
+var AGNOSTIC_DEFAULT_AUDIT_PATH = "agnostic-audit.patra";
 
 # What the budget's unenforced concurrency slot is filled with. The engine's own
 # `ResourceBudget::default()` value, so the record serialises identically to one
@@ -260,6 +269,14 @@ fn agnostic_config_from_env(): i64 {
     }
     store64(c + AGNOSTIC_CFG_DB_PATH, db);
 
+    var audit = str_from(AGNOSTIC_DEFAULT_AUDIT_PATH);
+    var raw_audit = getenv("AGNOSTIC_AUDIT_PATH");
+    if (raw_audit != 0) {
+        var ap = str_from(raw_audit);
+        if (str_len(ap) > 0) { audit = ap; }
+    }
+    store64(c + AGNOSTIC_CFG_AUDIT_PATH, audit);
+
     return c;
 }
 
@@ -325,6 +342,12 @@ fn agnostic_config_llm_api_key(c): i64 {
 fn agnostic_config_db_path(c): i64 {
     if (c == 0) { return str_from(AGNOSTIC_DEFAULT_DB_PATH); }
     return load64(c + AGNOSTIC_CFG_DB_PATH);
+}
+
+# The audit chain's database path as a Str. Never 0.
+fn agnostic_config_audit_path(c): i64 {
+    if (c == 0) { return str_from(AGNOSTIC_DEFAULT_AUDIT_PATH); }
+    return load64(c + AGNOSTIC_CFG_AUDIT_PATH);
 }
 
 # Report the first malformed field, or 0 when every field parsed. The caller

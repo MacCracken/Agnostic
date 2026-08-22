@@ -1,0 +1,257 @@
+# agnostic/engine/audit — the tamper-evident trail, on libro over patra.
+#
+# ## What this gives you, stated exactly
+#
+# Every entry carries the hash of its predecessor, so **modifying or reordering
+# a persisted entry is detectable** by `agnostic_audit_verify`. That is real
+# tamper-evidence and it is what M4 delivers.
+#
+# ⚠ **It is not signature-backed, and the reason is structural.** libro's
+# `audit_entries` table is `(id, ts, sev, src, act, det, aid, phash, hash, halg)`
+# — there is **no signature column**. `sign_entry` exists and produces a detached
+# signature, but `patrastore_append` has nowhere to put it, so signing here would
+# compute a signature and throw it away. Computing security theatre is worse than
+# not computing it, so this module does not sign.
+#
+# The consequence, plainly: an attacker who can write the audit file **and**
+# recompute every hash forward from the point they edit is not detected. Closing
+# that needs either a signature column in libro or external anchoring (libro has
+# `anchor_*`), and neither is M4.
+#
+# This is still strictly better than what the engine's own chain offers.
+# `agnosai_audit_chain_new` mints its key with `random_bytes` on every start and
+# keeps entries in a `vec` — so the engine's trail is process-lifetime and its
+# signatures are unverifiable across a restart. Agnostic's is durable.
+#
+# ## ⚠ A streaming chain, because a retaining one grows forever
+#
+# `chain_new_streaming` keeps only the head hash. libro's own comment on it is
+# the reason: for a write-through consumer — append, persist, never read the
+# chain again — the retaining chain's entry vec "is pure accumulation, and there
+# was no way to bound it ... A long-lived writer grew forever." A server is
+# exactly that consumer. Linkage is byte-identical either way, so the durable
+# chain verifies the same.
+#
+# The trade libro names is real and accepted: on a streaming chain `chain_len` is
+# 0 and every in-memory query sees nothing. Reads go to the store.
+#
+# ## ⚠ Gaps are invisible to verification, so they are counted instead
+#
+# Verification proves the entries that ARE there form an unbroken chain. It
+# cannot show an entry that was never written — a failed append leaves no hole to
+# find. So an append failure is logged at ERROR **and counted**, and the count is
+# part of what an operator reads. A chain that verifies clean with a non-zero
+# drop count has not told you everything.
+#
+# An audit failure does **not** fail the operation being audited. That is a
+# deliberate choice and the opposite one is defensible: it means an action can
+# succeed unrecorded. The counter is what keeps that visible rather than silent.
+
+# libro's `det` column is a patra `COL_STR` — a fixed 256-byte slot holding 255
+# bytes plus a NUL.
+#
+# ⚠ patra **refuses** an over-length value with `PATRA_ERR_ROWSZ` rather than
+# truncating; its own audit (2026-08-18 S2-8) records that silent truncation
+# "made two distinct values indistinguishable on disk". So an over-long detail
+# would lose the whole entry, not the tail. This module truncates first, with a
+# visible marker, so the record survives and says that it was cut.
+var AGNOSTIC_AUDIT_DETAIL_MAX = 255;
+
+# The `source` every Agnostic audit entry carries. libro spends patra's single
+# index on this column, so it is what a query can filter by cheaply.
+var AGNOSTIC_AUDIT_SRC = str_from("agnostic");
+var AGNOSTIC_AUDIT_CUT = "…[cut]";
+
+# The durable store, the streaming chain, and the counters.
+var _agnostic_audit_store = 0;
+var _agnostic_audit_chain = 0;
+var _agnostic_audit_dropped = 0;
+var _agnostic_audit_appended = 0;
+
+# The integrity verdict, taken once when the store is opened.
+#
+# ⚠ **Verification happens at open, on the main thread, and NOT per request —
+# and that is a constraint, not a preference.** `patrastore_open` prepares its
+# `SELECT` and `COUNT` statements once and caches them in the store struct, and
+# patra's SQL parse scratch is **per-thread** (`patra_init`: "Install this
+# (main/foreign) thread's TLS block so the per-thread SQL parse scratch resolves").
+# Using those cached statements from a sandhi pool worker faults the process —
+# reproduced directly: the same `agnostic_audit_count()` that succeeds on the
+# main thread kills a worker thread outright.
+#
+# `src/engine/definitions.cyr` is unaffected because it calls `patra_prepare` on
+# the calling thread every time; libro's store does not.
+#
+# Verifying at open is also simply the right moment: the question a
+# tamper-evident chain answers is "was this file altered while I was not
+# running", and that is exactly what start-up can see. A live re-verify endpoint
+# is worth having and needs libro to stop sharing prepared statements across
+# threads — worth reporting upstream.
+var _agnostic_audit_intact = 1;
+var _agnostic_audit_bad_index = 0 - 1;
+var _agnostic_audit_at_open = 0;
+
+# Open the audit store and start a chain. Mount time only.
+#
+# Returns 1 on success, 0 when the store cannot be opened. The caller decides
+# whether that is fatal; `agnostic_serve_mount` treats it as fatal, because a
+# product tier that silently stops auditing is worse than one that refuses to
+# start.
+fn agnostic_audit_open(path: Str): i64 {
+    if (_agnostic_audit_store != 0) { return 1; }
+    var s = patrastore_open(path);
+    if (s == 0) { return 0; }
+    # One index per table is patra's limit and libro spends it on `src`, so a
+    # query by source is indexed and anything else is a scan. Nothing here
+    # queries by anything else.
+    patrastore_create_source_index(s);
+    _agnostic_audit_store = s;
+    _agnostic_audit_chain = chain_new_streaming();
+    _agnostic_audit_dropped = 0;
+    _agnostic_audit_appended = 0;
+
+    # The one verification pass, here on the main thread before any worker
+    # exists. See `_agnostic_audit_intact` for why it cannot be done later.
+    _agnostic_audit_at_open = patrastore_len(s);
+    var entries = patrastore_load_all(s);
+    var err = 0;
+    if (entries != 0) { err = verify_chain(entries, 0); }
+    if (err == 0) {
+        _agnostic_audit_intact = 1;
+        _agnostic_audit_bad_index = 0 - 1;
+    } else {
+        _agnostic_audit_intact = 0;
+        _agnostic_audit_bad_index = load64(err + 24);
+        # ⚠ Loud, and deliberately not fatal. A broken chain means the file was
+        # altered — refusing to start would hand an attacker a denial of service
+        # by corrupting one byte, and would destroy the evidence's availability.
+        # It is reported at ERROR, surfaced on `/api/v1/audit`, and the process
+        # keeps recording so the tampering is bracketed rather than hidden.
+        agnostic_log_kv_int(SK_ERROR,
+          "audit chain failed verification at open; the store was altered", 62,
+          "entry", 5, _agnostic_audit_bad_index);
+    }
+    return 1;
+}
+
+# Close the store, flushing anything batched.
+fn agnostic_audit_close(): i64 {
+    if (_agnostic_audit_store == 0) { return 0; }
+    patrastore_close(_agnostic_audit_store);
+    _agnostic_audit_store = 0;
+    _agnostic_audit_chain = 0;
+    return 0;
+}
+
+# Whether the trail is recording.
+fn agnostic_audit_is_open(): i64 {
+    if (_agnostic_audit_store == 0) { return 0; }
+    return 1;
+}
+
+# How many entries the store held when it was opened.
+#
+# ⚠ Not a live `patrastore_len`: that uses libro's cached count statement, which
+# faults off the main thread. See `_agnostic_audit_intact`.
+fn agnostic_audit_at_open(): i64 {
+    return _agnostic_audit_at_open;
+}
+
+# How many entries this process has appended.
+fn agnostic_audit_appended(): i64 {
+    return _agnostic_audit_appended;
+}
+
+# How many entries the store holds — what it opened with, plus what we wrote.
+#
+# Counted rather than queried, for the threading reason above. It is exact as
+# long as this process is the only writer, which is the same assumption
+# `src/engine/definitions.cyr`'s decode cache makes.
+fn agnostic_audit_count(): i64 {
+    return _agnostic_audit_at_open + _agnostic_audit_appended;
+}
+
+# How many appends failed — gaps that verification cannot reveal.
+fn agnostic_audit_dropped(): i64 {
+    return _agnostic_audit_dropped;
+}
+
+# Fit a detail string inside the column, marking it when it does not fit.
+#
+# Returns `details` unchanged when it fits. Otherwise a prefix plus a visible
+# marker: the record survives, and it says on its face that it was cut. Silence
+# was the alternative and it is the one this port refuses.
+fn agnostic_audit_fit_detail(details: Str): i64 {
+    if (details == 0) { return str_from(""); }
+    if (str_len(details) <= AGNOSTIC_AUDIT_DETAIL_MAX) { return details; }
+    var marker = str_from(AGNOSTIC_AUDIT_CUT);
+    var keep = AGNOSTIC_AUDIT_DETAIL_MAX - str_len(marker);
+    if (keep < 0) { keep = 0; }
+    var sb = str_builder_new();
+    str_builder_add(sb, str_sub(details, 0, keep));
+    str_builder_add(sb, marker);
+    return str_builder_build(sb);
+}
+
+# Record one event. Returns 1 when it was persisted, 0 when it was not.
+#
+# ⚠ **The return is checked by nobody on purpose, and the counter is why.** An
+# audit failure must not fail the operation being audited, but it must not vanish
+# either — so this logs at ERROR and increments `agnostic_audit_dropped`, which
+# `/ready` and the verify route both surface.
+fn agnostic_audit_record(severity, source: Str, action: Str, details: Str): i64 {
+    if (_agnostic_audit_store == 0) { return 0; }
+
+    var e = chain_append(_agnostic_audit_chain, severity, source, action,
+      agnostic_audit_fit_detail(details));
+    if (e == 0) {
+        _agnostic_audit_dropped = _agnostic_audit_dropped + 1;
+        return 0;
+    }
+
+    var rc = patrastore_append(_agnostic_audit_store, e);
+    if (rc == PATRA_OK) { _agnostic_audit_appended = _agnostic_audit_appended + 1; }
+    if (rc != PATRA_OK) {
+        _agnostic_audit_dropped = _agnostic_audit_dropped + 1;
+        agnostic_log_kv_str(SK_ERROR, "audit append failed; the trail has a gap", 40,
+          "action", 6, action);
+        return 0;
+    }
+    return 1;
+}
+
+# Verify the persisted chain. Returns 0 when it is intact, or libro's error
+# object when it is not.
+#
+# ⚠ **Deliberately NOT `patrastore_load_and_verify`.** That function returns the
+# entries vec on success and an error object on failure — **both non-zero
+# pointers**, structurally indistinguishable, so the obvious `if (r != 0)` reads
+# an integrity violation as a successful load. An integrity check whose failure
+# can be mistaken for success is worse than none.
+#
+# `patrastore_load_all` then `verify_chain` is the unambiguous pair: `verify_chain`
+# answers 0 for intact and an error object otherwise, and there is nothing to
+# confuse it with. Worth reporting upstream to libro.
+fn agnostic_audit_is_intact(): i64 {
+    return _agnostic_audit_intact;
+}
+
+# The index of the first bad entry, or -1 when the chain verified clean.
+#
+# libro's integrity error carries the index at offset 24 — see `error_integrity`.
+fn agnostic_audit_bad_index(): i64 {
+    return _agnostic_audit_bad_index;
+}
+
+# Build a `key=value` detail, bounded by construction.
+#
+# Details are short and structured on purpose: the column holds 255 bytes, and a
+# record that has to be cut is a record that lost something. Callers compose
+# these rather than formatting prose.
+fn agnostic_audit_detail(key, value: Str): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, "=");
+    if (value != 0) { str_builder_add(sb, value); }
+    return str_builder_build(sb);
+}

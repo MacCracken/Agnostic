@@ -46,6 +46,7 @@ enum AgnosticRouteId {
     AGNOSTIC_ROUTE_DEF_GET      = 11;
     AGNOSTIC_ROUTE_DEF_REPLACE  = 12;
     AGNOSTIC_ROUTE_DEF_DELETE   = 13;
+    AGNOSTIC_ROUTE_AUDIT        = 14;
 }
 
 var AGNOSTIC_METHOD_NONE   = 0;
@@ -301,6 +302,15 @@ fn agnostic_route_resolve_a(a, method, path: Str): i64 {
         }
     }
 
+    # The audit trail (M4), read-only. Nothing writes it over HTTP — entries
+    # come from the operations they record, never from a client.
+    if (agnostic_path_matches_a(a, clean, "/api/v1/audit", &param) == 1) {
+        path_hit = 1;
+        if (method == AGNOSTIC_METHOD_GET) {
+            return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_AUDIT, param, 0);
+        }
+    }
+
     return _agnostic_rm_new_a(a, AGNOSTIC_ROUTE_NONE, 0, path_hit);
 }
 
@@ -372,6 +382,8 @@ fn agnostic_route_dispatch_a(a, method, path: Str, body: Str, max_body): i64 {
     if (id == AGNOSTIC_ROUTE_DEF_DELETE) {
         return agnostic_route_definition_delete_a(a, agnostic_route_match_param(m));
     }
+
+    if (id == AGNOSTIC_ROUTE_AUDIT) { return agnostic_route_audit_a(a); }
 
     if (id == AGNOSTIC_ROUTE_PRESET_LIST) { return agnostic_route_presets_list_a(a); }
     if (id == AGNOSTIC_ROUTE_PRESET_GET) {
