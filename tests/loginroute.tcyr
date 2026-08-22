@@ -1,0 +1,230 @@
+# agnostic/routes/auth + the admin bootstrap.
+#
+# Two design claims are held here:
+#
+#   1. Login is the ONE anonymous route on the authenticated surface, and an
+#      unknown address is indistinguishable from a wrong password — same status,
+#      same body. Anything else is a user-enumeration oracle.
+#   2. The bootstrap creates the FIRST administrator and nothing else. Leaving
+#      the credential in the environment must not be a standing backdoor.
+include "src/app.cyr"
+
+var _T_LRDB = "/tmp/agnostic-loginroute-suite.patra";
+
+fn _t_lr_open() {
+    agnostic_store_close();
+    sys_unlink(_T_LRDB);
+    patra_init();
+    agnostic_store_open(str_from(_T_LRDB));
+    agnostic_auth_ensure();
+    agnostic_argon_pool_init();
+    agnostic_rl_init();
+    agnostic_rl_reset();
+    var k = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(k + i, 90 + i); i = i + 1; }
+    agnostic_jwt_set_secret(k, 32);
+    return 0;
+}
+
+fn _t_post_login(a, body, ip) {
+    var ctx = agnostic_reqctx_new_a(a, 0, ip);
+    return agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
+      str_from("/api/v1/auth/login"), body, 1048576, ctx);
+}
+
+fn test_login_happy_path() {
+    test_group("login/route");
+
+    _t_lr_open();
+    var a = arena_allocator(1048576);
+    var uid = agnostic_users_create_a(a, str_from("ada@example.com"), str_from("correct horse"),
+      AGNOSTIC_ROLE_OPERATOR, str_from("acme"));
+    assert_neq(uid, 0, "a user exists");
+
+    var r = _t_post_login(a, str_from("{\"email\":\"ada@example.com\",\"password\":\"correct horse\"}"), 5);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "a good login answers 200");
+
+    # ⚠ For a JSON response `agnostic_response_body` returns the bayan VALUE,
+    # not a Str — `_agnostic_serve_send` is what serialises it. Reading it as a
+    # Str is what hid a double-encoding bug in this route.
+    var v = agnostic_response_body(r);
+    assert_neq(v, 0, "the body is a JSON value");
+    assert_eq(agnostic_response_is_text(r), 0, "not text");
+
+    # ⭐ The rendered body must be a JSON OBJECT, not a JSON string. Handing
+    # `agnostic_response_json_a` an already-encoded Str renders as `"{\"token\"..."`
+    # — valid JSON, and useless to every client. This route shipped that for
+    # about ten minutes; the assertion is what makes it impossible to reship.
+    var rendered = agnostic_encode_a(a, agnostic_response_body(r));
+    assert_eq(load8(str_data(rendered)) & 255, 123,
+      "the rendered body starts with '{' — not double-encoded into a string");
+    var tok = bayan_json_v_str(bayan_json_v_obj_get(v, "token"));
+    assert_neq(tok, 0, "and carries a token");
+    assert_eq(str_eq_cstr(bayan_json_v_str(bayan_json_v_obj_get(v, "token_type")), "Bearer"), 1,
+      "typed Bearer");
+    assert_eq(bayan_json_v_int(bayan_json_v_obj_get(v, "expires_in")), AGNOSTIC_TOKEN_TTL_SECS,
+      "with the TTL stated");
+    assert_eq(str_eq_cstr(bayan_json_v_str(bayan_json_v_obj_get(v, "role")), "operator"), 1,
+      "and the role named");
+
+    # ⭐ The token is not decoration: it authenticates.
+    var n = strlen("Bearer");
+    var h = alloc_via(a, n + 1 + str_len(tok));
+    memcpy(h, "Bearer", n);
+    store8(h + n, 32);
+    memcpy(h + n + 1, str_data(tok), str_len(tok));
+    var p = agnostic_authn_resolve_a(a, str_new_a(a, h, n + 1 + str_len(tok)));
+    assert_neq(p, 0, "the issued token resolves to a principal");
+    assert_eq(agnostic_principal_uid(p), uid, "the one who logged in");
+    assert_eq(agnostic_principal_role(p), AGNOSTIC_ROLE_OPERATOR, "with their role");
+}
+
+fn test_login_is_exempt_from_the_auth_rung() {
+    test_group("login/anonymous");
+
+    _t_lr_open();
+    var a = arena_allocator(1048576);
+    agnostic_users_create_a(a, str_from("x@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+
+    # ⭐ Under enforcement, with NO credential presented, login must still be
+    # reachable — it is how a credential is obtained. Every other protected
+    # route answers 401 in this state.
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_REQUIRED);
+    assert_eq(agnostic_route_needs_auth(AGNOSTIC_ROUTE_AUTH_LOGIN), 0,
+      "the login route requires no credential");
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/presets"), str_from(""), 1048576, 0)), HTTP_UNAUTHORIZED,
+      "a protected route is challenged");
+    assert_eq(agnostic_response_status(_t_post_login(a,
+          str_from("{\"email\":\"x@example.com\",\"password\":\"pw\"}"), 6)), HTTP_OK,
+      "but login is reachable anonymously");
+    agnostic_authn_set_mode(AGNOSTIC_AUTH_OFF);
+}
+
+fn test_login_gives_nothing_away() {
+    test_group("login/no-enumeration");
+
+    _t_lr_open();
+    var a = arena_allocator(1048576);
+    agnostic_users_create_a(a, str_from("real@example.com"), str_from("rightpw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+
+    var wrong = _t_post_login(a,
+      str_from("{\"email\":\"real@example.com\",\"password\":\"WRONGPW\"}"), 7);
+    var ghost = _t_post_login(a,
+      str_from("{\"email\":\"ghost@example.com\",\"password\":\"rightpw\"}"), 8);
+
+    assert_eq(agnostic_response_status(wrong), HTTP_UNAUTHORIZED, "a wrong password is 401");
+    assert_eq(agnostic_response_status(ghost), HTTP_UNAUTHORIZED, "an unknown address is 401");
+
+    # ⭐ THE PROPERTY: byte-identical bodies. A different message for the two
+    # would enumerate registered addresses just as surely as a different status.
+    # Compared as SERIALISED bytes — the response holds a bayan value, and two
+    # distinct objects are never pointer-equal even when they render identically.
+    assert_eq(str_eq(agnostic_encode_a(a, agnostic_response_body(wrong)),
+        agnostic_encode_a(a, agnostic_response_body(ghost))), 1,
+      "and the two responses render BYTE-IDENTICALLY");
+}
+
+fn test_login_request_validation() {
+    test_group("login/validation");
+
+    _t_lr_open();
+    var a = arena_allocator(1048576);
+
+    assert_eq(agnostic_response_status(_t_post_login(a, str_from("not json"), 9)),
+      HTTP_BAD_REQUEST, "a malformed body is 400");
+    assert_eq(agnostic_response_status(_t_post_login(a, str_from("{\"email\":\"a@b.c\"}"), 9)),
+      AGNOSTIC_HTTP_UNPROCESSABLE, "a missing password is 422");
+    assert_eq(agnostic_response_status(_t_post_login(a,
+          str_from("{\"email\":\"a@b.c\",\"password\":\"p\",\"role\":\"admin\"}"), 9)),
+      AGNOSTIC_HTTP_UNPROCESSABLE,
+      "an unknown field is 422 — NOT silently discarded, which is the oracle's defect");
+
+    # A GET earns a 405 naming the mismatch: the endpoint exists, it is just not
+    # readable.
+    assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
+          str_from("/api/v1/auth/login"), str_from(""), 1048576, 0)),
+      HTTP_METHOD_NOT_ALLOWED, "a GET is 405, not 404");
+}
+
+fn test_login_throttles() {
+    test_group("login/throttle");
+
+    _t_lr_open();
+    var a = arena_allocator(1048576);
+    agnostic_users_create_a(a, str_from("t@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+
+    var ip = 4242;
+    var i = 0;
+    while (i < AGNOSTIC_RL_BURST) { agnostic_rl_allow(ip); i = i + 1; }
+
+    assert_eq(agnostic_response_status(_t_post_login(a,
+          str_from("{\"email\":\"t@example.com\",\"password\":\"pw\"}"), ip)),
+      AGNOSTIC_HTTP_TOO_MANY_REQUESTS,
+      "a drained bucket answers 429 even for CORRECT credentials");
+
+    # A different source is unaffected.
+    assert_eq(agnostic_response_status(_t_post_login(a,
+          str_from("{\"email\":\"t@example.com\",\"password\":\"pw\"}"), 4243)),
+      HTTP_OK, "another source still logs in");
+}
+
+fn test_bootstrap() {
+    test_group("bootstrap/first-admin");
+
+    _t_lr_open();
+    var a = arena_allocator(1048576);
+    assert_eq(agnostic_users_count(), 0, "no users yet");
+
+    var uid = agnostic_auth_bootstrap_a(a, str_from("root@example.com"), str_from("bootpw"));
+    assert_neq(uid, 0, "the first administrator is created");
+    assert_eq(agnostic_users_role(uid), AGNOSTIC_ROLE_SUPER_ADMIN,
+      "as a SUPER_ADMIN — it has to be able to provision everything else");
+    assert_eq(agnostic_users_count(), 1, "and is the only user");
+
+    # ⭐ THE GUARD. This is what stops a credential left in the environment from
+    # being a standing backdoor: once ANY user exists, bootstrap is closed.
+    assert_eq(agnostic_auth_bootstrap_a(a, str_from("second@example.com"), str_from("pw")), 0,
+      "a second bootstrap is REFUSED once any user exists");
+    assert_eq(agnostic_users_count(), 1, "and nothing was written");
+
+    # Not "no admin exists" — ANY user. A deployment with only viewers has still
+    # been bootstrapped.
+    agnostic_users_reset();
+    agnostic_users_create_a(a, str_from("viewer@example.com"), str_from("pw"),
+      AGNOSTIC_ROLE_VIEWER, 0);
+    assert_eq(agnostic_auth_bootstrap_a(a, str_from("root2@example.com"), str_from("pw")), 0,
+      "even a lone VIEWER closes the bootstrap");
+
+    agnostic_users_reset();
+    assert_eq(agnostic_auth_bootstrap_a(a, str_from("root@example.com"), str_from("")), 0,
+      "an empty password is refused");
+    assert_eq(agnostic_auth_bootstrap_a(a, 0, str_from("pw")), 0, "and a null email");
+
+    # And the bootstrapped account can actually log in.
+    var buid = agnostic_auth_bootstrap_a(a, str_from("root@example.com"), str_from("bootpw"));
+    assert_neq(buid, 0, "bootstrap succeeds on an empty store");
+    var r = _t_post_login(a,
+      str_from("{\"email\":\"root@example.com\",\"password\":\"bootpw\"}"), 77);
+    assert_eq(agnostic_response_status(r), HTTP_OK, "and the credential works at the login route");
+}
+
+fn main() {
+    alloc_init();
+    thread_local_init();
+    test_login_happy_path();
+    test_login_is_exempt_from_the_auth_rung();
+    test_login_gives_nothing_away();
+    test_login_request_validation();
+    test_login_throttles();
+    test_bootstrap();
+    return assert_summary();
+}
+
+var _agnostic_loginroute_test_exit = main();
+if (_agnostic_loginroute_test_exit > 0) { _agnostic_loginroute_test_exit = 1; }
+sys_exit_group(_agnostic_loginroute_test_exit);

@@ -1,0 +1,116 @@
+# agnostic/routes/auth — `POST /api/v1/auth/login`.
+#
+# ## ⚠ The only anonymous route on the authenticated surface
+#
+# Login is how a caller obtains a credential, so it cannot require one:
+# `agnostic_route_needs_auth` exempts it explicitly, and that exemption is the
+# single hole in this API's fail-closed default. What stands in it is not
+# nothing — `agnostic_login_a` puts a per-IP token bucket and the Argon2 pool cap
+# in front of the hash, which is the protection appropriate to an endpoint that
+# must accept anonymous input.
+#
+# ## ⚠ One answer for "wrong password" and "no such user"
+#
+# Both are 401 with the same message and the same body. Distinguishing them —
+# even by phrasing — turns this into a user-enumeration oracle, and
+# `agnostic_users_verify_a` already spends a full Argon2 on the unknown-address
+# path so the *timing* does not distinguish them either.
+#
+# ## ⚠ Throttling answers 429 without saying which limit was hit
+#
+# The per-IP bucket and a saturated Argon2 pool both produce 429. They are
+# genuinely different conditions, and telling them apart would tell an attacker
+# whether their own rate or the server's total load caused the refusal.
+
+# How long an issued token is good for.
+#
+# ⚠ Short on purpose. There is no revocation list, and the role is re-read from
+# the user row on every request, so the TTL bounds only how long a *deleted*
+# account's token could be presented before it stops resolving — which is
+# already handled — and how long a stolen token is useful, which is not.
+var AGNOSTIC_TOKEN_TTL_SECS = 3600;
+
+# The permitted request fields. Anything else is a 422, not a silent discard.
+fn _agnostic_login_fields_a(a): i64 {
+    var f = agnostic_fields_a(a);
+    agnostic_field_a(a, f, "email");
+    agnostic_field_a(a, f, "password");
+    return f;
+}
+
+# `POST /api/v1/auth/login`.
+fn agnostic_route_login_a(a, body: Str, ctx): i64 {
+    var v = agnostic_decode_a(a, body);
+    if (v == 0) {
+        return agnostic_response_error_a(a, HTTP_BAD_REQUEST,
+          str_from_a(a, "malformed JSON body"));
+    }
+
+    var allowed = _agnostic_login_fields_a(a);
+    if (agnostic_no_unknown_fields(v, allowed) == 0) {
+        return agnostic_response_error_a(a, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "unknown field in request body"));
+    }
+
+    var email = agnostic_req_str(v, str_from("email"));
+    var password = agnostic_req_str(v, str_from("password"));
+    if (email == 0 || password == 0) {
+        return agnostic_response_error_a(a, AGNOSTIC_HTTP_UNPROCESSABLE,
+          str_from_a(a, "email and password are required"));
+    }
+
+    var status: i64[1];
+    store64(&status, 0);
+    var uid = agnostic_login_a(a, agnostic_reqctx_peer(ctx), email, password, &status);
+    var st = load64(&status);
+
+    if (st == AGNOSTIC_LOGIN_THROTTLED) {
+        return agnostic_response_error_a(a, AGNOSTIC_HTTP_TOO_MANY_REQUESTS,
+          str_from_a(a, "too many attempts; retry later"));
+    }
+    if (uid == 0) {
+        # ⚠ Same message whether the address is unknown or the password is
+        # wrong. Do not "improve" this into something more helpful.
+        return agnostic_response_error_a(a, HTTP_UNAUTHORIZED,
+          str_from_a(a, "invalid credentials"));
+    }
+
+    var role = agnostic_users_role(uid);
+    if (role < 0) {
+        # The row vanished between verifying and reading it back. Treat it as a
+        # failed login rather than issuing a token for an identity that is gone.
+        return agnostic_response_error_a(a, HTTP_UNAUTHORIZED,
+          str_from_a(a, "invalid credentials"));
+    }
+
+    var tenant = agnostic_users_tenant_a(a, uid);
+    if (tenant == 0) { tenant = str_from_a(a, ""); }
+
+    var token = agnostic_jwt_issue_a(a, uid, role, tenant, AGNOSTIC_TOKEN_TTL_SECS);
+    if (token == 0) {
+        # No signing secret, or the arena is exhausted. Either is ours, not the
+        # caller's — a 401 here would blame them for our fault.
+        return agnostic_response_error_a(a, HTTP_INTERNAL,
+          str_from_a(a, "could not issue a token"));
+    }
+
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("auth.login"),
+      agnostic_audit_detail("uid", str_from_int_a(a, uid)));
+
+    # ⚠ The token is in the body and NOT logged. `agnostic_log_kv_str` is never
+    # called with it, and the audit entry records the uid rather than the
+    # credential — a trail that stores bearer tokens is a credential store.
+    var out = bayan_json_v_obj_new_a(a);
+    bayan_json_v_obj_set_a(a, out, str_from("token"), bayan_json_v_str_new_a(a, token));
+    bayan_json_v_obj_set_a(a, out, str_from("token_type"),
+      bayan_json_v_str_new_a(a, str_from("Bearer")));
+    bayan_json_v_obj_set_a(a, out, str_from("expires_in"),
+      bayan_json_v_int_new_a(a, AGNOSTIC_TOKEN_TTL_SECS));
+    bayan_json_v_obj_set_a(a, out, str_from("role"),
+      bayan_json_v_str_new_a(a, str_from(agnostic_role_name(role))));
+    # ⚠ The bayan OBJECT, not `agnostic_encode_a(a, out)`. `_agnostic_serve_send`
+    # serialises a JSON response itself; handing it a Str makes it encode the
+    # encoding, and the client receives a JSON string containing escaped JSON.
+    # Every other route passes the object — this one briefly did not.
+    return agnostic_response_json_a(a, HTTP_OK, out);
+}

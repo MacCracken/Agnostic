@@ -42,7 +42,9 @@ enum AgnosticConfigOff {
     AGNOSTIC_CFG_DB_PATH   = 96;
     AGNOSTIC_CFG_AUDIT_PATH = 104;
     AGNOSTIC_CFG_AUTH_MODE = 112;
-    AGNOSTIC_CFG_SIZE      = 120;
+    AGNOSTIC_CFG_BOOT_EMAIL = 120;
+    AGNOSTIC_CFG_BOOT_PW   = 128;
+    AGNOSTIC_CFG_SIZE      = 136;
 }
 
 # Defaults. The port matches the oracle's uvicorn default so an existing
@@ -308,6 +310,28 @@ fn agnostic_config_from_env(): i64 {
     }
     store64(c + AGNOSTIC_CFG_AUTH_MODE, auth);
 
+    # The first-administrator credential, used exactly once — see
+    # `agnostic_auth_bootstrap_a`, which refuses if any user already exists.
+    #
+    # ⚠ **Read here and never logged.** `AGNOSTIC_BOOTSTRAP_PASSWORD` is treated
+    # like `AGNOSTIC_LLM_API_KEY`: stored, never passed to `agnostic_log_kv_str`,
+    # never in a response body.
+    var boot_email = 0;
+    var raw_be = getenv("AGNOSTIC_BOOTSTRAP_EMAIL");
+    if (raw_be != 0) {
+        var be = str_from(raw_be);
+        if (str_len(be) > 0) { boot_email = be; }
+    }
+    store64(c + AGNOSTIC_CFG_BOOT_EMAIL, boot_email);
+
+    var boot_pw = 0;
+    var raw_bp = getenv("AGNOSTIC_BOOTSTRAP_PASSWORD");
+    if (raw_bp != 0) {
+        var bp = str_from(raw_bp);
+        if (str_len(bp) > 0) { boot_pw = bp; }
+    }
+    store64(c + AGNOSTIC_CFG_BOOT_PW, boot_pw);
+
     return c;
 }
 
@@ -327,6 +351,21 @@ fn agnostic_config_port(c): i64 { if (c == 0) { return 0; } return load64(c + AG
 fn agnostic_config_auth_mode(c): i64 {
     if (c == 0) { return AGNOSTIC_AUTH_OFF; }
     return load64(c + AGNOSTIC_CFG_AUTH_MODE);
+}
+
+# The first-administrator email, or 0 when unset.
+fn agnostic_config_bootstrap_email(c): i64 {
+    if (c == 0) { return 0; }
+    return load64(c + AGNOSTIC_CFG_BOOT_EMAIL);
+}
+
+# The first-administrator password, or 0 when unset.
+#
+# ⚠ Never log this value. It is a credential, and it is the ONE credential that
+# can create every other identity in the deployment.
+fn agnostic_config_bootstrap_password(c): i64 {
+    if (c == 0) { return 0; }
+    return load64(c + AGNOSTIC_CFG_BOOT_PW);
 }
 
 # The bind address as a network-order packed IPv4 word, not a string.

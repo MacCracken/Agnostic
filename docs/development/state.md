@@ -67,11 +67,11 @@ a process kill with no diagnostic).
 
 ## Source
 
-**M4 complete; M5 complete** — 36 files, 9530 lines, 578 top-level
+**M4 complete; M5 complete** — 37 files, 9880 lines, 589 top-level
 definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
 `src/presets_data.cyr`.
 
-**Tests: 22 suites, 1,109 assertions, 0 failed** (`cyrius test`). Gates green:
+**Tests: 23 suites, 1,144 assertions, 0 failed** (`cyrius test`). Gates green:
 `check-symbols.sh` (**now 4 rules** — Rule 4 is the new `lib/`↔`lib/` constant
 check), `check-clean.sh`, `deps --verify` 115/0.
 
@@ -80,7 +80,19 @@ check), `check-clean.sh`, `deps --verify` 115/0.
 role→permission table (`perm`), tenancy and key-prefixing (`tenant`), the
 credential→principal path (`authn`), login-abuse controls (`ratelimit`) and
 callback signatures (`webhook`). The dispatch ladder's auth rung at
-`src/http/router.cyr` is **wired**, not a comment.
+`src/http/router.cyr` is **wired**, not a comment, and `POST /api/v1/auth/login`
+issues the tokens it checks.
+
+⚠ **`agnostic_route_dispatch_a` takes a request CONTEXT as its sixth argument**
+(credential + peer address), not a bare header. Passing a `Str` there compiles —
+everything is `i64` — and **crashes at run time with no output**, which is how it
+presents in a suite run. `agnostic_serve_handler`'s first parameter is already
+named `ctx`; do not shadow it.
+
+⚠ **`agnostic_response_json_a` takes the bayan OBJECT, not an encoded `Str`.**
+`_agnostic_serve_send` serialises it. Handing it a `Str` double-encodes the
+response into a JSON string, and a test that reads the body directly rather than
+through the send path will not notice.
 
 ⚠ **`AGNOSTIC_AUTH` defaults to `off`, and `agnostic_serve_mount` REFUSES TO
 START with it off on any bind but loopback.** There is no bootstrap route yet, so

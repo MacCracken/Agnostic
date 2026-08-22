@@ -330,6 +330,35 @@ fn agnostic_users_reset(): i64 {
     return 0;
 }
 
+# --- bootstrap ------------------------------------------------------------
+
+# Create the first administrator. Returns the new `uid`, or 0.
+#
+# ⚠ **Refuses outright if ANY user already exists.** That single guard is what
+# keeps this from being a standing backdoor: an operator who leaves
+# `AGNOSTIC_BOOTSTRAP_PASSWORD` set in the environment cannot use it to mint a
+# second super-admin later, and an attacker who reads the environment of a
+# running process gains nothing that is still usable.
+#
+# ⚠ It creates a **SUPER_ADMIN**, because the account has to be able to provision
+# every other account and tenant. That is the whole reason a bootstrap exists, and
+# it is why the credential is worth rotating immediately — `agnostic_serve_mount`
+# says so at WARN rather than leaving it implied.
+#
+# ⚠ **The password is never logged, and neither is a hash of it.** Only the
+# resulting uid and email appear in the mount log.
+fn agnostic_auth_bootstrap_a(a, email: Str, password: Str): i64 {
+    if (agnostic_store_db() == 0) { return 0; }
+    if (email == 0 || password == 0) { return 0; }
+    if (str_len(email) == 0 || str_len(password) == 0) { return 0; }
+
+    # The guard. Not "no admin exists" — ANY user. A deployment that already has
+    # identities has already been bootstrapped, whoever those identities are.
+    if (agnostic_users_count() != 0) { return 0; }
+
+    return agnostic_users_create_a(a, email, password, AGNOSTIC_ROLE_SUPER_ADMIN, 0);
+}
+
 # --- API keys -------------------------------------------------------------
 
 # Mint an API key for `uid`. Returns the raw key as hex, in `a`, or 0.

@@ -66,6 +66,76 @@ occurs exactly four times — io.cyr's definition and kavach's own three — and
 it as a file descriptor. Filed upstream with a repro; a consumer-side rename cannot fix it
 because both definitions live in `lib/`.
 
+### Added — M5 (part 3), the login route and the first-administrator bootstrap
+
+**35 assertions** in `tests/loginroute.tcyr`; 1,144 total across 23 suites, 0 failed.
+Together these close the loop M5 part 2 left open: there was an auth rung and no
+way to obtain a credential, and no way to create the account that would.
+
+**`POST /api/v1/auth/login`** — `{email, password}` on the allow-list codec, so an
+unknown field is a 422 rather than the oracle's silent discard. Answers a Bearer
+token, its type, its TTL and the role.
+
+⚠ **It is the only anonymous route on the authenticated surface**, exempted in
+`agnostic_route_needs_auth` — a route that issues credentials cannot require one.
+That exemption is the single hole in this API's fail-closed default, and what
+stands in it is `agnostic_login_a`: the per-IP bucket and the Argon2 pool cap,
+both already mutation-verified to run *before* any hashing.
+
+⚠ **A wrong password and an unknown address are byte-identical responses.** Same
+status, same rendered body — asserted by comparing the two, not by inspection.
+`agnostic_users_verify_a` already spends a full Argon2 on the unknown path, so
+the timing does not separate them either. The 429s are likewise
+indistinguishable: bucket exhaustion and a saturated pool both answer "come back
+later" without saying which limit was hit.
+
+**`agnostic_auth_bootstrap_a`** creates the first administrator as a SUPER_ADMIN
+— it has to be able to provision everything else. ⚠ **It refuses if ANY user
+already exists**, which is what keeps a credential left in the environment from
+being a standing backdoor. Not "no admin exists": a deployment holding a lone
+viewer has already been bootstrapped. *Mutant: removing that guard mints a second
+super-admin from the same environment variables.*
+
+⚠ **`AGNOSTIC_AUTH=required` with no users and no bootstrap credential REFUSES TO
+START.** The alternative is a server that is up, enforcing, and impossible to
+authenticate against — locked shut with no message saying why.
+`AGNOSTIC_BOOTSTRAP_PASSWORD` is read like `AGNOSTIC_LLM_API_KEY`: stored, never
+logged, never in a response. The mount logs the email and uid, and WARNs to
+rotate the credential.
+
+### Changed — the dispatch ladder takes a request context, not a bare header
+
+`agnostic_route_dispatch_a`'s sixth parameter is now an `agnostic_reqctx_new_a`
+block carrying the credential *and* the peer address, which the login route needs
+for its rate bucket. Threading each transport fact separately is how a dispatch
+signature reaches nine parameters.
+
+⚠ **`peer_ip` is the socket peer, deliberately not `X-Forwarded-For`.** Behind a
+proxy every request shares one address and the bucket becomes a global limit —
+a real deployment problem, but the alternative is worse: a caller-supplied
+address lets an attacker mint a fresh bucket per request and removes the control
+entirely. Trusted-proxy configuration is not carried yet.
+
+⚠ **Two Cyrius hazards this change walked into, both worth knowing:**
+
+- `ctx == 0` still means "nothing known", so the existing call sites kept
+  compiling — but `tests/authn.tcyr` passed a **`Str` header** where a struct was
+  now expected, and everything is `i64`, so nothing caught it. The suite
+  **crashed** rather than failing an assertion, producing no output at all: it
+  showed up only as `22 passed, 1 failed` with 23 suites present. Changing what a
+  parameter *means* is not visible to the compiler here.
+- `agnostic_serve_handler`'s first parameter is already named `ctx` (sandhi's
+  server context). Shadowing it is a compile error whose diagnostic points at an
+  **unrelated file** — `src/routes/crews.cyr`, at a column that line does not
+  have.
+
+⚠ **And one real bug the tests initially hid.** The login route first passed
+`agnostic_encode_a(...)` to `agnostic_response_json_a`, but that helper takes the
+bayan **object** — `_agnostic_serve_send` serialises it. Handing it a `Str` makes
+it encode the encoding, so the client receives a JSON string containing escaped
+JSON. The test missed it by reading the body directly instead of through the send
+path; it now asserts the rendered body begins with `{`.
+
 ### Removed — both sibling-library work-arounds, now that their fixes have landed
 
 Two guards in this tree existed only because upstream defects were live. Both

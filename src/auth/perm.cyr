@@ -109,5 +109,10 @@ fn agnostic_perm_for_route(id): i64 {
 
     if (id == AGNOSTIC_ROUTE_AUDIT) { return AGNOSTIC_PERM_ADMIN; }
 
+    # Login needs no permission — `agnostic_route_needs_auth` already answered 0
+    # for it, so this is unreachable and present only so a reader looking for the
+    # route in this table finds it rather than assuming an omission.
+    if (id == AGNOSTIC_ROUTE_AUTH_LOGIN) { return 0; }
+
     return AGNOSTIC_PERM_ADMIN;
 }

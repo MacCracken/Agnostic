@@ -192,7 +192,15 @@ fn agnostic_serve_handler(ctx, cfd, buf, blen): i64 {
     var raw_authz = sandhi_server_find_header_a(a, buf, blen, "authorization");
     if (raw_authz != 0) { authz = str_from_a(a, raw_authz); }
 
-    var resp = agnostic_route_dispatch_a(a, method, path, body, max_body, authz);
+    # The peer address is the SOCKET peer, not `X-Forwarded-For` — see
+    # `agnostic_reqctx_new_a`. A caller-supplied address would let an attacker
+    # mint a fresh rate bucket per request.
+    # ⚠ Not named `ctx` — the handler's first PARAMETER is already `ctx` (sandhi's
+    # server context), and shadowing it is a compile error whose diagnostic
+    # points at an unrelated file.
+    var rctx = agnostic_reqctx_new_a(a, authz, sandhi_server_peer_ip(cfd));
+
+    var resp = agnostic_route_dispatch_a(a, method, path, body, max_body, rctx);
     _agnostic_serve_send(a, cfd, resp);
 
     # Clear the trace id so a worker cannot leak the previous request's id onto
@@ -281,6 +289,10 @@ fn agnostic_serve_mount(cfg): i64 {
         }
         agnostic_log_kv_int(SK_INFO, "argon2 scratch pool", 19,
           "bytes", 5, agnostic_argon_pool_bytes());
+        if (agnostic_rl_init() == 0) {
+            sakshi_error("could not allocate the login rate table; refusing to start", 58);
+            return 0;
+        }
         if (agnostic_jwt_ready() == 0) {
             if (agnostic_jwt_init_random() == 0) {
                 sakshi_error("could not generate a JWT secret; refusing to start", 50);
@@ -336,6 +348,44 @@ fn agnostic_serve_mount(cfg): i64 {
     if (agnostic_tenants_ensure() == 0) {
         sakshi_error("could not create the tenant table; refusing to start", 52);
         return 0;
+    }
+
+    # --- first administrator ----------------------------------------------
+    #
+    # ⚠ **Auth required with no users and no bootstrap credential REFUSES TO
+    # START.** The alternative is a server that is up, enforcing, and impossible
+    # to authenticate against — locked shut with no way in and no message saying
+    # why. Refusing at mount says it once, loudly, at the moment it can be fixed.
+    if (auth_mode == AGNOSTIC_AUTH_REQUIRED) {
+        if (agnostic_users_count() == 0) {
+            var be = agnostic_config_bootstrap_email(cfg);
+            var bp = agnostic_config_bootstrap_password(cfg);
+            if (be == 0 || bp == 0) {
+                sakshi_error(
+                  "AGNOSTIC_AUTH=required, no users exist, and no bootstrap credential is set; refusing to start",
+                  93);
+                return 0;
+            }
+            var ba = arena_allocator(1048576);
+            if (ba == 0) {
+                sakshi_error("could not allocate for bootstrap; refusing to start", 51);
+                return 0;
+            }
+            var buid = agnostic_auth_bootstrap_a(ba, be, bp);
+            if (buid == 0) {
+                # The only reachable causes here are a refused password (the
+                # Argon2 pool is up by now, so this is a CSPRNG or arena fault)
+                # or an email the store would truncate. Both are fatal: starting
+                # with an unusable identity surface is the case above.
+                sakshi_error("could not create the bootstrap administrator; refusing to start", 63);
+                return 0;
+            }
+            # ⚠ The email and uid are logged; the password is NOT.
+            agnostic_log_kv_str(SK_INFO, "bootstrap administrator created", 31,
+              "email", 5, be);
+            sakshi_warn(
+              "rotate the bootstrap credential and unset AGNOSTIC_BOOTSTRAP_PASSWORD", 69);
+        }
     }
     agnostic_log_kv_str(SK_INFO, "database open", 13, "path", 4, db_path);
 

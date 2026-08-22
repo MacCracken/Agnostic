@@ -149,18 +149,21 @@ fn test_ladder_enforcement() {
     # this is, so telling them their permissions are wrong would be a lie.
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
           str_from("/api/v1/presets"), empty, 1048576,
-          _t_hdr_a(a, "Bearer", str_from("not.a.token")))), HTTP_UNAUTHORIZED,
+          agnostic_reqctx_new_a(a, _t_hdr_a(a, "Bearer", str_from("not.a.token")), 0))),
+      HTTP_UNAUTHORIZED,
       "a bad token is 401, not 403");
 
     # ⭐ 200 — a viewer holds READ.
     assert_eq(agnostic_response_status(agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_GET,
-          str_from("/api/v1/presets"), empty, 1048576, vhdr)), HTTP_OK,
+          str_from("/api/v1/presets"), empty, 1048576,
+          agnostic_reqctx_new_a(a, vhdr, 0))), HTTP_OK,
       "a viewer may read the preset library");
 
     # ⭐ 403 — the same viewer lacks WRITE. The handler must never run, so the
     # body is deliberately garbage: a 400 here would mean auth let it through.
     var forbidden = agnostic_route_dispatch_a(a, AGNOSTIC_METHOD_POST,
-      str_from("/api/v1/crews"), str_from("{\"not\":\"valid\"}"), 1048576, vhdr);
+      str_from("/api/v1/crews"), str_from("{\"not\":\"valid\"}"), 1048576,
+      agnostic_reqctx_new_a(a, vhdr, 0));
     assert_eq(agnostic_response_status(forbidden), HTTP_FORBIDDEN,
       "a viewer submitting a crew is 403 — identified, and refused");
 

@@ -28,6 +28,52 @@
 # deleted" reaches the client, because each of those is a probe an attacker can
 # run cheaply and the differences are all information.
 
+# What the dispatch ladder knows about the transport a request arrived on.
+#
+# ⚠ Both fields are **transport facts, not claims**: the header as received and
+# the peer address as the kernel reports it. Nothing here is trusted as identity
+# — `agnostic_authn_resolve_a` is what turns the credential into a principal, and
+# the address is used only for rate accounting.
+#
+# ⚠ **`peer_ip` is the socket peer, deliberately not `X-Forwarded-For`.** Behind
+# a proxy every request shares one address and the bucket becomes a global rate
+# limit — which is a real deployment problem, but the alternative is worse:
+# `X-Forwarded-For` is caller-supplied, so honouring it lets an attacker mint a
+# fresh bucket per request and removes the control entirely. A deployment that
+# needs per-client buckets behind a proxy has to establish which hop is trusted,
+# which is trusted-proxy configuration this does not carry — see CHANGELOG,
+# M5 (part 3). #skip-lint
+enum AgnosticReqCtxOff {
+    AGNOSTIC_REQCTX_AUTHZ = 0;
+    AGNOSTIC_REQCTX_PEER  = 8;
+    AGNOSTIC_REQCTX_SIZE = 16;
+}
+
+# Build a request context in `a`. 0 on exhaustion.
+fn agnostic_reqctx_new_a(a, authz, peer_ip): i64 {
+    var c = alloc_via(a, AGNOSTIC_REQCTX_SIZE);
+    if (c == 0) { return 0; }
+    store64(c + AGNOSTIC_REQCTX_AUTHZ, authz);
+    store64(c + AGNOSTIC_REQCTX_PEER, peer_ip);
+    return c;
+}
+
+# The raw Authorization header, or 0. A null context has none.
+fn agnostic_reqctx_authz(ctx): i64 {
+    if (ctx == 0) { return 0; }
+    return load64(ctx + AGNOSTIC_REQCTX_AUTHZ);
+}
+
+# The peer address, or 0 when unknown.
+#
+# ⚠ 0 is a legal bucket key and every context lacking an address shares it. That
+# is the correct direction: unknown callers are rate-limited together rather than
+# each getting their own allowance.
+fn agnostic_reqctx_peer(ctx): i64 {
+    if (ctx == 0) { return 0; }
+    return load64(ctx + AGNOSTIC_REQCTX_PEER);
+}
+
 enum AgnosticPrincipalOff {
     AGNOSTIC_PR_UID    = 0;
     AGNOSTIC_PR_ROLE   = 8;
