@@ -12,9 +12,7 @@ var _T_AUTHDB = "/tmp/agnostic-authstore-suite.patra";
 fn _t_auth_open() {
     agnostic_store_close();
     sys_unlink(_T_AUTHDB);
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     agnostic_store_open(str_from(_T_AUTHDB));
     agnostic_auth_ensure();
     agnostic_argon_pool_init();

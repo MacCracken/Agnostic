@@ -13,15 +13,17 @@
 # handle and owns its own schema, so it gets its own file. That is libro's call,
 # not ours.
 #
-# ## ⚠ patra_init stomps the host's log level
+# ## patra_init used to stomp the host's log level — fixed upstream
 #
-# Its last line is an unconditional `sakshi_set_level(SK_WARN)`
-# (`lib/patra.cyr:4472`), so an operator who set `AGNOSTIC_LOG_LEVEL=info`
-# silently loses every INFO line in the process — including `listening`. Saved
-# and restored here, at the single call site, so no other module has to know.
+# Its last line was an unconditional `sakshi_set_level(SK_WARN)`, so opening the
+# database silently threw away whatever `AGNOSTIC_LOG_LEVEL` had set, including
+# the `listening` line. This module saved and restored the level around the call
+# as a work-around.
 #
-# Filed upstream 2026-08-21:
-# `patra/docs/development/requests/2026-08-21-patra-init-must-not-set-the-host-log-level.md`.
+# **Fixed in patra 1.13.10**, which reaches `lib/` through the Cyrius 6.5.34
+# fold, so the work-around is gone. Recorded rather than deleted outright because
+# the failure was invisible — no error, just missing log lines — and a future
+# reader seeing a bare `patra_init()` should know it was once not safe.
 
 # The shared handle. 0 until mount opens it.
 var _agnostic_store_db = 0;
@@ -32,9 +34,7 @@ var _agnostic_store_db = 0;
 fn agnostic_store_open(path: Str): i64 {
     if (_agnostic_store_db != 0) { return 1; }
 
-    var level = sakshi_get_level();
     patra_init();
-    sakshi_set_level(level);
 
     var db = patra_open(str_data(path));
     if (db == 0) { return 0; }

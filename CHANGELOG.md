@@ -66,6 +66,49 @@ occurs exactly four times — io.cyr's definition and kavach's own three — and
 it as a file descriptor. Filed upstream with a repro; a consumer-side rename cannot fix it
 because both definitions live in `lib/`.
 
+### Removed — both sibling-library work-arounds, now that their fixes have landed
+
+Two guards in this tree existed only because upstream defects were live. Both
+fixes arrived with agnosai 2.0.5 / Cyrius 6.5.34, so both guards are gone —
+and each is replaced by an assertion, because both failures were **silent**.
+
+**`patra_init` no longer clobbers the host's log level.** It used to end with an
+unconditional `sakshi_set_level(SK_WARN)`, process-global, so opening the
+database threw away whatever `AGNOSTIC_LOG_LEVEL` had set — including the
+`listening` line. `src/engine/store.cyr` saved and restored the level around the
+call. Fixed in **patra 1.13.10**; the save/restore is deleted from `store.cyr`
+and from six test helpers that had copied it. `tests/crewstore.tcyr`'s
+`store/log-level` group now asserts the level survives `patra_init` at INFO and
+DEBUG — the downstream symptom is *missing log lines*, not an error, so it needs
+a test rather than a reader's attention.
+
+**A `PatraStore` read from another thread no longer kills the process.**
+`patrastore_open` cached its `SELECT` and `COUNT` handles while patra's SQL parse
+scratch is per-thread, so a statement parsed on the opening thread and executed
+on a sandhi pool worker dereferenced absent TLS — no diagnostic, no unwind. This
+tree found it as *"the first HTTP request to one endpoint takes the whole server
+down while every other route keeps working"*, filed it, and worked around it by
+reading **nothing** off the main thread: `agnostic_audit_count` was
+`at_open + appended` arithmetic rather than a query, and verification could only
+run at open.
+
+Fixed in **libro 2.8.9**, so:
+
+- `agnostic_audit_count` now **queries live**. The counter version was also wrong
+  whenever this process was not the only writer — it under-reported silently.
+- **`agnostic_audit_reverify` is new** and runs on any thread, which is the live
+  re-verify endpoint the module header said would become possible. ⚠ It re-reads
+  and re-hashes the whole chain, so it is an operator action, not a health check.
+- The open-time verdict is still what `/api/v1/audit` reports by default — that
+  part was a design preference, not the constraint, and it stays.
+
+`tests/audit.tcyr`'s `audit/off-thread` group spawns a worker and has it both
+count and re-verify. ⚠ **If that test ever dumps core instead of failing an
+assertion, the upstream fix has been undone.** Worth knowing while reading it:
+patra's own comment records that threads spawned via `lib/thread.cyr` inherit
+their TLS block through `CLONE_SETTLS` and must **not** re-init — which is why a
+pool worker can touch the store without any per-worker setup.
+
 ### Added — M5 (part 2), identity end to end: the auth rung is no longer a comment
 
 **478 assertions across five new suites**; 1,103 total across 22 suites, 0 failed.

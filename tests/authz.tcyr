@@ -15,9 +15,7 @@ var _T_TENDB = "/tmp/agnostic-authz-suite.patra";
 fn _t_tenant_open() {
     agnostic_store_close();
     sys_unlink(_T_TENDB);
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     agnostic_store_open(str_from(_T_TENDB));
     agnostic_auth_ensure();
     agnostic_tenants_ensure();

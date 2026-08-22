@@ -68,31 +68,34 @@ var _agnostic_audit_chain = 0;
 var _agnostic_audit_dropped = 0;
 var _agnostic_audit_appended = 0;
 
-# The integrity verdict, taken once when the store is opened.
+# The integrity verdict taken when the store is opened.
 #
-# ⚠ **Verification happens at open, on the main thread, and NOT per request —
-# and that is a constraint, not a preference.** `patrastore_open` prepares its
-# `SELECT` and `COUNT` statements once and caches them in the store struct, and
-# patra's SQL parse scratch is **per-thread** (`patra_init`: "Install this
-# (main/foreign) thread's TLS block so the per-thread SQL parse scratch resolves").
-# Using those cached statements from a sandhi pool worker faults the process —
-# reproduced directly: the same `agnostic_audit_count()` that succeeds on the
-# main thread kills a worker thread outright.
+# ## The off-thread fault this module was shaped around is FIXED
 #
-# `src/engine/definitions.cyr` is unaffected because it calls `patra_prepare` on
-# the calling thread every time; libro's store does not.
+# `patrastore_open` used to prepare its `SELECT` and `COUNT` once and cache the
+# handles in the store struct, while patra's SQL parse scratch is **per-thread**.
+# A statement parsed on the opening thread and executed on a sandhi pool worker
+# reached into TLS that was not there and **killed the process** — no diagnostic,
+# no unwind. This tree found it the hard way ("the first HTTP request to one
+# endpoint takes the whole server down while every other route keeps working"),
+# filed it, and worked around it by reading nothing off the main thread.
 #
-# Verifying at open is also simply the right moment: the question a
-# tamper-evident chain answers is "was this file altered while I was not
-# running", and that is exactly what start-up can see. What it does not cover is
-# tampering *during* a run — a small loss, since that implies someone already has
-# write access to the file this process is holding.
+# **Fixed in libro 2.8.9**, which reaches `lib/` transitively through agnosai
+# 2.0.5: both read paths now parse on the **calling** thread, and libro carries
+# `test_patrastore_read_from_another_thread` as a regression guard — mutation-
+# verified upstream to SIGSEGV if the cache is restored.
 #
-# Filed upstream 2026-08-21 as a defect in `libro/docs/development/roadmap.md`
-# (active patch line, first item), together with the
-# `patrastore_load_and_verify` return-type ambiguity noted on
-# `agnostic_audit_verify` below. A live re-verify endpoint becomes possible when
-# that lands.
+# So the work-around is gone: `agnostic_audit_count` queries live, and
+# `agnostic_audit_reverify` can run on any thread. Kept as history because the
+# failure mode was a process kill with no diagnostic, and a future reader adding
+# a cache here should know what it costs.
+#
+# ⚠ **The open-time verdict is still what `/api/v1/audit` reports by default**,
+# and that remains deliberate. The question a tamper-evident chain answers is
+# "was this file altered while I was not running", which is exactly what start-up
+# sees. A live re-verify re-reads and re-hashes the whole chain, so it is a
+# request-scoped cost that grows with the trail — offered as a function, not
+# wired into a hot path.
 var _agnostic_audit_intact = 1;
 var _agnostic_audit_bad_index = 0 - 1;
 var _agnostic_audit_at_open = 0;
@@ -116,8 +119,9 @@ fn agnostic_audit_open(path: Str): i64 {
     _agnostic_audit_dropped = 0;
     _agnostic_audit_appended = 0;
 
-    # The one verification pass, here on the main thread before any worker
-    # exists. See `_agnostic_audit_intact` for why it cannot be done later.
+    # The verification pass at open — the "was it altered while I was not
+    # running" question. No longer the ONLY possible pass; see
+    # `agnostic_audit_reverify`.
     _agnostic_audit_at_open = patrastore_len(s);
     var entries = patrastore_load_all(s);
     var err = 0;
@@ -157,8 +161,9 @@ fn agnostic_audit_is_open(): i64 {
 
 # How many entries the store held when it was opened.
 #
-# ⚠ Not a live `patrastore_len`: that uses libro's cached count statement, which
-# faults off the main thread. See `_agnostic_audit_intact`.
+# Distinct from `agnostic_audit_count`, which is live — this one is the baseline
+# the process started from, and is what tells an operator how much of the trail
+# predates this run.
 fn agnostic_audit_at_open(): i64 {
     return _agnostic_audit_at_open;
 }
@@ -168,13 +173,47 @@ fn agnostic_audit_appended(): i64 {
     return _agnostic_audit_appended;
 }
 
-# How many entries the store holds — what it opened with, plus what we wrote.
+# How many entries the store holds, queried live.
 #
-# Counted rather than queried, for the threading reason above. It is exact as
-# long as this process is the only writer, which is the same assumption
-# `src/engine/definitions.cyr`'s decode cache makes.
+# Was `at_open + appended` while libro's cached statements made a live read fault
+# off the main thread. That is fixed (see `_agnostic_audit_intact`), so this asks
+# the store — which is also correct when this process is **not** the only writer,
+# where the counter would silently under-report.
+#
+# Falls back to the counters when the store is not open, so a caller still gets
+# this process's own arithmetic rather than 0.
 fn agnostic_audit_count(): i64 {
-    return _agnostic_audit_at_open + _agnostic_audit_appended;
+    if (_agnostic_audit_store == 0) {
+        return _agnostic_audit_at_open + _agnostic_audit_appended;
+    }
+    return patrastore_len(_agnostic_audit_store);
+}
+
+# Re-verify the persisted chain now, updating the stored verdict. Returns 1 when
+# intact, 0 when not, and -1 when there is no store open.
+#
+# ⚠ **Safe on any thread** — that is the whole point of libro 2.8.9, and it is
+# what makes a re-verify endpoint possible at all. Before it, calling this from a
+# pool worker killed the process.
+#
+# ⚠ **Re-reads and re-hashes the ENTIRE chain.** Cost grows with the trail, so
+# this is a deliberate operator action, not something to put on a health check.
+fn agnostic_audit_reverify(): i64 {
+    if (_agnostic_audit_store == 0) { return 0 - 1; }
+    var entries = patrastore_load_all(_agnostic_audit_store);
+    var err = 0;
+    if (entries != 0) { err = verify_chain(entries, 0); }
+    if (err == 0) {
+        _agnostic_audit_intact = 1;
+        _agnostic_audit_bad_index = 0 - 1;
+        return 1;
+    }
+    _agnostic_audit_intact = 0;
+    _agnostic_audit_bad_index = load64(err + 24);
+    agnostic_log_kv_int(SK_ERROR,
+      "audit chain failed re-verification; the store was altered", 57,
+      "entry", 5, _agnostic_audit_bad_index);
+    return 0;
 }
 
 # How many appends failed — gaps that verification cannot reveal.

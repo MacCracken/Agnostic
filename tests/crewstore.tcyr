@@ -11,9 +11,7 @@ var _T_CREWDB = "/tmp/agnostic-crewstore-suite.patra";
 fn _t_open() {
     agnostic_store_close();
     sys_unlink(_T_CREWDB);
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     agnostic_store_open(str_from(_T_CREWDB));
     agnostic_crews_ensure();
     return 0;
@@ -102,9 +100,7 @@ fn test_outcomes_survive_a_reopen() {
 
     # ⭐ Close and reopen — a different handle, nothing carried in memory.
     agnostic_store_close();
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     assert_eq(agnostic_store_open(str_from(_T_CREWDB)), 1, "reopened");
     assert_eq(agnostic_crews_ensure(), 1, "the schema is already there and that is fine");
 
@@ -128,6 +124,30 @@ fn test_no_database_is_not_a_silent_success() {
     assert_eq(agnostic_crews_count(), 0, "and the count is 0, not a fault");
 }
 
+fn test_patra_init_leaves_the_log_level_alone() {
+    test_group("store/log-level");
+
+    # ⭐ patra_init used to end with an unconditional `sakshi_set_level(SK_WARN)`,
+    # process-global — so opening the database silently threw away whatever
+    # AGNOSTIC_LOG_LEVEL had set, including the `listening` line. This tree
+    # worked around it by saving and restoring the level at the single call site.
+    #
+    # Fixed in patra 1.13.10 (via the Cyrius 6.5.34 fold), so the work-around is
+    # gone. If this fails, it is back — and the symptom downstream is not an
+    # error but MISSING LOG LINES, which is why it is asserted rather than left
+    # to be noticed.
+    var before = sakshi_get_level();
+    sakshi_set_level(SK_INFO);
+    patra_init();
+    assert_eq(sakshi_get_level(), SK_INFO,
+      "patra_init does NOT clobber the host's log level");
+
+    sakshi_set_level(SK_DEBUG);
+    patra_init();
+    assert_eq(sakshi_get_level(), SK_DEBUG, "at DEBUG either");
+    sakshi_set_level(before);
+}
+
 fn main() {
     alloc_init();
     thread_local_init();
@@ -137,6 +157,7 @@ fn main() {
     test_outcomes_survive_a_reopen();
     test_no_database_is_not_a_silent_success();
     agnostic_store_close();
+    test_patra_init_leaves_the_log_level_alone();
     return assert_summary();
 }
 

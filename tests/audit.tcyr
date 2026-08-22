@@ -13,9 +13,7 @@ var _T_AUDIT = "/tmp/agnostic-audit-suite.patra";
 fn _t_fresh() {
     agnostic_audit_close();
     sys_unlink(_T_AUDIT);
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     return agnostic_audit_open(str_from(_T_AUDIT));
 }
 
@@ -82,9 +80,7 @@ fn test_survives_a_reopen() {
     # ⭐ Close and reopen: a different handle, nothing carried in memory.
     agnostic_audit_close();
     assert_eq(agnostic_audit_is_open(), 0, "closed");
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     assert_eq(agnostic_audit_open(str_from(_T_AUDIT)), 1, "reopened");
 
     assert_eq(agnostic_audit_at_open(), 3, "all three came off disk");
@@ -133,9 +129,7 @@ fn test_tampering_is_detected() {
     sys_write(fd, &x, 1);
     sys_close(fd);
 
-    var lvl = sakshi_get_level();
     patra_init();
-    sakshi_set_level(lvl);
     assert_eq(agnostic_audit_open(str_from(_T_AUDIT)), 1, "the altered store still opens");
 
     # ⚠ Opening SUCCEEDS and the verdict is reported — it is not a startup
@@ -164,6 +158,52 @@ fn test_gaps_are_counted_because_verification_cannot_see_them() {
     assert_eq(agnostic_audit_dropped(), 0, "this store dropped none of its own");
 }
 
+# Read the trail from a worker thread. ⚠ **Do NOT call `patra_init` or
+# `thread_local_init` here** — patra's own comment says threads spawned via
+# `lib/thread.cyr` receive their TLS block through `CLONE_SETTLS` and must not
+# re-install it. That is what makes a sandhi pool worker able to touch the store
+# at all.
+var _t_audit_off_count = 0 - 1;
+var _t_audit_off_verify = 0 - 1;
+
+fn _t_audit_worker(arg): i64 {
+    _t_audit_off_count = agnostic_audit_count();
+    _t_audit_off_verify = agnostic_audit_reverify();
+    return 0;
+}
+
+fn test_reads_from_a_worker_thread() {
+    test_group("audit/off-thread");
+
+    assert_eq(_t_fresh(), 1, "the store opens");
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("crew.submit"),
+      agnostic_audit_detail("id", str_from("one")));
+    agnostic_audit_record(SEV_INFO, AGNOSTIC_AUDIT_SRC, str_from("crew.submit"),
+      agnostic_audit_detail("id", str_from("two")));
+
+    # ⭐ THIS USED TO KILL THE PROCESS.
+    #
+    # `patrastore_open` cached its SELECT and COUNT statements, and patra's SQL
+    # parse scratch is per-thread — a statement parsed on the opening thread and
+    # executed here dereferenced TLS that was not there. No diagnostic, no error
+    # return, no unwind: the whole server went down on the first request to one
+    # endpoint while every other route kept working. This tree found it, filed
+    # it, and worked around it by reading NOTHING off the main thread.
+    #
+    # libro 2.8.9 made both read paths parse on the calling thread. If this test
+    # ever dumps core rather than failing an assertion, that fix has been undone.
+    _t_audit_off_count = 0 - 1;
+    _t_audit_off_verify = 0 - 1;
+    var t = thread_create(&_t_audit_worker, 0);
+    thread_join(t);
+
+    assert_eq(_t_audit_off_count, 2,
+      "a worker thread COUNTS the trail live — the work-around is gone");
+    assert_eq(_t_audit_off_verify, 1,
+      "and re-verifies the whole chain off the main thread");
+    assert_eq(agnostic_audit_is_intact(), 1, "the verdict survives the worker's pass");
+}
+
 fn main() {
     alloc_init();
     thread_local_init();
@@ -173,6 +213,7 @@ fn main() {
     test_tampering_is_detected();
     test_gaps_are_counted_because_verification_cannot_see_them();
     agnostic_audit_close();
+    test_reads_from_a_worker_thread();
     return assert_summary();
 }
 

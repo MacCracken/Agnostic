@@ -56,11 +56,14 @@ took the lock from **1 commit pin to 9**.
 | `kavach` | **3.12.2** | transitive |
 | `majra` / `ai-hwaccel` / `tyche` | 2.6.7 / 2.3.18 / 1.0.1 | transitive |
 
-⚠ **Two work-arounds in `src/engine/store.cyr` are now removable and still present.**
-libro 2.8.9 fixed `PatraStore` faulting off the opening thread (so audit verification
-need no longer run only at open) and patra 1.13.10 stopped `patra_init` clobbering the
-host log level. Both fixes have landed here; removing the work-arounds is deliberately
-left as its own change.
+✅ **Both sibling work-arounds are REMOVED** (2026-08-22). patra 1.13.10 stopped
+`patra_init` clobbering the host log level, and libro 2.8.9 stopped a `PatraStore`
+read from another thread killing the process. `src/engine/store.cyr` no longer
+saves/restores the level; `agnostic_audit_count` queries live instead of doing
+`at_open + appended` arithmetic, and the new `agnostic_audit_reverify` runs on any
+thread. Each removal is covered by an assertion — `store/log-level` and
+`audit/off-thread` — because both upstream failures were silent (missing log lines;
+a process kill with no diagnostic).
 
 ## Source
 
@@ -68,7 +71,7 @@ left as its own change.
 definitions, all `agnostic_*`-prefixed. 837 of those lines are the generated
 `src/presets_data.cyr`.
 
-**Tests: 22 suites, 1,103 assertions, 0 failed** (`cyrius test`). Gates green:
+**Tests: 22 suites, 1,109 assertions, 0 failed** (`cyrius test`). Gates green:
 `check-symbols.sh` (**now 4 rules** — Rule 4 is the new `lib/`↔`lib/` constant
 check), `check-clean.sh`, `deps --verify` 115/0.
 
