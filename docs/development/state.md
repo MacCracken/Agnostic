@@ -16,9 +16,19 @@ Python line was CalVer (`2026.3.18`).
 
 ## Toolchain
 
-- **Cyrius pin**: `6.5.34` (`cyrius.cyml [package].cyrius`). Installed wrapper
-  matches — **no drift**.
-- ⚠ **The pin and `[deps.agnosai]` move TOGETHER.** agnosai 2.0.5 carries
+- **Cyrius pin**: `6.5.35` (`cyrius.cyml [package].cyrius`).
+- ⚠ **`refs/tags/2.0.6` was NOT on the remote when this pin landed** — the commit
+was pushed, the tag was not. The dep was resolved from a locally seeded cache of
+the tagged tree (hash-verified against `git show 2.0.6:dist/agnosai.cyr`), so the
+lock carries **8** commit pins instead of 9: `agnosai` has none. Re-run
+`cyrius deps` once the tag is pushed to add it. **CI cannot resolve this dep until
+the tag exists on the remote.**
+
+✅ **No `[deps.patra]` hold at this pin.** 6.5.35 folds 1.13.10, which is what
+libro 2.8.12 declares, so `lib/` matches the snapshot with zero files differing.
+Do not reintroduce the hold 2.0.5 needed.
+
+⚠ **The pin and `[deps.agnosai]` move TOGETHER.** agnosai 2.0.5 carries
   bote 3.3.3 → libro 2.8.10, which declares `[deps.patra] = 1.13.10`, and
   `cyrius deps` overlays a declared dep's copy on top of the `lib sync --full`
   snapshot on every resolve. Only a Cyrius folding 1.13.10 (**6.5.34**) leaves
@@ -48,13 +58,13 @@ took the lock from **1 commit pin to 9**.
 
 | dep | pin | how it arrives |
 |---|---|---|
-| `agnosai` | **2.0.5** | direct, `git` + `tag` |
+| `agnosai` | **2.0.6** | direct, `git` + `tag` |
 | `sigil` | 3.12.9 | transitive via agnosai; also declared in `[deps].stdlib` |
-| `bote` | 3.3.3 | transitive |
-| `libro` | **2.8.10** | transitive via bote — the audit chain |
-| `patra` | **1.13.10** | folded into the 6.5.34 stdlib |
+| `bote` | **3.3.7** | transitive |
+| `libro` | **2.8.12** | transitive via bote — the audit chain |
+| `patra` | **1.13.10** | folded into the 6.5.35 stdlib |
 | `kavach` | **3.12.2** | transitive |
-| `majra` / `ai-hwaccel` / `tyche` | 2.6.7 / 2.3.18 / 1.0.1 | transitive |
+| `majra` / `ai-hwaccel` / `tyche` | **2.7.0** / 2.3.18 / 1.0.1 | transitive |
 
 ✅ **Both sibling work-arounds are REMOVED** (2026-08-22). patra 1.13.10 stopped
 `patra_init` clobbering the host log level, and libro 2.8.9 stopped a `PatraStore`

@@ -2,7 +2,7 @@
 
 > **Start here.** This is the orientation document for picking up the Python → Cyrius port.
 > It is deliberately short and links outward rather than restating.
-> Last refreshed: **2026-08-21**, after M3.
+> Last refreshed: **2026-08-23**, after M5 and the M6 viability gate.
 
 Read in this order:
 
@@ -12,59 +12,102 @@ Read in this order:
 | [`state.md`](state.md) | Live numbers — versions, surface area, dep set, gates |
 | [`roadmap.md`](roadmap.md) | M0–M9 sequencing and per-milestone gates |
 | [`../../CYRIUS-PORT-BRIEF.md`](../../CYRIUS-PORT-BRIEF.md) | Research snapshot (2026-08-19): language notes, dep stack, **§7 decisions — binding** |
-| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 86 verified defects in the Python oracle. §3 gated M2, §2.2 gated M3; **§3.15 is M6's problem** |
+| [`../../ORACLE-AUDIT.md`](../../ORACLE-AUDIT.md) | 86 verified defects in the Python oracle. §3 gated M2, §2.2 gated M3; **§3.15 is what M6's gate now measures** |
 | [`../adr/`](../adr/) | Two ADRs: health/readiness split, daimon Tier 1 deferral |
 
 ---
 
 ## 1. Where the port is
 
-**M0 through M3 are complete. M4 — persistence and the audit chain — is next.**
+**M0 through M5 are complete. M6 — the QA tool surface — has started, and is
+blocked on one decision that has been deliberately deferred (§8).**
 
-Agnostic runs crews and serves its own catalogue. On M1's HTTP foundation it
-submits crews to AgnosAI in-process with **202-then-poll**, serves the canonical
-**18-preset library**, and offers **agent-definition CRUD**. 25 source files,
-6,502 lines, 396 top-level definitions.
-**14 test suites, 702 assertions, 0 failed.**
+Agnostic runs crews, serves its own catalogue, persists definitions and outcomes
+behind a tamper-evident audit chain, and **authenticates**. 37 source files,
+~10.2k lines, 631 top-level definitions.
+**24 test suites, 1,175 assertions, 0 failed.**
+
+M5 landed identity end to end: users and API keys on patra, HS256 tokens, a
+static role→permission table, tenancy with key-prefixing, the dispatch ladder's
+auth rung, login-abuse controls, webhook signatures, `POST /api/v1/auth/login`
+and a first-administrator bootstrap.
+
+⚠ **Every security property in `src/auth/` is mutation-verified**, and the suites
+are written so that removing a guard breaks a *named* assertion. Before trusting
+a refactor of any of it, re-run those mutations — the list is in `state.md`. A
+passing suite is not evidence on its own; several of these guards were confirmed
+only by watching the test fail without them.
+
+⚠ **`AGNOSTIC_AUTH` defaults to `off`**, because nothing can authenticate before
+an operator has provisioned a user. What keeps that from being fail-open:
+`agnostic_serve_mount` **refuses to start** with auth off on any bind but
+loopback, and refuses to start with auth *required* when no users and no
+bootstrap credential exist.
 
 Version is **0.1.0** and stays there. Per decision #4 the whole port ships as
-**one release, 1.0.0** — no intermediate tags, so `main` stays green continuously
-rather than being stabilised once per milestone.
-
-`[deps.agnosai]` is pinned at **2.0.4** and genuinely exercised: the crew surface
-submits, polls the registry and drains the event bus; the definition surface
-builds engine agent records through its setters.
-
----
 
 ## 2. ⚠ Build it correctly, or you will write a lock CI cannot reproduce
 
-This has bitten twice and is the single most important operational fact here.
+This has bitten repeatedly and is the single most important operational fact here.
 
-**The installed wrapper is `6.5.33`. The manifest pins `6.5.32`.** `cyrius build`, `cyrius deps` and
-`cyrius lib sync` all provision from the **installed** toolchain, not the manifest pin. Running any
-of them through the PATH wrapper under drift rewrites `lib/` and `cyrius.lock` with content CI —
-which installs the pin — cannot reproduce. CI has a **fatal drift gate** precisely because of this.
+**The pin is `6.5.35`.** `cyrius build`, `cyrius deps` and `cyrius lib sync` all
+provision from the **installed** toolchain, not the manifest pin, so running them
+under drift rewrites `lib/` and `cyrius.lock` with content CI — which installs the
+pin — cannot reproduce. CI has a fatal drift gate precisely for this.
 
-So, until the pin moves:
+### ⛔ The versioned wrapper does NOT pin the compiler
+
+The obvious move is wrong, and it is worth stating plainly because it looks right:
 
 ```bash
-~/.cyrius/versions/6.5.32/bin/cyrius build src/main.cyr build/agnostic
+~/.cyrius/versions/6.5.35/bin/cyrius build ...   # ← does NOT use cycc 6.5.35
 ```
+
+`cyrius` resolves `cycc` through **`$CYRIUS_HOME/bin`** → `~/.cyrius/current`, not
+relative to its own path and not via `PATH`. The 6.5.32 wrapper compiled with
+`cycc 6.5.33` and only said so in a warning whose one documented response is to
+silence it. Filed as
+`cyrius/docs/development/issues/2026-08-22-versioned-wrapper-does-not-pin-cycc.md`.
+
+**Build a `CYRIUS_HOME` shim instead**, and confirm the drift line is absent:
+
+```bash
+SHIM=/tmp/cyrius-home-6.5.35
+mkdir -p $SHIM
+ln -s ~/.cyrius/versions/6.5.35/bin $SHIM/bin
+ln -s ~/.cyrius/versions/6.5.35/lib $SHIM/lib
+ln -s ~/.cyrius/versions          $SHIM/versions   # `lib sync` needs versions/<pin>/lib
+ln -s ~/.cyrius/deps              $SHIM/deps
+cp    ~/.cyrius/dlopen-helper     $SHIM/
+echo 6.5.35 > $SHIM/current
+export CYRIUS_HOME=$SHIM PATH=$SHIM/bin:$PATH
+cyrius which && cycc --version      # must both say 6.5.35
+```
+
+### ⛔ Never read `~/.cyrius/versions/<V>/lib/` as ground truth
+
+**This machine is cyrius's development environment**, so the toolchain moves under
+you and install directories are rewritten in place mid-session. Reading one
+produced a confidently wrong diagnosis during this port ("6.5.33 folds patra
+1.13.10" — it does not) and a fix that was green locally and would have failed CI.
+
+Check what a release actually ships with **`git show <tag>:lib/<mod>`** in
+`~/Repos/cyrius`. Same rule for every sibling: hash the dist against
+`git show <tag>:dist/<pkg>.cyr`.
 
 Two corollaries that are easy to get wrong:
 
-- **`cyrius build` is not read-only.** It re-resolves `[deps.*]` as a side effect — even for a
-  throwaway probe file outside `src/`. After any build you did not intend to be a provisioning step,
-  run `git status --short` and revert stray `lib/` + `cyrius.lock` churn.
-- **Never bump a `[deps.X]` tag or build the consumer while the sibling working tree is ahead of its
-  tag.** `path = "../X"` means provisioning comes from the local tree, not the tag, so the lock ends
-  up describing something unfetchable. Check `git tag --list N` in the sibling *and* that its
-  `HEAD == tag`, and confirm the tag is actually pushed — via `curl` to the GitHub API, never `gh`.
+- **`cyrius build` is not read-only.** It re-resolves `[deps.*]` as a side effect —
+  even for a throwaway probe outside `src/`. After any build you did not intend as
+  a provisioning step, run `git status --short` and revert stray `lib/` +
+  `cyrius.lock` churn.
+- **Never bump a `[deps.X]` tag while the sibling tree is ahead of its tag**, and
+  confirm the tag is actually **pushed** — via `curl` to the GitHub API, never
+  `gh`. A pushed *commit* is not a pushed *tag*: see §6.
 
 `cyrius deps --verify` is read-only and safe to run freely.
 
-**Gates before handing anything back** — all three must be run under the pin:
+**Gates before handing anything back** — all under the pin:
 
 ```bash
 sh scripts/check-clean.sh && sh scripts/check-symbols.sh && cyrius test
@@ -72,7 +115,7 @@ sh scripts/check-clean.sh && sh scripts/check-symbols.sh && cyrius test
 
 ---
 
-## 3. What M2 and M3 established, and what M4 inherits
+## 3. What M2–M5 established, and what M6 inherits
 
 **M2's gate was `ORACLE-AUDIT.md` §3** — four defects, all designed out by
 mechanism and each pinned by a suite: the vacuous-success demotion in
@@ -99,7 +142,7 @@ disposition in the doing, and that is the part worth carrying:
   by the suite — the same class of defect as a dropped field, in the other
   direction.
 
-**M4 is persistence and the audit chain**, and two seams were built for it:
+**M4 was persistence and the audit chain** (complete), and two seams were built for it:
 
 - `agnostic_definitions_*` — nine functions and one storage literal.
   `src/routes/definitions.cyr` touches the store only through them, so M4
@@ -123,13 +166,16 @@ the roadmap and they apply to M4's tables just as much.
 - **Placeholder mode is indistinguishable from real work by results alone** —
   closed by disclosure (`engine_mode` on every crew response, a WARN at mount),
   not by type. Any new surface reporting crew output must disclose it too.
-- **Every route past `/health` and `/ready` is unauthenticated.**
-  `agnostic_route_needs_auth` answers 1 for all eleven, but the dispatch ladder's
-  auth rung is still a comment until M5. The loopback default bind is the only
-  thing in front of them, and M3 widened the surface considerably.
-- **§3.15 is M6's.** The 38-name tool manifest is pinned by `tests/presets.tcyr`;
-  two of the names have no implementation anywhere. A registry miss must be an
-  **error**, never a silently smaller agent.
+- ✅ **Route authentication — CLOSED by M5.** The dispatch ladder's auth rung is
+  wired, `POST /api/v1/auth/login` issues the tokens it checks, and mount refuses
+  to start unauthenticated on any bind but loopback. The one exemption is login
+  itself, which cannot require a credential; a per-IP bucket and the Argon2 pool
+  cap stand in front of it.
+- ⏳ **§3.15 — now MEASURED, not yet closed.** `src/engine/tools.cyr` resolves the
+  38-name manifest against the engine's registry: **2 resolve, 36 do not**, pinned
+  by `tests/tools.tcyr`. A miss returns 0 and the caller refuses — never a
+  silently smaller agent. Closing it is blocked on the registry-ownership decision
+  in §8.
 
 ## 4. Settled — do not re-open
 
@@ -153,6 +199,39 @@ then, against a real requirement. Out of scope for v1.0.
 ---
 
 ## 5. Cyrius footguns that have already cost time
+
+**Added during M5/M6 — each of these cost a wrong turn:**
+
+- **`secret` is a RESERVED KEYWORD** and cannot be a parameter name. The
+  diagnostic attributes the error to the *previously included* file, which sends
+  the search to the wrong module.
+- **A compile error's file attribution is unreliable in general.** Shadowing
+  `agnostic_serve_handler`'s `ctx` parameter was reported against
+  `src/routes/crews.cyr`, at a column that line does not have. When a diagnostic
+  names a file you did not touch, suspect the *next* included file instead.
+- **enum members are compile-time constants; `var` globals are not.** A module may
+  read an `AGNOSTIC_ROUTE_*` enum member from above its definition, but a `var`
+  read from a module included earlier is **0**. `src/auth/perm.cyr` depends on the
+  first half of that rule and says so.
+- **Everything is `i64`, so changing what a parameter MEANS is invisible.**
+  Turning `agnostic_route_dispatch_a`'s sixth argument from a `Str` header into a
+  context struct kept every call site compiling; one test passed a `Str`, and the
+  suite **crashed with no output at all** rather than failing an assertion. It
+  showed up only as `22 passed, 1 failed` with 23 suites present.
+- **A suite that crashes prints nothing.** Do not read a green-looking log as a
+  pass — compare the suite *count* against `ls tests/*.tcyr | wc -l`.
+- **`agnostic_response_json_a` takes the bayan OBJECT, not an encoded `Str`.**
+  `_agnostic_serve_send` serialises it; handing it a `Str` double-encodes the
+  response into a JSON string. A test that reads the body directly rather than
+  through the send path will not notice.
+- **`patra`'s `COL_STR` is a fixed 256-byte slot that truncates silently.** For an
+  identifier that is a collision primitive, not a storage wart — `src/auth/store.cyr`
+  refuses over-long emails at the door for exactly this reason.
+- **Worker threads spawned via `lib/thread.cyr` inherit their TLS block through
+  `CLONE_SETTLS` and must NOT call `patra_init` / `thread_local_init`.** That is
+  what lets a sandhi pool worker touch a patra store at all.
+
+
 
 - **One flat symbol namespace, last-definition-wins.** The compiler warns on a duplicate `fn` and is
   **silent** on a duplicate `var`. Every `check-symbols.sh` in the ecosystem scans `src/` only, so a
@@ -212,34 +291,65 @@ already filed from this port.
 
 ## 6. Cross-repo state
 
-All three sibling releases this port depends on are tagged and consumed:
-
-| Repo | Version | Note |
+| Repo | Version | How it arrives |
 |---|---|---|
-| `agnosai` | **2.0.4** | The engine tier, linked in-process |
-| `kavach` | **3.11.15** | Arrives transitively |
-| `ai-hwaccel` | **2.3.18** | Arrives transitively |
+| `agnosai` | **2.0.6** | direct, `git` + `tag` — **no `path`** |
+| `bote` | **3.3.7** | transitive via agnosai |
+| `libro` | **2.8.12** | transitive via bote — the audit chain |
+| `majra` | **2.7.0** | transitive |
+| `kavach` | **3.12.2** | transitive |
+| `sigil` | **3.12.9** | folded stdlib + declared by agnosai |
+| `patra` | **1.13.10** | folded into the 6.5.35 stdlib |
+| `ai-hwaccel` / `tyche` | 2.3.18 / 1.0.1 | transitive |
 
-**2.0.4 closed a memory-safety defect that only manifested in *this* binary**, because Agnostic is
-what links kavach and ai-hwaccel together. Both defined `var BACKEND_COUNT` (10 and 18); it resolved
-to 18, disabling kavach's `_backend_fp` bounds check over a 10-slot table so that an out-of-range id
-read past `_backend_table[320]` and was called as a function pointer. Renamed upstream to
-`KAVACH_BACKEND_COUNT` / `AIHW_BACKEND_COUNT`. Full write-up: the addendum to
-[`../audit/2026-08-20-audit-m1.md`](../audit/2026-08-20-audit-m1.md).
+### ⚠ ONE OUTSTANDING ITEM: agnosai `2.0.6` is tagged locally, not on the remote
+
+At the time of writing, `refs/tags/2.0.6` returns **404** from the GitHub API — the
+*commit* is pushed, the *tag* is not. `cyrius deps` therefore could not fetch it,
+and the dependency was resolved from a **locally seeded cache** of the tagged tree
+(`git archive 2.0.6` into `~/.cyrius/deps/agnosai/2.0.6`), hash-verified against
+`git show 2.0.6:dist/agnosai.cyr`.
+
+Consequences, both benign once the push lands:
+
+- The lock carries **8** commit pins instead of 9 — `agnosai` has none.
+- **CI cannot resolve this dependency until the tag is pushed.**
+
+**After `git push --tags` in agnosai, re-run `cyrius deps` here** to add the
+missing commit pin. Nothing else needs to change; the bytes already match.
+
+### `[deps.agnosai]` has no `path`, deliberately
+
+`path` beats `tag` when a checkout is present, so a local resolve silently vendors
+the sibling's work-in-progress into `lib/` and the lock — content matching no tag,
+which CI cannot fetch. Deleting it took the lock from **1** commit pin to **9**.
+Do not add it back.
+
+### ✅ No `[deps.patra]` hold at this pin
+
+6.5.35 folds patra 1.13.10, which is what libro 2.8.12 declares, so `lib/` matches
+the snapshot with **zero** files differing. The hold that agnosai 2.0.5 needed —
+because no published Cyrius folded 1.13.10 at the time — is **not** reintroduced
+here and must not be. The general rule: taking a patra version through a transitive
+`[deps.patra]` obliges a Cyrius pin that folds the same version; the two are one
+change.
 
 ### Owed, not blocking
 
-- **`yantra`** — needs `Page.captureScreenshot` on its CDP surface before **M6**'s QA tool surface
-  (decision D4). Not started.
+- **`yantra`** — needs `Page.captureScreenshot` on its CDP surface before **M6**'s
+  browser-automation tools. Not started.
 - **`bayan`** — a `bayan_pdf_*` request should be filed before **M8** reports.
-- **`agnosai`** — streamline its preset library to examples, now that Agnostic's is canonical.
-- **`kavach` / `ai-hwaccel`** — uncommitted CHANGELOG corrections sit in both working trees
-  (the released entries overstate the enum rename as breaking). Deliberately left to be picked up
-  with a future update.
-- **Known and deferred**: kavach's enum members are generic and unprefixed; kavach ↔ sigil share the
-  whole `syserr_*` family and seven `agnosys_*` helpers; `libro` and `majra` both define `_sub_new`.
-  20 duplicate-`fn` warnings at build. All are `fn`, so they announce themselves — unlike the `var`
-  case above, which did not.
+- **`kavach`** — `InjectionMethod.STDIN` collides with `io.cyr`'s `var STDIN = 0`
+  and collapses onto `ENV_VAR`, so a secret requested on stdin would be injected
+  into the environment. **Filed with a repro**
+  (`2026-08-22-injectionmethod-stdin-aliases-env-var.md`); unreachable from this
+  tree, and allow-listed in `scripts/lib-symbol-allow.txt` with that reference.
+  **Delete the allow-list line when the fix lands.**
+- **Known and deferred**: kavach ↔ sigil share the whole `syserr_*` family and
+  seven `agnosys_*` helpers; `libro` and `majra` both define `_sub_new`. 20
+  duplicate-`fn` warnings at build. All are `fn`, so they announce themselves —
+  unlike the `var` case, which does not. `scripts/check-lib-symbols.sh` (Rule 4 of
+  `check-symbols.sh`) is what now catches the silent kind.
 
 ---
 
@@ -254,3 +364,45 @@ read past `_backend_table[320]` and was called as a function pointer. Renamed up
   `password_hash` writer, no user CRUD, no role assignment beyond a hardcoded `VIEWER` — and **none
   of that appears among the 85**. Anything reading it for an identity spec is reading machinery that
   never ran.
+
+---
+
+## 8. ⛔ The decision M6 is waiting on: who owns the tool registry
+
+**Deferred deliberately. Do not guess at it — settle it first.**
+
+`src/engine/tools.cyr` resolves the preset tool vocabulary against the engine's
+registry and reports the gap: **2 of 38 resolve; 36 do not**, both pinned by
+`tests/tools.tcyr`. M6 is finished when the unresolved count reaches 0.
+
+What is *not* settled is where agnostic's QA tools would register.
+`agnostic_engine_init` exposes **no registry handle** — the orchestrator owns one
+internally — so there is currently nowhere to put a QA tool that the
+orchestrator's agents would actually read. The gate is therefore a library
+question, not a served one, and is not wired into mount.
+
+**Implementing tools before settling this means writing 36 of them against a seam
+that may not exist.** The options, none chosen:
+
+1. Agnostic stands up its own registry and hands it to the orchestrator.
+2. AgnosAI grows a registration entry point agnostic calls at mount.
+3. Tools are resolved at crew-build time rather than registered at all.
+
+Two things that are already decided and should not be re-opened:
+
+- ⛔ **No case transform from `LoadTestingTool` to `load_testing`.** It works for
+  that name and resolves to nothing for `RiskScoringTool`, making the two
+  indistinguishable — it books coverage for 38 and fails at call time for 36.
+  The alias table is explicit so that an entry *means* something can run.
+- ⛔ **A miss returns 0 and the caller refuses.** That is the direct answer to
+  `ORACLE-AUDIT.md` §3.15, where the defect was not the empty registry but that a
+  miss silently produced an agent with `tools=[]`. No best-effort path.
+
+`ArtifactManagementTool` and `CIPipelineIntegrationTool` are named by
+`quality-large.json` and have no implementation anywhere — unlike the other 36,
+which at least had a class in the oracle. The roadmap requires them written or
+struck. Worth knowing: `CIPipelineIntegrationTool` has plausible backing already
+in agnosai's `delta_trigger_pipeline` / `delta_get_pipeline` / `delta_list_repos`,
+but it would be a composite, so it is implementation work rather than an alias.
+
+---

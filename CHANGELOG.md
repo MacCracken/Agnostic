@@ -66,6 +66,37 @@ occurs exactly four times — io.cyr's definition and kavach's own three — and
 it as a file descriptor. Filed upstream with a repro; a consumer-side rename cannot fix it
 because both definitions live in `lib/`.
 
+### Changed — agnosai 2.0.5 → 2.0.6, Cyrius pin 6.5.34 → 6.5.35
+
+**24 suites, 1,175 assertions, 0 failed — identical to before the bump**, which is
+the expected result: agnosai 2.0.6 is a dependency-and-toolchain release whose only
+`src/` change is a version-drift fix, and `git diff --stat 6.5.34 6.5.35 -- lib/`
+is empty, so the folded stdlib does not move either. This bump changes the code
+generator and the dependency chain, not behaviour.
+
+Arriving through agnosai: **bote 3.3.3 → 3.3.7**, **majra 2.6.7 → 2.7.0**, and
+**libro 2.8.10 → 2.8.12** transitively through bote. `sigil` 3.12.9, `kavach`
+3.12.2, `ai-hwaccel` 2.3.18 and `tyche` 1.0.1 were already newest and did not move.
+
+✅ **No `[deps.patra]` hold is needed at this pin.** 6.5.35 folds patra 1.13.10,
+which is what libro 2.8.12 declares, so `lib/` matches the snapshot with **zero**
+files differing — verified file by file, not inferred from a green gate. The hold
+that 2.0.5 needed is not reintroduced here and must not be added back.
+
+⚠ **Verified against the tags, not the install directory.** `lib/agnosai.cyr` is
+byte-identical to `git show 2.0.6:dist/agnosai.cyr`, and every dep dist in `lib/`
+was matched back to a tag by hash. That discipline exists because reading
+`~/.cyrius/versions/<V>/lib/` produced a wrong diagnosis earlier in this port —
+a concurrent session rewrites those files in place.
+
+⚠ **The lock carries 8 commit pins, not 9: `agnosai` has none yet.** At the time
+of this change `refs/tags/2.0.6` was **not on the remote** — the commit was pushed,
+the tag was not — so `cyrius deps` could not fetch it and the dep was resolved from
+a locally seeded cache of the tagged tree. The bytes are identical to the tag by
+construction and were hash-checked against it. **A fresh `cyrius deps` after the
+tag is pushed will add the missing commit pin**, and CI cannot resolve this
+dependency until then. That is the one outstanding item on this change.
+
 ### Added — M6 (part 1), the tool viability gate: 2 of 38 resolve
 
 **31 assertions** in `tests/tools.tcyr`; 1,175 total across 24 suites, 0 failed.
